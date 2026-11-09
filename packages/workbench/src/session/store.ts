@@ -947,8 +947,12 @@ return create<WorkbenchState>((set, get) => ({
       set(state => {
         const detail = state.sessions.find(s => s.id === state.activeSessionId);
         const sessions = detail && !row.sessions.some(s => s.id === detail.id) ? [...row.sessions,detail] : row.sessions;
+        // The directory owns the source facts: its confirmation time and its failure.
+        const failed = ["offline","timeout","unavailable","rateLimited"].includes(row.state);
         return {sessions,workspaces:row.workspaces,activitySessions:row.activeSessions ?? [],activityComplete:Boolean(row.activityComplete),
-          sessionsLoaded:!row.refreshing,sessionsComplete:!row.nextCursor,sessionsError:false,sessionsCheckedAtMs:Date.now()};
+          sessionsLoaded:!row.refreshing,sessionsComplete:!row.nextCursor,sessionsError:failed,
+          ...(failed ? {sessionsFailedAtMs:Date.parse(row.observedAt) || Date.now()} : {}),
+          sessionsCheckedAtMs:row.updatedAt ? Date.parse(row.updatedAt) : state.sessionsCheckedAtMs};
       });
     }));
     let wasReady = false;

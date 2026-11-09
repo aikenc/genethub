@@ -67,14 +67,22 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
   const [pinnedClosed, setPinnedClosed] = useState(false);
   const source = useRef<MachineSummaryDirectory>();
   const mounted = useRef(false), initialized = useRef(false), lock = useRef(false), refreshLock = useRef(false);
+  // A request made during a refresh runs once afterwards instead of being dropped.
+  const pendingRefresh = useRef<boolean | null>(null);
   const navigation = useRef(0);
   const navigationController = useRef<AbortController>();
   const refresh = useCallback(async (force = false) => {
-    if (!source.current || lock.current || refreshLock.current) return;
+    if (!source.current || lock.current) return;
+    if (refreshLock.current) { pendingRefresh.current = Boolean(pendingRefresh.current) || force; return; }
     refreshLock.current = true; setRefreshing(true); setError("");
-    try { await source.current.refresh(undefined,undefined,undefined,force); }
+    try {
+      for (let next: boolean | null = force; next !== null && source.current; next = pendingRefresh.current) {
+        pendingRefresh.current = null;
+        await source.current.refresh(undefined,undefined,undefined,next);
+      }
+    }
     catch (e) { if (mounted.current && !(e instanceof DOMException && e.name === "AbortError")) setError("目录刷新未完成，请重试；已读取的内容保留。"); }
-    finally { refreshLock.current = false; if (mounted.current) setRefreshing(false); }
+    finally { refreshLock.current = false; pendingRefresh.current = null; if (mounted.current) setRefreshing(false); }
   }, []);
   useEffect(() => {
     mounted.current = true; initialized.current = false;
@@ -195,6 +203,20 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     ? `${g.workspace.name} ${g.workspace.root}`.toLocaleLowerCase().includes(q) && (projectFilter === "all" || (projectFilter === "builtin" ? g.workspace.builtin : g.allChildren.length > 0))
     : !narrowed || g.direct.length + g.inside.length > 0))
     .sort((a,b) => b.time - a.time || a.workspace.name.localeCompare(b.workspace.name));
+  // The machines the user is looking at keep their live subscriptions first.
+  const preferredKey = [...new Set([
+    ...(machineId ? [machineId] : []),
+    ...directory.sources.filter(row => row.target.deviceHandle && row.target.deviceHandle === client?.identity?.machineId).map(row => row.target.id),
+    ...groups.filter(g => internals.has(g.key)).flatMap(g => g.children.flatMap(child => child.row ? [child.row.target.id] : [])),
+  ])].sort().join("\n");
+  const preferred = useRef("");
+  useEffect(() => {
+    const before = new Set(preferred.current ? preferred.current.split("\n") : []);
+    const ids = preferredKey ? preferredKey.split("\n") : [];
+    preferred.current = preferredKey;
+    source.current?.prefer(ids);
+    if (initialized.current && ids.some(id => !before.has(id))) void refresh();
+  }, [preferredKey, refresh]);
   const flatRows = groups.filter(g => !g.allChildren.length).flatMap(g => g.direct.map(session => ({row:g.row,session}))).sort((a,b) => byTime(a.session,b.session));
   const visibleSessions = [...flatRows,...groups.filter(g => g.allChildren.length && g.show).flatMap(g => [
     ...g.direct.slice(0,rootLimits[g.key] ?? 5).map(session => ({row:g.row,session})),...(g.internalOpen ? g.childRows : []),

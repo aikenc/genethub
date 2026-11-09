@@ -1,7 +1,7 @@
 import type { CatalogScopeError, CatalogBatch, SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import type { Endpoint, Target } from "./target";
 import { type Client, type ClientOptions } from "./client";
-import { MachineConnections, accessDenied } from "./machine-connections";
+import { MachineConnections, accessDenied, type MachineRetireReason } from "./machine-connections";
 import { readActivitySessions, readSessionPage } from "./session-pages";
 import { directoryCacheEpoch, onDirectoryCachesCleared, readDirectoryCache, writeDirectoryCache, removeDirectoryCache } from "./summary-directory-cache";
 
@@ -82,6 +82,9 @@ const CONCURRENCY = 2;
 // A cold large metadata catalog can take seconds in the guest. Background
 // reads remain bounded and leave foreground connection capacity available.
 const SOURCE_TIMEOUT_MS = 45_000;
+// Background refreshes do not redial a source that just timed out or was
+// unreachable; an explicit or preferred refresh always retries it.
+const RETRY_BACKOFF_MS = [60_000, 120_000, 300_000];
 
 /** A bounded, read-only compatibility directory; business data stays on its source. */
 export class MachineSummaryDirectory {
@@ -95,6 +98,11 @@ export class MachineSummaryDirectory {
   private rows: MachineSummary[] = [];
   private includeArchived = false;
   private rotation = 0;
+  private preferredIds = new Set<string>();
+  private attempted = new Set<string>();
+  private retries = new Map<string, {at: number; step: number}>();
+  /** Sources the user is looking at: read first, retried immediately and displaced last. */
+  prefer(ids: Iterable<string>): void { this.preferredIds = new Set(ids); }
   setIncludeArchived(value: boolean): void {
     if (value !== this.includeArchived) {
       this.controller?.abort(); this.generation++;
@@ -105,7 +113,9 @@ export class MachineSummaryDirectory {
   }
   private observer: ((value: SummaryDirectory) => void) | null = null;
   private observers = new Set<(value: SummaryDirectory) => void>();
-  private watches = new Map<string, {client: Client; stop():void; ready:Promise<void>; repair?:Promise<void>}>();
+  /** head: the newest catalog snapshot is confirmed with its first history page. */
+  private watches = new Map<string, {client: Client; stop():void; ready:Promise<void>; head?:Promise<void>; pass?:number}>();
+  private backingOff(id: string): boolean { return (this.retries.get(id)?.at ?? 0) > Date.now(); }
   private cacheScope = "";
   private cacheEpoch = directoryCacheEpoch();
   private hydrated = new Set<string>();
@@ -177,6 +187,8 @@ export class MachineSummaryDirectory {
       this.rotation = (start + scheduled.length) % Math.max(eligible.length, 1);
       const activeKeys = new Set(scheduled.map(target => target.id));
       for (const row of this.rows) if (!targets.some(target => sameMachine(target,row.target))) this.deny(row);
+      const held = new Set<string>();
+      const prior = new Map<string, Pick<MachineSummary, "state" | "stateSource" | "observedAt">>();
       const rows = targets.map((target): MachineSummary => {
         // Retain the most recent outcome, including a failed read. A retry must
         // not resurrect an older healthy state before the source answers.
@@ -187,6 +199,11 @@ export class MachineSummaryDirectory {
           this.hydrated.add(target.id);
         }
         const checking = activeKeys.has(target.id) && target.online !== false;
+        if (previous) prior.set(target.id, {state: previous.state, stateSource: previous.stateSource, observedAt: previous.observedAt});
+        if (checking && previous && previous.target.id === target.id && !force && !this.preferredIds.has(target.id) && this.backingOff(target.id)) {
+          held.add(target.id);
+          return Object.assign(previous, {target, refreshing: false});
+        }
         const confirmed = checking && (previous?.state === "ready" || previous?.state === "partial");
         const next: MachineSummary = {
         ...previous,
@@ -208,7 +225,8 @@ export class MachineSummaryDirectory {
         }
       }));
       const emit = () => { if (!controller.signal.aborted && this.generation === generation) this.emit(); };
-      const pendingRows = rows.filter(row => activeKeys.has(row.target.id)).sort((a,b) => Number(this.connections.hasReady(b.target)) - Number(this.connections.hasReady(a.target)));
+      const rank = (row: MachineSummary) => (this.preferredIds.has(row.target.id) ? 2 : 0) + (this.connections.hasReady(row.target) ? 1 : 0);
+      const pendingRows = rows.filter(row => activeKeys.has(row.target.id) && !held.has(row.target.id)).sort((a,b) => rank(b) - rank(a));
       let index = 0;
       emit();
       await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
@@ -219,16 +237,31 @@ export class MachineSummaryDirectory {
           if (row.state === "offline") continue;
           if (row.state === "waiting") row.state = "loading";
           emit();
+          const id = row.target.id;
+          // Every source gets one read; afterwards only the user's sources may
+          // close another source's live subscription to make room.
+          const displace = force || this.preferredIds.has(id) || !this.attempted.has(id);
+          this.attempted.add(id);
           try {
-            const value = await this.read(row.target, controller.signal, force);
+            const value = await this.read(row.target, controller.signal, force, displace);
             if (controller.signal.aborted || this.generation !== generation) return;
             if (!this.canPublish(row)) { emit(); continue; }
+            this.retries.delete(id);
             Object.assign(row, value, { refreshing: false, cached: false, state: (value.nextCursor || (value.workspaceTotal ?? 0) > MAX_ITEMS_PER_SOURCE || row.catalogErrors?.length) ? "partial" : "ready", stateSource: "daemon", observedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
             if (row.catalogRevision === undefined) this.dirtyCache.add(row.target.id);
           } catch (error) {
             if (controller.signal.aborted || this.generation !== generation) return;
             if (!this.canPublish(row)) { emit(); continue; }
+            if ((error as {code?: string})?.code === "capacity") {
+              // Not a source failure: the last confirmed state remains.
+              Object.assign(row, prior.get(id) ?? {state: "notChecked"}, {refreshing: false});
+              emit(); continue;
+            }
             row.refreshing = false; row.activityComplete = false; row.state = classify(error); row.stateSource = "request"; row.observedAt = new Date().toISOString();
+            if (row.state === "timeout" || row.state === "unavailable") {
+              const step = Math.min((this.retries.get(id)?.step ?? -1) + 1, RETRY_BACKOFF_MS.length - 1);
+              this.retries.set(id, {step, at: Date.now() + RETRY_BACKOFF_MS[step]!});
+            }
             // An authority rejection invalidates cached content immediately.
             if (row.state === "denied") { this.deny(row); }
           }
@@ -327,7 +360,7 @@ export class MachineSummaryDirectory {
     this.dirtyCache.add(row.target.id); this.emit();
   }
   async workspacePage(target: Target, workspaceId: string, cursor: string | null = null) {
-    const page = await this.connections.use(target, client => this.currentPage(target,client,workspaceId,cursor,10), undefined, true);
+    const page = await this.useSource(target, client => this.currentPage(target,client,workspaceId,cursor,10));
     const row = this.rows.find(row => row.target.id === target.id);
     if (row && this.canPublish(row)) {
       if (page.catalogRevision !== undefined && page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
@@ -341,12 +374,43 @@ export class MachineSummaryDirectory {
     const row = this.rows.find(row => row.target.id === target.id);
     if (!row?.nextCursor || !this.canPublish(row)) return;
     const cursor = row.nextCursor;
-    const page = await this.connections.use(target, client => this.currentPage(target,client,null,cursor,100), signal, true);
+    const page = await this.useSource(target, client => this.currentPage(target,client,null,cursor,100), signal);
     if (this.disposed || signal?.aborted || !this.canPublish(row) || row.nextCursor !== cursor) return;
     if (page.catalogRevision !== undefined && page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
     row.sessionTotal = row.sessions.length;
     row.nextCursor = page.nextCursor;
     row.state = page.nextCursor ? "partial" : "ready";
+    this.emit();
+  }
+  /** The only way this directory reaches a source: bind it, then keep its subscription live. */
+  private useSource<T>(target: Target, action: (client: Client) => Promise<T>, signal?: AbortSignal, displace = true, follow = true): Promise<T> {
+    return this.connections.use(target, async client => {
+      clientSources.set(client, {
+        read: () => this.rows.find(row => sameMachine(row.target,target)),
+        removed: ids => this.acceptWorkspaceRemoval(target,ids),
+        session: summary => this.acceptSessionSummary(target,summary),
+      });
+      target.deviceHandle ??= client.identity?.machineId;
+      target.fingerprint ??= client.identity?.fingerprint;
+      const row = this.rows.find(row => row.target.id === target.id);
+      if (follow && row && this.canPublish(row) && client.identity?.features?.includes("catalog.sync.v1")) {
+        // A page read still answers from the source if the directory topic is recovering.
+        try { await this.follow(target, client, false); }
+        catch (error) { if (accessDenied(error)) throw error; }
+      }
+      return action(client);
+    }, signal, true, displace);
+  }
+  /** The pool is closing this source's client; keep its last state as a snapshot. */
+  private retire(id: string, client: Client, reason: MachineRetireReason): void {
+    const watch = this.watches.get(id);
+    if (!watch || watch.client !== client || reason === "denied") return;
+    this.watches.delete(id); watch.stop(); clientSources.delete(client);
+    const row = this.rows.find(row => row.target.id === id);
+    if (!row || !this.canPublish(row) || reason === "disposed") return;
+    row.cached = true; row.refreshing = false; row.activityComplete = false;
+    row.catalogGeneration = (row.catalogGeneration ?? 0) + 1;
+    this.diagnostic("summary.source", `retired-${reason}`, row.target.deviceHandle ?? id);
     this.emit();
   }
   private async follow(target: Target, client: Client, force: boolean): Promise<void> {
@@ -356,11 +420,12 @@ export class MachineSummaryDirectory {
       if (client.connectionState !== "ready") throw new Error("目录连接尚未恢复，上次状态仍保留。 ");
       if (force || current()?.cached) await client.refreshCatalog();
       else await watch.ready;
-      if (watch.repair) await watch.repair;
+      await this.headOf(watch);
       if (current()?.cached) throw new Error("目录尚未恢复，上次状态仍保留。");
       return;
     }
     watch?.stop();
+    this.watches.delete(target.id);
     const row = current()!;
     const changedInstance = row.daemonInstanceId && row.daemonInstanceId !== client.identity?.daemonInstanceId;
     row.daemonInstanceId = client.identity?.daemonInstanceId;
@@ -375,7 +440,8 @@ export class MachineSummaryDirectory {
           .map(w => ({id:w.id,etag:row!.workspaceEtags![w.id]!}))};
       },
       onUnavailable: error => {
-        const row = current(); if (!row || !this.canPublish(row)) return;
+        const row = current(), owner = this.watches.get(target.id);
+        if (!row || !this.canPublish(row) || owner && owner.client !== client) return;
         row.activityComplete=false; row.catalogGeneration=(row.catalogGeneration ?? 0)+1;
         row.refreshing=!error && client.connectionState === "ready"; row.cached=true;
         if (error && client.connectionState === "ready") row.state=classify(error);
@@ -384,15 +450,19 @@ export class MachineSummaryDirectory {
       onBatch: batch => {
         const row = current(); if (!row || !this.canPublish(row) || this.watches.get(target.id)?.client !== client) return;
         this.applyCatalog(row,batch);
-        if (batch.complete && (batch.snapshot || batch.removedWorkspaces.length > 0)) {
-          void this.repairVisible(target,client).catch(error => { if (this.canPublish(row) && this.watches.get(target.id)?.client === client) {row.refreshing=false;row.state=classify(error);this.emit();} });
-        }
+        if (batch.complete && !batch.snapshot && !row.cached) this.confirm(row);
+        if (batch.complete && (batch.snapshot || batch.removedWorkspaces.length > 0)) this.repairVisible(target,client);
         this.emit();
       },
     });
-    watch = {client, ...subscription}; this.watches.set(target.id,watch);
-    try {await watch.ready; if (watch.repair) await watch.repair;}
-    catch(error) {if (client.connectionState === "closed") {watch.stop();this.watches.delete(target.id);} throw error;}
+    const release = this.connections.retain(client, {
+      retired: reason => this.retire(target.id, client, reason),
+      preferred: () => this.preferredIds.has(target.id),
+    });
+    watch = {client, ready: subscription.ready, stop: () => {subscription.stop(); release?.();}};
+    this.watches.set(target.id,watch);
+    try {await watch.ready; await this.headOf(watch);}
+    catch(error) {if (client.connectionState === "closed" && this.watches.get(target.id) === watch) {watch.stop();this.watches.delete(target.id);} throw error;}
   }
 
   private applyCatalog(row: MachineSummary, batch: CatalogBatch): void {
@@ -449,50 +519,74 @@ export class MachineSummaryDirectory {
     throw new Error("目录正在变化，请重试此页。");
   }
 
-  private async repairVisible(target: Target, client: Client): Promise<void> {
-    const watch=this.watches.get(target.id);
-    if (!watch || watch.client !== client) return;
-    if (watch.repair) return watch.repair;
-    const operation=(async () => {
-      const row=this.rows.find(row => row.target.id === target.id);
-      if (!row || !this.canPublish(row)) return;
+  /** A newer snapshot supersedes an older confirmation pass. */
+  private async headOf(watch: {head?: Promise<void>}): Promise<void> {
+    for (let head = watch.head; head; head = watch.head) { await head; if (watch.head === head) return; }
+  }
+  private confirm(row: MachineSummary): void {
+    row.cached=false; row.refreshing=false; row.stateSource="daemon"; row.observedAt=new Date().toISOString();
+    row.state=row.nextCursor || row.catalogErrors?.length ? "partial" : "ready";
+    this.retries.delete(row.target.id);
+  }
+
+  /** Confirms the newest snapshot after its first history page, then fills project previews. */
+  private repairVisible(target: Target, client: Client): void {
+    const watch=this.watches.get(target.id), row=this.rows.find(row => row.target.id === target.id);
+    if (!watch || watch.client !== client || !row || !this.canPublish(row)) return;
+    const pass=(watch.pass ?? 0)+1; watch.pass=pass;
+    const live = () => this.canPublish(row) && this.watches.get(target.id) === watch && watch.pass === pass;
+    let confirmed!: () => void;
+    watch.head=new Promise<void>(resolve => {confirmed=resolve;});
+    const fail = (error: unknown) => {
+      if (!live()) return;
+      if (classify(error) === "denied") {this.deny(row); this.emit();}
+      else this.diagnostic("summary.repair", classify(error), target.deviceHandle ?? target.id);
+    };
+    void (async () => {
+      let head = true;
       if (!row.catalogErrors?.length) {
-        const page=await this.currentPage(target,client,null,null,100);
-        if (page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
-        row.nextCursor=page.nextCursor;
+        try {
+          const page=await this.currentPage(target,client,null,null,100);
+          if (page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
+          if (live()) row.nextCursor=page.nextCursor;
+        } catch (error) {
+          if (accessDenied(error)) throw error;
+          fail(error); head=false;
+        }
       }
+      if (!live()) return;
+      // A complete catalog confirms the source; a failed history page leaves it partial.
+      this.confirm(row);
+      if (!head) row.state="partial";
+      this.emit(); confirmed();
       const bad = new Set(row.catalogErrors?.map(e => e.workspaceId));
       const scopes=row.workspaces.filter(w => !bad.has(w.id) && (row.catalogErrors?.length || row.projectPages?.[w.id] || !w.agentSpace?.parentWorkspaceId && row.workspaces.some(c => c.agentSpace?.parentWorkspaceId === w.id))).slice(0,32);
       for (const workspace of scopes) {
-        const page=await this.currentPage(target,client,workspace.id,null,row.projectPages?.[workspace.id] ? 10 : 5);
-        if (page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
-        row.projectPages={...row.projectPages,[workspace.id]:{nextCursor:page.nextCursor,error:page.error}};
-      }
-      if (this.canPublish(row) && this.watches.get(target.id)?.client === client) {
-        row.refreshing=false; row.cached=false;
-        row.state=row.nextCursor || row.catalogErrors?.length ? "partial" : "ready";
+        if (!live()) return;
+        // One project's slow or failed preview belongs to that project, not to the source.
+        let entry: {nextCursor: string | null; error?: string | null};
+        try {
+          const page=await this.currentPage(target,client,workspace.id,null,row.projectPages?.[workspace.id] ? 10 : 5);
+          if (page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
+          entry={nextCursor:page.nextCursor,error:page.error};
+        } catch (error) {
+          if (accessDenied(error) || (error as Error)?.name === "AbortError") throw error;
+          entry={nextCursor:row.projectPages?.[workspace.id]?.nextCursor ?? null,error:error instanceof Error ? error.message : String(error)};
+        }
+        if (!live()) return;
+        row.projectPages={...row.projectPages,[workspace.id]:entry};
         this.emit();
       }
-    })();
-    watch.repair=operation;
-    try {await operation;}
-    finally {if (watch.repair === operation) watch.repair=undefined;}
+    })().catch(fail).finally(() => confirmed());
   }
 
-  private async read(target: Target, signal: AbortSignal, force = false): Promise<Partial<MachineSummary>> {
+  private async read(target: Target, signal: AbortSignal, force = false, displace = true): Promise<Partial<MachineSummary>> {
     const reading = new AbortController();
     const cancel = () => reading.abort(signal.reason);
     signal.addEventListener("abort", cancel, { once: true });
     if (signal.aborted) cancel();
     const timer = setTimeout(() => reading.abort(Object.assign(new Error("summary source timed out"), { code: "timeout" })), SOURCE_TIMEOUT_MS);
-    const operation = this.connections.use(target, async client => {
-      clientSources.set(client, {
-        read: () => this.rows.find(row => sameMachine(row.target,target)),
-        removed: ids => this.acceptWorkspaceRemoval(target,ids),
-        session: summary => this.acceptSessionSummary(target,summary),
-      });
-      target.deviceHandle ??= client.identity?.machineId;
-      target.fingerprint ??= client.identity?.fingerprint;
+    const operation = this.useSource(target, async client => {
       if (client.identity?.features?.includes("catalog.sync.v1")) {
         await this.follow(target,client,force);
         const row = this.rows.find(row => row.target.id === target.id)!;
@@ -535,7 +629,7 @@ export class MachineSummaryDirectory {
         sessions: [...new Map([...page.sessions, ...previews].map(s => [s.id,s])).values()], workspaces: workspaces.data,
         sessionTotal: page.sessions.length, workspaceTotal: workspaces.data.length, nextCursor: page.nextCursor,
         version: client.identity?.daemonVersion, projectPages };
-    }, reading.signal, true);
+    }, reading.signal, displace, false);
     // Cancellation discards this reader, never a client that other views use.
     const stopped = new Promise<never>((_, reject) => {
       const abort = () => reject(reading.signal.reason ?? new DOMException("Cancelled", "AbortError"));

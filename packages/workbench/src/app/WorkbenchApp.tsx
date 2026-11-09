@@ -227,7 +227,8 @@ export function App({
   }, [connections]);
   useEffect(() => {
     const media = window.matchMedia?.(`(min-width: ${WORKBENCH_SPLIT_WIDTH}px)`);
-    const update = () => connections.setLimit(media?.matches === false ? 3 : 4);
+    // Each open directory source holds one client for its live subscription.
+    const update = () => connections.setLimit(media?.matches === false ? 4 : 8);
     update(); media?.addEventListener?.("change", update);
     return () => media?.removeEventListener?.("change", update);
   }, [connections]);

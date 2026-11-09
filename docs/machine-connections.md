@@ -12,12 +12,19 @@ fresh ticket. All returned clients are checked against the independently known
 machine handle and fingerprint, including after reconnect. The initial default
 connection is matched to the authoritative directory after its handshake.
 
-The page retains up to four clients on desktop and three on mobile. Live leases
-are pinned. Idle clients expire after 60 seconds or are evicted first when the
-budget fills. A fully occupied pool rejects another acquisition with a retryable
-visible error rather than closing an active conversation. One aborted summary
-reader cannot close a client used by another consumer. Opening is bounded by a
-10 second deadline; directory RPCs use the same per-request deadline without
+The page retains up to eight clients on desktop and four on mobile. Live leases
+are pinned. A directory source with a live `catalog.sync` subscription holds its
+client (`MachineConnections.retain`): a held client does not expire while idle,
+and the pool notifies the holder before it closes that client. Unheld idle clients
+expire after 60 seconds and are evicted first when the budget fills; held clients
+are displaced only by a foreground lease, a source the user is looking at, or the
+first read of a never-read source, least recently used and non-preferred first.
+Other background reads report a capacity outcome that keeps the source's last
+snapshot instead of closing a live subscription. A fully occupied pool rejects
+another acquisition with a retryable visible error rather than closing an active
+conversation. One aborted summary reader cannot close a client used by another
+consumer. Opening is bounded by a 10 second deadline, and closing a client cancels
+its pending redial; directory RPCs use the same per-request deadline without
 closing another consumer's client. Other requests retain existing delivery semantics.
 
 Only a foreground lease enables RTC and prewarms the large-data companion, subject to the user's existing preference.
@@ -50,8 +57,15 @@ source stays usable during a normal refresh. A failed read remains uncertain
 until a subsequent successful read; starting a retry cannot revive old healthy
 status. Genuine offline/timeout/denial outcomes still change the source state.
 Offline snapshots are dated and unknown; an authorization rejection clears them.
-This is not the separately proposed session-change push protocol or an exact
-activity-count API.
+A complete catalog snapshot confirms a source; root-conversation previews and
+history pages follow without delaying it, and a slow or failed preview is shown
+on its own project with a retry. A retired subscription shows its last snapshot,
+not an in-progress refresh, and the next page or history read on that source
+reopens the subscription before reading. After a timeout or unreachable result,
+background refreshes skip that source for 60, 120, then 300 seconds; an explicit
+refresh, the machine filter, the active machine and opened team internals retry
+it at once. A refresh requested while one runs is coalesced and runs afterwards.
+This is not an exact activity-count API.
 
 The machine filter uses a compact trigger with an ellipsized machine name. Its
 bounded menu lists source status, daemon version and loaded counts on separate
