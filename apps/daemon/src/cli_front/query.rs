@@ -876,13 +876,19 @@ async fn execute(
         Query::AccessStatus | Query::AccessRequest { .. } => {
             let rpc = connect_selected(selection).await?;
             match command {
-                Query::AccessStatus => match rpc.call(Request::AccessList).await.map_err(rpc_error)? {
-                    Reply::Access(report) => Ok(("access.status", json!(report))),
-                    reply => Err(unexpected_reply("access status", &reply)),
-                },
+                Query::AccessStatus => {
+                    match rpc.call(Request::AccessList).await.map_err(rpc_error)? {
+                        Reply::Access(report) => Ok(("access.status", json!(report))),
+                        reply => Err(unexpected_reply("access status", &reply)),
+                    }
+                }
                 Query::AccessRequest { ids } => {
                     let ids = (!ids.is_empty()).then_some(ids);
-                    match rpc.call(Request::AccessRequest { ids }).await.map_err(rpc_error)? {
+                    match rpc
+                        .call(Request::AccessRequest { ids })
+                        .await
+                        .map_err(rpc_error)?
+                    {
                         Reply::AccessSetup(result) => Ok(("access.request", json!(result))),
                         reply => Err(unexpected_reply("access request", &reply)),
                     }

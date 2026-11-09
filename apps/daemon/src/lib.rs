@@ -3,6 +3,7 @@
 //! Exposed as a library as well as a binary so integration tests can start a
 //! real daemon in-process instead of asserting against a mock of one.
 
+pub(crate) mod access;
 pub mod adapter;
 pub(crate) mod agent_routing;
 pub mod agent_space;
@@ -17,7 +18,6 @@ pub mod config;
 pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
-pub(crate) mod access;
 pub(crate) mod file_access;
 pub mod files;
 pub(crate) mod fs_cap;
