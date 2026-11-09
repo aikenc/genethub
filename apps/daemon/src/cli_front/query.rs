@@ -1269,14 +1269,22 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
         ConnectError::Rejected(ProtocolError {
             code: ErrorCode::Unauthorized,
             message,
-        }) => CliFailure {
-            code: "credentialRevoked",
+        })
+        | ConnectError::Refused {
+            reason: Refusal::Credential,
+            message,
+        } => CliFailure {
+            code: "credentialRejected",
             message: format!(
-                "{machine_id} no longer accepts this installation's credential ({message}); \
-                 pair again with a fresh invite"
+                "connection admission or authentication for {machine_id} was rejected ({message}); \
+                 this does not prove device revocation. Hub enrollment and target connection \
+                 authentication are separate; inspect the route and peer authentication failure \
+                 before requesting re-pairing or changing authorization"
             ),
             retryable: false,
-            details,
+            details: Some(
+                json!({"machineId": machine_id, "stage": "remoteAdmission", "reason": "credentialRejected"}),
+            ),
             exit: super::EXIT_FAILED,
         },
         ConnectError::Rejected(error) => rpc_error(RpcError::Remote(error)),
@@ -1294,17 +1302,36 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
             exit: super::EXIT_UNREACHABLE,
         },
         ConnectError::Refused {
-            reason: Refusal::Credential,
+            reason: Refusal::Revoked,
             message,
         } => CliFailure {
             code: "credentialRevoked",
             message: format!(
-                "{machine_id} no longer accepts this installation's credential ({message}); \
-                 pair again with a fresh invite"
+                "the authority revoked the route or endpoint for {machine_id} ({message}); \
+                 check the revocation with the machine owner. Re-pair only if device access \
+                 was revoked and the user authorizes restoring it"
             ),
             retryable: false,
-            details,
+            details: Some(
+                json!({"machineId": machine_id, "stage": "remoteAdmission", "reason": "revoked"}),
+            ),
             exit: super::EXIT_FAILED,
+        },
+        ConnectError::Refused {
+            reason: Refusal::Expired,
+            message,
+        } => CliFailure {
+            code: "credentialExpired",
+            message: format!(
+                "connection admission for {machine_id} expired ({message}); establish a new \
+                 connection using the current identity and a fresh ticket. Do not reuse the \
+                 expired ticket; expiry alone does not require device re-pairing"
+            ),
+            retryable: true,
+            details: Some(
+                json!({"machineId": machine_id, "stage": "remoteAdmission", "reason": "expired"}),
+            ),
+            exit: super::EXIT_UNREACHABLE,
         },
         ConnectError::Refused { message, .. } => CliFailure {
             code: "relayUnavailable",

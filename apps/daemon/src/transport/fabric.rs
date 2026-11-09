@@ -1019,9 +1019,12 @@ pub enum Refusal {
     /// Nothing is holding the far end of that route at the moment. Nothing was
     /// spent finding out, so trying again later is free and often right.
     Offline,
-    /// The far end is there and will not accept this credential. Waiting
-    /// changes nothing; pairing again does.
+    /// Admission or authentication failed. This does not prove revocation.
     Credential,
+    /// The authority explicitly revoked the route or endpoint.
+    Revoked,
+    /// The route or endpoint admission expired before the connection opened.
+    Expired,
     /// The relay itself cannot take another route right now.
     Busy,
     /// An answer this build does not recognise.
@@ -1189,16 +1192,19 @@ fn reset_error(code: u64) -> DialError {
             reason: Refusal::Busy,
             message: "the relay is too busy to open another route right now".into(),
         },
-        // RouteDenied from the relay means the ticket names no route; from the
-        // machine it means the peer handshake did not verify. Neither improves
-        // by retrying.
+        // RouteDenied can come from route lookup or peer authentication. It
+        // does not establish that a device was revoked, or needs re-pairing.
         4 => DialError::Refused {
             reason: Refusal::Credential,
             message: "that machine would not accept this credential".into(),
         },
-        8 | 9 => DialError::Refused {
-            reason: Refusal::Credential,
-            message: "the credential behind this route was revoked or has expired".into(),
+        8 => DialError::Refused {
+            reason: Refusal::Revoked,
+            message: "the authority revoked this route or endpoint".into(),
+        },
+        9 => DialError::Refused {
+            reason: Refusal::Expired,
+            message: "the route or endpoint admission has expired".into(),
         },
         other => DialError::Refused {
             reason: Refusal::Other,
