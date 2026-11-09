@@ -48,6 +48,7 @@ check("discovery-contracts", "Help and schemas describe real public command beha
   "help creates no sessions, native status schemas describe native facts, transfer schemas accept list responses, invalid filters fail as arguments",
   ["help opens a session", "schema excludes actual response shape", "invalid option reports no target", "capabilities disagree with command schema"],
   async t => workspace(t, async opened => {
+    const sample = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     const before = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100"])).data.sessions.length;
     for (const args of [["session", "--help"], ["agent", "run", "--help"], ["file", "transfer", "--help"]]) {
       t.assertions.assert((await json(opened, args)).type === "help", "command help failed");
@@ -73,6 +74,26 @@ check("discovery-contracts", "Help and schemas describe real public command beha
       const schema = (await json(opened, ["schema", cap.name])).data.command;
       t.assertions.assert(cap.requiresDaemon === schema.requiresDaemon && cap.routable === schema.routable, "capability and schema disagree");
     }
+    const stateSchema = (await json(opened, ["schema", "session.get"])).data.command.outputSchema.properties.data;
+    const state = (await json(opened, ["session", "get", sample])).data;
+    t.assertions.assert(stateSchema.required.includes("summary") && !Object.hasOwn(state, "session"), "default get schema hides the state-reader migration");
+    for (const field of stateSchema.properties.summary.required) {
+      t.assertions.assert(Object.hasOwn(state.summary, field), `state schema requires absent field ${field}`);
+    }
+    const listSchema = (await json(opened, ["schema", "session.list"])).data.command;
+    const dataSchema = listSchema.outputSchema.properties.data;
+    t.assertions.assert(dataSchema.properties.nextCursor.description.includes("--cursor") && dataSchema.properties.cursor.description.includes("--since"), "schema confuses page and sync cursors");
+    t.assertions.assert(listSchema.inputSchema.properties.lean.description.includes("legacy"), "legacy field projection is advertised as a query scope");
+    for (const flags of [[], ["--active", "--include-archived"], ["--workspace", opened.workspaceId, "--since", "start"]]) {
+      const data = (await json(opened, ["session", "list", ...flags])).data;
+      for (const field of dataSchema.required) t.assertions.assert(Object.hasOwn(data, field), `list schema requires absent field ${field}`);
+      const matching = dataSchema.oneOf.filter((variant: {required: string[]; not: {required: string[]}}) =>
+        variant.required.every(field => Object.hasOwn(data, field)) && !variant.not.required.every(field => Object.hasOwn(data, field)));
+      t.assertions.assert(matching.length === 1 && typeof data.complete === "boolean" && Array.isArray(data.sessions), "real list data does not match exactly one published page/sync shape");
+    }
+    const invalidPage = await command(opened, ["session", "list", "--limit", "10", "--label", "tag"]);
+    const filterMessage = records(invalidPage.stdout).at(-1)?.error as {message?: string} | undefined;
+    t.assertions.assert(invalidPage.code === 2 && filterMessage?.message?.includes("--active") && filterMessage.message.includes("filter each returned page"), "filter error has no valid current/history replacement");
     for (const args of [["session", "list", "--source-kind", "typo"], ["file", "transfer", "status", "--unknown"], ["file", "transfer", "status", "one", "two"], ["file", "transfer", "cancel", "--unknown"]]) {
       const refused = await command(opened, args);
       t.assertions.assert(refused.code === 2 && records(refused.stdout).at(-1)?.error?.code === "invalidArgs", "invalid input became an empty result or missing target");
