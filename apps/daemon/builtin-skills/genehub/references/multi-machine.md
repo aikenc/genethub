@@ -37,6 +37,18 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   完整连接没有 `settings` 等逐能力分级；按实际认证、账号/机器归属和连接状态定位失败。
   明确拒绝授权时如实报告；网络故障按返回的可重试信息处理，不要换身份或绕过授权。
 
+### 可重试的跨机失败
+
+经 Hub 的 `--machine` 调用会复用到同一机器的连接，不必为省连接而合并或减少调用。连接失败时：
+
+- `retryable: true`：等 `details.retryAfterMs` 毫秒后原样重试同一命令。提前重试拿到的是同一个失败的复述，
+  `details.reconnected: false`、消息以 `not reconnected:` 开头，并给出 `failedMsAgo` 和剩余等待；
+  这不说明目标仍不可达，也不是新的证据。
+- `routeRefused`（`stage: hostedRoute`）：Hub 刚签发的路由被目标或 relay 暂时拒绝，常见于目标或 relay 刚重启。
+  它不是撤销，不要重新配对、`device invite`、换身份，也不要把团队任务改派到别的机器。
+- 只有 `retryable: false` 的失败（如 `credentialRevoked`）才是授权或配置问题，按消息如实报告，不要循环重试。
+- 连续多次等待后重试仍失败，报告最后一次真实失败（`reconnected` 不为 `false` 的那次）和已等待时长。
+
 ## 连接失败的判断
 
 `hub login` 的 `paired/online` 证明该机加入 Hub；`context --machine <精确 ID>` 成功才证明本次
@@ -73,7 +85,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。项目历史同样使用 `--workspace <id> --limit 50` 分页读完；所有缺少 `--limit` 的历史查询已禁用，`--workspace`、`--lean`、`--label` 和 `--source-kind` 不能替代分页。遇到 `unboundedQueryDisabled` 应修改原脚本的读取方式，保留原任务、会话 ID 和回执，不原样重试。查询失败表示未知，不能据此重新派单。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。项目历史同样使用 `--workspace <id> --limit 50` 分页读完；默认目录只返回最近 50 条和明确的 complete/nextCursor；旧隐式完整列表查询已禁用，`--workspace`、`--lean`、`--label` 和 `--source-kind` 不能替代分页。遇到 `unboundedQueryDisabled` 应修改原脚本的读取方式，保留原任务、会话 ID 和回执，不原样重试。查询失败表示未知，不能据此重新派单。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
@@ -97,7 +109,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   断开而停止。
 - 无人值守时，权限请求默认被拒，除非显式 `--auto-approve`；Agent 提问总会停下等待回答
   （`session respond`）。不要为了让任务继续而默认加 `--auto-approve`，先确认任务范围。
-- 用 `--no-wait` 派发后，用 `session get <id> --summary` 查原任务状态；目录用现有活动查询。轻量模式要求目标声明 `session.summary.v1`，不支持就明确要求升级，不回退读取完整历史；不要把派发成功当成完成。
+- 用 `--no-wait` 派发后，用 `session get <id>` 查原任务状态；目录用现有活动查询。轻量模式要求目标声明 `session.summary.v1`，不支持就明确要求升级，不回退读取完整历史；不要把派发成功当成完成。
 - 把任务派给持有该资源（代码、许可、GPU、外设）的机器，不要把工作区搬到别处。
 - 其他可路由的只读命令：`workspace list/show`、`session get/inspect/narrative/rounds/context`。
 

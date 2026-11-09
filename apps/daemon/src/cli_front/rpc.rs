@@ -10,6 +10,7 @@ use genehub_proto::{
     HelloResult, HubTicket, ProtocolError, Reply, Request, SequencedEvent, ShellFrame,
     ShellRunRequest, TransportKind,
 };
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::router::{self, SideEffect};
@@ -89,11 +90,14 @@ pub enum Payload {
 
 pub struct Rpc {
     inner: Inner,
+    /// Other commands may be using the same connection. Its event stream
+    /// belongs to the peer, not to one command, so a shared one never opens it.
+    shared: bool,
 }
 
 enum Inner {
-    Local(Local),
-    Remote(rpc_wire::Rpc),
+    Local(Box<Local>),
+    Remote(Arc<rpc_wire::Rpc>),
 }
 
 struct Local {
@@ -144,12 +148,13 @@ impl Rpc {
         };
         let (event_tx, events) = mpsc::unbounded_channel();
         Ok(Self {
-            inner: Inner::Local(Local {
+            inner: Inner::Local(Box::new(Local {
                 state,
                 hello,
                 events: Mutex::new(events),
                 event_tx,
-            }),
+            })),
+            shared: false,
         })
     }
 
@@ -157,7 +162,8 @@ impl Rpc {
         let machine = machine.clone();
         match tokio::spawn(async move { rpc_wire::Rpc::connect_remote(&machine).await }).await {
             Ok(Ok(remote)) => Ok(Self {
-                inner: Inner::Remote(remote),
+                inner: Inner::Remote(Arc::new(remote)),
+                shared: false,
             }),
             Ok(Err(error)) => Err(error.into()),
             Err(join) => Err(ConnectError::Unavailable(format!(
@@ -166,16 +172,30 @@ impl Rpc {
         }
     }
 
-    pub async fn connect_hosted(ticket: &HubTicket) -> Result<Self, ConnectError> {
+    pub(super) fn from_hosted(remote: Arc<rpc_wire::Rpc>) -> Self {
+        Self {
+            inner: Inner::Remote(remote),
+            shared: false,
+        }
+    }
+
+    pub(super) async fn dial_hosted(
+        ticket: &HubTicket,
+    ) -> Result<Arc<rpc_wire::Rpc>, ConnectError> {
         let ticket = ticket.clone();
         match tokio::spawn(async move { rpc_wire::Rpc::connect_hosted(&ticket).await }).await {
-            Ok(Ok(remote)) => Ok(Self {
-                inner: Inner::Remote(remote),
-            }),
+            Ok(Ok(remote)) => Ok(Arc::new(remote)),
             Ok(Err(error)) => Err(error.into()),
             Err(join) => Err(ConnectError::Unavailable(format!(
                 "remote connect task failed: {join}"
             ))),
+        }
+    }
+
+    pub(super) fn shared(remote: Arc<rpc_wire::Rpc>) -> Self {
+        Self {
+            inner: Inner::Remote(remote),
+            shared: true,
         }
     }
 
@@ -197,6 +217,7 @@ impl Rpc {
                     Request::WorkspaceList => "workspace.list",
                     Request::SessionList { .. } => "session.list",
                     Request::SessionPage { .. } => "session.page",
+                    Request::SessionChanges { .. } => "session.changes",
                     _ => "other",
                 };
                 let handled = tokio::spawn(async move {
@@ -230,6 +251,9 @@ impl Rpc {
     pub async fn watch_events(&self) -> Result<(), RpcError> {
         match &self.inner {
             Inner::Local(_) => Ok(()),
+            Inner::Remote(_) if self.shared => Err(RpcError::Transport(
+                "a shared connection carries no event stream; connect a dedicated one".into(),
+            )),
             Inner::Remote(remote) => Ok(remote.watch_events().await?),
         }
     }

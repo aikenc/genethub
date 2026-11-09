@@ -62,8 +62,12 @@ defineSpecialty({
       {machineId:b.client.identity!.machineId,workspaceId:b.workspaceId,name:"共享验证"},
       {machineId:"m_unavailable",workspaceId:"w_unknown",name:"离线岗位"},
     ]}));
-    const catalog=await a.client.call({type:"workspace.list"});
-    t.assertions.assert(catalog?.type==="workspaces"&&catalog.data.find(w=>w.id===a!.workspaceId)?.agentSpace?.members?.[0]?.workspaceId===b.workspaceId,"descriptor references were not projected through workspace.list");
+    // An in-place edit from outside the daemon reaches the unscoped catalog
+    // within its 30s cold look, not on the next call.
+    await t.tools.waitUntil(async()=>{
+      const catalog=await a!.client.call({type:"workspace.list"});
+      return catalog?.type==="workspaces"&&catalog.data.find(w=>w.id===a!.workspaceId)?.agentSpace?.members?.[0]?.workspaceId===b!.workspaceId;
+    },35_000).catch(()=>{throw new Error("descriptor references were not projected through workspace.list within 35s");});
     browser = await openBrowser({ viewport: { width: 1280, height: 900 } }, { trace: false });
     const cookies = (account.cookie() ?? "").split(";").map(part => {
       const at = part.indexOf("="); return { name: part.slice(0,at).trim(), value: part.slice(at+1), url: hub.origin, httpOnly: true, sameSite: "Lax" as const };

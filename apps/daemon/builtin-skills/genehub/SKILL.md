@@ -35,6 +35,9 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 - 先 `context` 确认当前连接到哪台机器；`machine list` 默认合并本机、直连和 Hub 目录；`--reachable`
   是旧别名，`--paired` 只查直连库。**列出、在线都不等于当前身份能到达**：保留失败的真实原因，
   不要换身份或猜别的路径。`machineNotPaired` 表示指定的直连记录不存在，不代表 Hub 目标不可达。
+- 跨机失败 `retryable: true` 时，等 `details.retryAfterMs` 后原样重试，不要重新配对、换身份或改派别的机器；
+  `details.reconnected: false` 表示这次没有真正重连，只是复述刚才的失败。`routeRefused` 也属于这一类。
+
 - Hub 登录/机器在线、目标连接认证、连接后的 OS 操作能力是三个不同事实。认证失败先按
   [多机排障](references/multi-machine.md#连接失败的判断) 核实，不能直接要求重新配对或追加 grants。
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
@@ -48,11 +51,21 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 
 细节、命令形态和排障见 [multi-machine.md](references/multi-machine.md)。
 
-会话列表默认按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
+工作台界面的会话列表按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
 历史未展开不代表空闲；进行中和计数独立读取全部活动页，未确认完整时保留下限／未知，不显示精确零。
-查当前任务用 `session list --active --include-archived`；找历史先用 `session list --limit 50`，需要更多才把返回的 `nextCursor` 原样传给 `--cursor`，同时保留原机器和查询条件。`complete: false` 不代表没有更多结果。
-项目历史也必须用 `--workspace <id> --limit 50` 分页，完整历史需按 `nextCursor` 读至 `complete: true`；按 ID 查状态用 `session get <id> --summary`（返回 `data.summary`，不构造历史视图）；读正文按需使用 genehub-introspect。
-历史查询缺少 `--limit` 会返回 `unboundedQueryDisabled`，`--workspace`、`--lean` 和标签均不能替代分页。遇到此错误，修改原脚本的查询方式再运行，不原样重试；保留原任务、会话 ID 和回执，不重新派单。其他读取失败仍表示未知，不能按零会话处理。
+Agent 的 CLI 按目的读取（与工作台的显示页大小无关）：
+
+| 目的 | CLI 与结果 |
+|---|---|
+| 查已知会话的状态、模型、待答输入 | `session get <id>` → `data.summary`；默认不加载正文，旧 `--summary` 仍可用 |
+| 找会话 | `session list [--workspace <id>]` → 默认最近 50 条摘要；`complete: false` 时按 `nextCursor` 续页，不能把这一页当成全部 |
+| 查当前工作 | `session list --active --include-archived` → 完整活动集合，含归档中尚未结束的义务 |
+| 持续同步项目 | `session list --workspace <id>... --since start`，之后原样使用返回的 cursor；按 reset/removed/complete 更新同一份快照 |
+| 看发生了什么 | 按需 `session narrative` / `session rounds`；需要历史证据与摘要哈希时才用 `session inspect`，详见 genehub-introspect |
+
+目录可用 `--limit 1..100` 调整页大小，续页保持原机器、项目、归档和活动条件。`complete: false` 时，未出现在这一页不能证明会话不存在；需要确定未找到时先读完该范围。已知会话 ID 直接 `get`，无需扫描目录。
+
+旧脚本迁移：`get` 的状态从 `data.session.summary` 改读 `data.summary`；正文改用 narrative/rounds，不把结构变化当作空会话。`--lean` 只是兼容字段选项，需配合显式 `--limit`、`--active` 或 `--since`；裸 `--lean` 会报迁移错误，避免旧脚本静默漏掉历史。标签／来源筛选仅用于不带页大小的 `--active` 查询；历史则逐页读取并在脚本内筛选。修改原查询后再运行，保留原任务、会话 ID 和回执。读取失败表示未知，不能据此重新派单。
 团队对账不能仅凭页面当前显示的记录数判断。
 
 ## 按任务导航

@@ -984,6 +984,163 @@ struct PageCatalog {
     pending: HashSet<PathBuf>,
     errors: HashMap<PathBuf, (Vec<String>, String)>,
     projection: CatalogProjection,
+    /// When each listed session's `meta.json` is next looked at, whether or
+    /// not that file exists yet.
+    watches: HashMap<PathBuf, crate::fs_stamp::Watch>,
+    /// One per physical `sessions/` directory, keyed by that directory.
+    homes: HashMap<PathBuf, HomeSweep>,
+    changes: ChangeLog,
+}
+
+/// Which sessions changed and in what order, so a caller holding a cursor
+/// reads only those instead of listing its scope again.
+#[derive(Default)]
+struct ChangeLog {
+    /// Names this daemon's sequence; a cursor from another one starts over.
+    token: String,
+    seq: u64,
+    last: HashMap<genehub_proto::CatalogSessionRef, u64>,
+    removed: std::collections::VecDeque<(u64, genehub_proto::CatalogSessionRef)>,
+    /// Removals at or below this were forgotten, so an older cursor starts over.
+    floor: u64,
+}
+
+/// Removals kept for cursors that have not caught up yet.
+const REMOVALS_KEPT: usize = 4096;
+
+impl ChangeLog {
+    fn touch(&mut self, session: genehub_proto::CatalogSessionRef) {
+        self.seq += 1;
+        self.last.insert(session, self.seq);
+    }
+
+    fn remove(&mut self, session: genehub_proto::CatalogSessionRef) {
+        self.seq += 1;
+        self.last.remove(&session);
+        self.removed.push_back((self.seq, session));
+        while self.removed.len() > REMOVALS_KEPT {
+            if let Some((seq, _)) = self.removed.pop_front() {
+                self.floor = seq;
+            }
+        }
+    }
+}
+
+/// What changed in a set of projects since a cursor.
+pub(super) struct CatalogChanges {
+    pub changed: Vec<SessionMeta>,
+    pub removed: Vec<genehub_proto::CatalogSessionRef>,
+    pub token: String,
+    pub seq: u64,
+    pub complete: bool,
+    /// The cursor could not be continued; `changed` is the whole scope.
+    pub reset: bool,
+}
+
+/// Directory catalogs are swept, not walked: each pass looks only at paths
+/// that are due. Hot paths are looked at every pass; every other path at
+/// least once per `cold`, which bounds how late a change made by another
+/// process appears in an unscoped view. A scoped read validates its own scope.
+const CATALOG_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+const CATALOG_CADENCE: crate::fs_stamp::Cadence = crate::fs_stamp::Cadence {
+    hot: CATALOG_SWEEP_EVERY,
+    cold: std::time::Duration::from_secs(30),
+    hot_for: std::time::Duration::from_secs(600),
+};
+/// A `sessions/` directory and its tombstones change only when a session is
+/// added or removed. One the platform just touched (a project just opened, a
+/// session just created there) is likely to gain more from other writers, so
+/// it is looked at on every pass for a minute.
+const HOME_CADENCE: crate::fs_stamp::Cadence = crate::fs_stamp::Cadence {
+    hot: CATALOG_SWEEP_EVERY,
+    cold: CATALOG_CADENCE.cold,
+    hot_for: std::time::Duration::from_secs(60),
+};
+const SCOPE_REUSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+type HomeOwners = Vec<(String, String, Vec<String>)>;
+
+fn home_owners(projects: &[(String, WorkspaceHome)]) -> HomeOwners {
+    projects
+        .iter()
+        .map(|(id, home)| (id.clone(), home.project_key.clone(), home.aliases.clone()))
+        .collect()
+}
+
+/// What the last look at one `sessions/` directory and its `tombstones/`
+/// sibling found.
+#[derive(Clone)]
+struct HomeSeen {
+    owners: HomeOwners,
+    listing: Option<MetadataStamp>,
+    sessions: std::collections::BTreeSet<String>,
+    tombstones: Option<MetadataStamp>,
+    deleted: std::collections::BTreeSet<String>,
+}
+
+struct HomeSweep {
+    seen: HomeSeen,
+    listing: crate::fs_stamp::Watch,
+    tombstones: crate::fs_stamp::Watch,
+    validated: Option<std::time::Instant>,
+}
+
+/// One home's share of a sweep pass, decided under the catalog lock.
+struct HomePlan {
+    sessions: PathBuf,
+    projects: Vec<(String, WorkspaceHome)>,
+    /// Never seen, or its owning projects changed: everything is read.
+    prior: Option<HomeSeen>,
+    list: bool,
+    tombstones: bool,
+    entries: Vec<(String, Option<MetadataStamp>, bool)>,
+}
+
+enum Look {
+    Same,
+    Changed(CatalogFile),
+    /// Listed, but its `meta.json` is not there (yet).
+    Missing,
+    /// No longer listed.
+    Gone,
+    Deleted,
+}
+
+struct HomeLooked {
+    sessions: PathBuf,
+    scopes: Vec<String>,
+    seen: HomeSeen,
+    listing_error: Option<(Vec<String>, String)>,
+    /// A deleted session's files are still waiting for their writer.
+    reap_pending: bool,
+    /// Whether this pass looked at the listing and at the tombstones; a pass
+    /// that only looked at some sessions must not postpone either.
+    listed: bool,
+    tombstones_looked: bool,
+    looked: Vec<(PathBuf, Option<MetadataStamp>, Look)>,
+}
+
+#[derive(Default)]
+struct SweepCounts {
+    homes: usize,
+    listings: usize,
+    stats: usize,
+    reads: usize,
+}
+
+/// Session ids with a tombstone in `dir`.
+fn tombstone_names(dir: &Path) -> std::collections::BTreeSet<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Default::default();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let id = name.strip_suffix(".json")?;
+            (!id.is_empty()).then(|| id.to_string())
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -995,20 +1152,7 @@ pub(super) struct CatalogProjection {
     pub workspaces: HashMap<String, String>,
     pub errors: String,
 }
-#[derive(Clone, PartialEq, Eq)]
-struct MetadataStamp {
-    modified: std::time::SystemTime,
-    bytes: u64,
-}
-impl MetadataStamp {
-    fn read(path: &Path) -> Option<Self> {
-        let meta = fs::metadata(path).ok()?;
-        Some(Self {
-            modified: meta.modified().ok()?,
-            bytes: meta.len(),
-        })
-    }
-}
+type MetadataStamp = crate::fs_stamp::Stamp;
 #[derive(Clone)]
 struct CatalogFile {
     stamp: Option<MetadataStamp>,
@@ -1020,8 +1164,220 @@ struct CatalogFile {
 struct CatalogScan {
     files: HashMap<PathBuf, CatalogFile>,
     errors: HashMap<PathBuf, (Vec<String>, String)>,
+    homes: HashMap<PathBuf, HomeSeen>,
 }
 impl PageCatalog {
+    /// This daemon just wrote `meta.json` at `path`: the index already holds
+    /// it, so a sweep need not discover it, but it stays hot for a while.
+    fn wrote(&mut self, path: &Path) {
+        let now = std::time::Instant::now();
+        self.watches
+            .entry(path.to_path_buf())
+            .or_insert_with(|| crate::fs_stamp::Watch::now(now))
+            .wrote(now, CATALOG_CADENCE);
+        let id = path
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned());
+        if let (Some(id), Some(home)) = (
+            id,
+            path.parent()
+                .and_then(Path::parent)
+                .and_then(|sessions| self.homes.get_mut(sessions)),
+        ) {
+            home.seen.sessions.insert(id);
+            home.listing.wrote(now, HOME_CADENCE);
+        }
+    }
+
+    /// Records what one home's share of a sweep found. A write this daemon
+    /// made while the sweep was looking wins over what the sweep saw.
+    fn apply_home(
+        &mut self,
+        home: HomeLooked,
+        write_revision: u64,
+        validated: bool,
+        now: std::time::Instant,
+    ) {
+        use crate::fs_stamp::Watch;
+        let HomeLooked {
+            sessions,
+            scopes,
+            seen,
+            listing_error,
+            reap_pending,
+            listed,
+            tombstones_looked,
+            looked,
+        } = home;
+        let fresh = self
+            .homes
+            .get(&sessions)
+            .is_none_or(|known| known.seen.owners != seen.owners);
+        if fresh {
+            let listed = &seen.sessions;
+            let orphaned: Vec<PathBuf> = self
+                .files
+                .keys()
+                .filter(|path| {
+                    path.parent()
+                        .and_then(Path::parent)
+                        .is_some_and(|dir| dir == sessions)
+                        && path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .is_none_or(|id| !listed.contains(&*id.to_string_lossy()))
+                })
+                .cloned()
+                .collect();
+            for path in orphaned {
+                self.drop_path(&path);
+                self.watches.remove(&path);
+            }
+        }
+        // Homes present at startup were spread by the first load; one that
+        // appears later belongs to a project just opened, so it starts hot.
+        let known = self.homes.contains_key(&sessions);
+        let entry = self
+            .homes
+            .entry(sessions.clone())
+            .or_insert_with(|| HomeSweep {
+                listing: Watch::now(now),
+                tombstones: Watch::now(now),
+                seen: seen.clone(),
+                validated: None,
+            });
+        // Known and fresh means the owners changed.
+        let moved = known && fresh;
+        let listing_changed = !known
+            || listing_error.is_some()
+            || moved
+            || entry.seen.listing != seen.listing
+            || entry.seen.sessions != seen.sessions;
+        let tombstones_changed = !known
+            || reap_pending
+            || moved
+            || entry.seen.tombstones != seen.tombstones
+            || entry.seen.deleted != seen.deleted;
+        if listed {
+            entry
+                .listing
+                .looked(seen.listing.as_ref(), listing_changed, now, HOME_CADENCE);
+        }
+        if tombstones_looked {
+            entry.tombstones.looked(
+                seen.tombstones.as_ref(),
+                tombstones_changed,
+                now,
+                HOME_CADENCE,
+            );
+        }
+        entry.seen = seen;
+        if validated {
+            entry.validated = Some(now);
+        }
+        match listing_error {
+            Some(error) => {
+                self.errors.insert(sessions.clone(), error);
+            }
+            None => {
+                self.errors.remove(&sessions);
+            }
+        }
+        for (path, stamp, look) in looked {
+            if self
+                .files
+                .get(&path)
+                .is_some_and(|file| file.changed > write_revision)
+            {
+                continue;
+            }
+            match look {
+                Look::Same => {
+                    if let Some(watch) = self.watches.get_mut(&path) {
+                        watch.looked(stamp.as_ref(), false, now, CATALOG_CADENCE);
+                    }
+                }
+                Look::Changed(mut file) => {
+                    if file.error.is_some() && file.meta.is_none() {
+                        file.meta = self.files.get(&path).and_then(|old| old.meta.clone());
+                    }
+                    let failed = file.error.clone();
+                    self.put(path.clone(), file);
+                    if let Some(error) = failed {
+                        self.errors.insert(path.clone(), (scopes.clone(), error));
+                    }
+                    // A path seen for the first time is spread like a startup
+                    // find; only a known path whose stamp moved stays hot.
+                    match self.watches.get_mut(&path) {
+                        Some(watch) => watch.looked(stamp.as_ref(), true, now, CATALOG_CADENCE),
+                        None => {
+                            self.watches.insert(
+                                path.clone(),
+                                Watch::first(&path, stamp.as_ref(), now, CATALOG_CADENCE),
+                            );
+                        }
+                    }
+                }
+                Look::Missing => {
+                    let had = self.files.contains_key(&path);
+                    self.drop_path(&path);
+                    match self.watches.get_mut(&path) {
+                        Some(watch) => watch.looked(None, had, now, CATALOG_CADENCE),
+                        None => {
+                            self.watches.insert(
+                                path.clone(),
+                                Watch::first(&path, None, now, CATALOG_CADENCE),
+                            );
+                        }
+                    }
+                }
+                Look::Gone | Look::Deleted => {
+                    self.drop_path(&path);
+                    self.watches.remove(&path);
+                }
+            }
+        }
+    }
+
+    /// A `sessions/` directory no project uses any more.
+    fn forget_home(&mut self, sessions: &Path) {
+        self.homes.remove(sessions);
+        let paths: Vec<PathBuf> = self
+            .files
+            .keys()
+            .filter(|path| path.starts_with(sessions))
+            .cloned()
+            .collect();
+        for path in paths {
+            self.drop_path(&path);
+        }
+        self.watches.retain(|path, _| !path.starts_with(sessions));
+        self.errors.retain(|path, _| !path.starts_with(sessions));
+    }
+
+    /// Takes a path out of every index, reporting the row it held as removed.
+    fn drop_path(&mut self, path: &Path) {
+        if let Some(old) = self.files.remove(path).and_then(|f| f.meta) {
+            let session = genehub_proto::CatalogSessionRef {
+                workspace_id: old.workspace_id.clone(),
+                id: old.id.clone(),
+            };
+            self.changes.remove(session.clone());
+            self.projection.removed.insert(session);
+            self.order
+                .remove(&(old.updated_at_ms, old.id.clone(), old.workspace_id.clone()));
+            if let Some(paths) = self.by_id.get_mut(&old.id) {
+                paths.retain(|p| p != path);
+                if paths.is_empty() {
+                    self.by_id.remove(&old.id);
+                }
+            }
+        }
+        self.pending.remove(path);
+        self.errors.remove(path);
+    }
+
     fn put(&mut self, path: PathBuf, file: CatalogFile) {
         if let Some(old) = self.files.get(&path).and_then(|f| f.meta.as_ref()) {
             if file
@@ -1029,12 +1385,12 @@ impl PageCatalog {
                 .as_ref()
                 .is_none_or(|next| next.id != old.id || next.workspace_id != old.workspace_id)
             {
-                self.projection
-                    .removed
-                    .insert(genehub_proto::CatalogSessionRef {
-                        workspace_id: old.workspace_id.clone(),
-                        id: old.id.clone(),
-                    });
+                let session = genehub_proto::CatalogSessionRef {
+                    workspace_id: old.workspace_id.clone(),
+                    id: old.id.clone(),
+                };
+                self.changes.remove(session.clone());
+                self.projection.removed.insert(session);
             }
             self.order
                 .remove(&(old.updated_at_ms, old.id.clone(), old.workspace_id.clone()));
@@ -1044,12 +1400,12 @@ impl PageCatalog {
         }
         self.pending.remove(&path);
         if let Some(meta) = &file.meta {
-            self.projection
-                .dirty
-                .insert(genehub_proto::CatalogSessionRef {
-                    workspace_id: meta.workspace_id.clone(),
-                    id: meta.id.clone(),
-                });
+            let session = genehub_proto::CatalogSessionRef {
+                workspace_id: meta.workspace_id.clone(),
+                id: meta.id.clone(),
+            };
+            self.changes.touch(session.clone());
+            self.projection.dirty.insert(session);
             self.order.insert(
                 (
                     meta.updated_at_ms,
@@ -1100,15 +1456,15 @@ impl PageCatalog {
             .collect())
     }
 }
-type PageReadKey = (u64, u64);
-type PageReads = crate::blocking::InFlightReads<PageReadKey, ()>;
 
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
     catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Arc<CatalogScan>>>,
-    page_reads: Arc<PageReads>,
+    /// One sweep or catalog load at a time; readers wait for it rather than
+    /// starting another walk.
+    sweep: Arc<tokio::sync::Mutex<()>>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
     catalog_wake: Arc<tokio::sync::Notify>,
 }
@@ -1119,7 +1475,7 @@ impl Store {
             homes,
             coordination: Default::default(),
             catalog_reads: Default::default(),
-            page_reads: Default::default(),
+            sweep: Default::default(),
             page_catalog: Default::default(),
             catalog_wake: Default::default(),
         }
@@ -1475,6 +1831,7 @@ impl Store {
                         changed,
                     },
                 );
+                cache.wrote(&path);
             } else {
                 cache.generation = cache.generation.wrapping_add(1);
                 cache.checked_at = None;
@@ -1637,7 +1994,7 @@ impl Store {
             // A cold read that started before deletion must not put the row
             // back. The next reconciliation drops this empty cache entry.
             cache.put(
-                path,
+                path.clone(),
                 CatalogFile {
                     stamp: None,
                     meta: None,
@@ -1645,6 +2002,16 @@ impl Store {
                     changed,
                 },
             );
+            if let Some(watch) = cache.watches.get_mut(&path) {
+                watch.hurry(std::time::Instant::now());
+            }
+            if let Some(home) = path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(|sessions| cache.homes.get_mut(sessions))
+            {
+                home.tombstones.hurry(std::time::Instant::now());
+            }
         }
         self.catalog_wake.notify_one();
     }
@@ -1658,6 +2025,9 @@ impl Store {
             self.homes.root(id)?;
         }
         self.ensure_catalog().await?;
+        if let Some(id) = workspace {
+            self.validate_scope(id).await?;
+        }
         self.page_catalog
             .lock()
             .map_err(|_| anyhow!("page catalog poisoned"))?
@@ -1675,6 +2045,9 @@ impl Store {
             self.homes.root(id)?;
         }
         self.ensure_catalog().await?;
+        if let Some(id) = workspace {
+            self.validate_scope(id).await?;
+        }
         let cache = self
             .page_catalog
             .lock()
@@ -1706,6 +2079,9 @@ impl Store {
             self.homes.root(id)?;
         }
         self.ensure_catalog().await?;
+        if let Some(id) = workspace {
+            self.validate_scope(id).await?;
+        }
         // The existing projection cache observes each home once. No history
         // row is projected just to discover which sessions have obligations.
         let coordination: Vec<_> = self
@@ -1834,15 +2210,105 @@ impl Store {
 
     pub(super) fn mark_catalog_dirty(&self, workspace: &str, session: &str) {
         if let Ok(mut cache) = self.page_catalog.lock() {
-            cache
-                .projection
-                .dirty
-                .insert(genehub_proto::CatalogSessionRef {
-                    workspace_id: workspace.into(),
-                    id: session.into(),
-                });
+            let session = genehub_proto::CatalogSessionRef {
+                workspace_id: workspace.into(),
+                id: session.into(),
+            };
+            cache.changes.touch(session.clone());
+            cache.projection.dirty.insert(session);
         }
         self.catalog_wake.notify_one();
+    }
+
+    /// A running session published something. Only change cursors care: the
+    /// catalog itself does not change, so nothing is woken.
+    pub(super) fn note_activity(&self, workspace: &str, session: &str) {
+        if let Ok(mut cache) = self.page_catalog.lock() {
+            cache.changes.touch(genehub_proto::CatalogSessionRef {
+                workspace_id: workspace.into(),
+                id: session.into(),
+            });
+        }
+    }
+
+    /// Sessions in `workspaces` that changed after `since` (a sequence from
+    /// this daemon's `token`), oldest change first and at most `limit`. Reads
+    /// the index only: this daemon's own writes are already in it, and other
+    /// writers appear once the background sweep has looked at them.
+    pub(super) async fn catalog_changes(
+        &self,
+        workspaces: &HashSet<String>,
+        since: Option<(&str, u64)>,
+        limit: usize,
+    ) -> Result<CatalogChanges> {
+        self.ensure_catalog().await?;
+        let mut cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        if cache.changes.token.is_empty() {
+            cache.changes.token = uuid::Uuid::new_v4().simple().to_string();
+        }
+        let log = &cache.changes;
+        let continued = since.filter(|(token, seq)| {
+            *token == log.token && *seq <= log.seq && (*seq == 0 || *seq >= log.floor)
+        });
+        let after = continued.map_or(0, |(_, seq)| seq);
+        let mut due: Vec<(u64, &genehub_proto::CatalogSessionRef)> = log
+            .last
+            .iter()
+            .filter(|(session, seq)| **seq > after && workspaces.contains(&session.workspace_id))
+            .map(|(session, seq)| (*seq, session))
+            .collect();
+        due.sort_unstable_by_key(|(seq, _)| *seq);
+        let complete = due.len() <= limit;
+        due.truncate(limit);
+        let upto = if complete {
+            log.seq
+        } else {
+            due.last().map_or(log.seq, |(seq, _)| *seq)
+        };
+        let mut changed = Vec::with_capacity(due.len());
+        let mut listed = HashSet::new();
+        for (_, session) in &due {
+            let meta = cache.by_id.get(&session.id).and_then(|paths| {
+                paths.iter().find_map(|path| {
+                    cache
+                        .files
+                        .get(path)
+                        .and_then(|file| file.meta.as_ref())
+                        .filter(|meta| meta.workspace_id == session.workspace_id)
+                })
+            });
+            if let Some(meta) = meta {
+                listed.insert(*session);
+                changed.push((**meta).clone());
+            }
+        }
+        let removed = if after == 0 {
+            Vec::new()
+        } else {
+            log.removed
+                .iter()
+                .filter(|(seq, session)| {
+                    *seq > after
+                        && *seq <= upto
+                        && workspaces.contains(&session.workspace_id)
+                        && !listed.contains(session)
+                })
+                .map(|(_, session)| session.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        Ok(CatalogChanges {
+            changed,
+            removed,
+            token: log.token.clone(),
+            seq: upto,
+            complete,
+            reset: since.is_some_and(|(_, seq)| seq > 0) && continued.is_none(),
+        })
     }
 
     pub(super) fn catalog_edit<R>(&self, edit: impl FnOnce(&mut CatalogProjection) -> R) -> R {
@@ -1920,180 +2386,568 @@ impl Store {
     }
 
     /// The existing discovery task owns periodic external-file reconciliation.
-    /// Cold readers share this same in-flight scan; durable recovery continues
-    /// to use fresh_metadata_scan independently of presentation snapshots.
+    /// The first pass reads every home; later passes look only at what is due
+    /// (see [`CATALOG_CADENCE`]). Durable recovery continues to use
+    /// fresh_metadata_scan independently of presentation snapshots.
     pub(super) async fn reconcile_catalog(&self) -> Result<()> {
+        let _sweep = self.sweep.lock().await;
         loop {
             let revision = self
                 .homes
                 .revision
                 .load(std::sync::atomic::Ordering::Acquire);
+            let (generation, initialized) = {
+                let cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                if cache.initialized
+                    && cache.homes_revision == revision
+                    && cache
+                        .checked_at
+                        .is_some_and(|at| at.elapsed() < CATALOG_SWEEP_EVERY)
+                {
+                    return Ok(());
+                }
+                (cache.generation, cache.initialized)
+            };
+            let applied = if initialized {
+                self.sweep_catalog(None, revision, generation).await?
+            } else {
+                self.load_catalog(revision, generation).await?
+            };
+            if applied {
+                return Ok(());
+            }
+            // A registry/deletion fence changed during enumeration. Re-read
+            // the current generation rather than returning the abandoned scan.
+        }
+    }
+
+    /// A read scoped to one project sees what other processes changed there,
+    /// at the cost of looking at that project's files at most once per
+    /// [`SCOPE_REUSE`]. Unscoped reads are served from the index as it is.
+    async fn validate_scope(&self, workspace: &str) -> Result<()> {
+        let _sweep = self.sweep.lock().await;
+        loop {
+            let revision = self
+                .homes
+                .revision
+                .load(std::sync::atomic::Ordering::Acquire);
+            let sessions: Vec<PathBuf> = self
+                .homes
+                .session_dirs_for(Some(workspace))
+                .into_iter()
+                .map(|(_, sessions)| sessions)
+                .collect();
             let generation = {
                 let cache = self
                     .page_catalog
                     .lock()
                     .map_err(|_| anyhow!("page catalog poisoned"))?;
-                if cache.homes_revision == revision
-                    && cache
-                        .checked_at
-                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5))
-                {
+                if sessions.iter().all(|sessions| {
+                    cache
+                        .homes
+                        .get(sessions)
+                        .and_then(|home| home.validated)
+                        .is_some_and(|at| at.elapsed() < SCOPE_REUSE)
+                }) {
                     return Ok(());
                 }
                 cache.generation
             };
-            // Every scope shares the same enumeration. Strictness is applied
-            // to that scope's errors afterwards, not by building another table.
-            crate::blocking::coalesce(&self.page_reads, (revision, generation), || async {
-                let (known, write_revision) = {
-                    let cache = self
-                        .page_catalog
-                        .lock()
-                        .map_err(|_| anyhow!("page catalog poisoned"))?;
-                    (
-                        if cache.homes_revision == revision && cache.initialized {
-                            cache.files.clone()
-                        } else {
-                            HashMap::new()
-                        },
-                        cache.write_revision,
-                    )
-                };
-                // Recovery always asks for a fresh durable observation. A cold
-                // presentation read may share that in-flight scan, never its
-                // old cached result, so boot does not walk every file twice.
-                let mut scan = if known.is_empty() {
-                    (*self.fresh_metadata_scan(None).await?).clone()
-                } else {
-                    self.scan_metadata(None, Some(&known)).await?
-                };
-                let mut cache = self
-                    .page_catalog
-                    .lock()
-                    .map_err(|_| anyhow!("page catalog poisoned"))?;
-                if cache.generation != generation
-                    || self
-                        .homes
-                        .revision
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        != revision
-                {
-                    return Ok(());
-                }
-                // Keep durable local changes made during this scan, for its
-                // entire lifetime rather than a five-second overlay window.
-                for (path, file) in &cache.files {
-                    if file.changed > write_revision {
-                        scan.files.insert(path.clone(), file.clone());
-                        scan.errors.remove(path);
-                    }
-                }
-                for (path, previous) in &cache.files {
-                    if scan.errors.values().any(|(scopes, _)| {
-                        previous
-                            .meta
-                            .as_ref()
-                            .is_some_and(|m| scopes.contains(&m.workspace_id))
-                    }) && !scan.files.contains_key(path)
-                    {
-                        scan.files.insert(path.clone(), previous.clone());
-                    }
-                }
-                for (path, next) in &mut scan.files {
-                    if next.error.is_some() && next.meta.is_none() {
-                        if let Some(previous) = cache.files.get(path) {
-                            next.meta = previous.meta.clone();
-                        }
-                    }
-                }
-                let mut changed = Vec::new();
-                let mut removed = Vec::new();
-                for (path, before) in &cache.files {
-                    if let Some(old) = &before.meta {
-                        if scan
-                            .files
-                            .get(path)
-                            .and_then(|f| f.meta.as_ref())
-                            .is_none_or(|m| m.id != old.id || m.workspace_id != old.workspace_id)
-                        {
-                            removed.push(genehub_proto::CatalogSessionRef {
-                                workspace_id: old.workspace_id.clone(),
-                                id: old.id.clone(),
-                            });
-                        }
-                    }
-                }
-                for (path, file) in &scan.files {
-                    if let Some(meta) = &file.meta {
-                        let same = cache.files.get(path).is_some_and(|old| {
-                            old.stamp == file.stamp
-                                && old.meta.as_ref().is_some_and(|m| {
-                                    m.id == meta.id && m.workspace_id == meta.workspace_id
-                                })
-                        });
-                        if !same {
-                            changed.push(genehub_proto::CatalogSessionRef {
-                                workspace_id: meta.workspace_id.clone(),
-                                id: meta.id.clone(),
-                            });
-                        }
-                    }
-                }
-                cache.projection.dirty.extend(changed);
-                cache.projection.removed.extend(removed);
-                cache.order.clear();
-                cache.by_id.clear();
-                cache.pending.clear();
-                for (path, file) in &scan.files {
-                    if let Some(m) = &file.meta {
-                        cache.order.insert(
-                            (m.updated_at_ms, m.id.clone(), m.workspace_id.clone()),
-                            path.clone(),
-                        );
-                        cache
-                            .by_id
-                            .entry(m.id.clone())
-                            .or_default()
-                            .push(path.clone());
-                        if PageCatalog::has_obligation(m) {
-                            cache.pending.insert(path.clone());
-                        }
-                    }
-                }
-                cache.initialized = true;
-                cache.files = scan.files;
-                cache.errors = scan.errors;
-                cache.homes_revision = revision;
-                cache.checked_at = Some(std::time::Instant::now());
-                Ok(())
-            })
-            .await?;
-            // A registry/deletion fence changed during enumeration. Re-read
-            // the current generation rather than returning the abandoned scan.
+            if self
+                .sweep_catalog(Some(workspace), revision, generation)
+                .await?
+            {
+                return Ok(());
+            }
         }
+    }
+
+    async fn load_catalog(&self, revision: u64, generation: u64) -> Result<bool> {
+        let write_revision = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?
+            .write_revision;
+        // Recovery always asks for a fresh durable observation. A cold
+        // presentation read may share that in-flight scan, never its old
+        // cached result, so boot does not walk every file twice.
+        let mut scan = (*self.fresh_metadata_scan(None).await?).clone();
+        let mut cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        if cache.generation != generation
+            || self
+                .homes
+                .revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                != revision
+        {
+            return Ok(false);
+        }
+        // Keep durable local changes made during this scan, for its entire
+        // lifetime rather than a short overlay window.
+        let mut wrote = Vec::new();
+        for (path, file) in &cache.files {
+            if file.changed > write_revision {
+                scan.files.insert(path.clone(), file.clone());
+                scan.errors.remove(path);
+                wrote.push(path.clone());
+            }
+        }
+        let removed: Vec<_> = cache
+            .files
+            .iter()
+            .filter(|(path, _)| !scan.files.contains_key(*path))
+            .filter_map(|(_, file)| file.meta.as_ref())
+            .map(|m| genehub_proto::CatalogSessionRef {
+                workspace_id: m.workspace_id.clone(),
+                id: m.id.clone(),
+            })
+            .collect();
+        for session in &removed {
+            cache.changes.remove(session.clone());
+        }
+        cache.projection.removed.extend(removed);
+        let present: Vec<_> = scan
+            .files
+            .values()
+            .filter_map(|file| file.meta.as_ref())
+            .map(|m| genehub_proto::CatalogSessionRef {
+                workspace_id: m.workspace_id.clone(),
+                id: m.id.clone(),
+            })
+            .collect();
+        for session in &present {
+            cache.changes.touch(session.clone());
+        }
+        cache.projection.dirty.extend(present);
+        cache.order.clear();
+        cache.by_id.clear();
+        cache.pending.clear();
+        for (path, file) in &scan.files {
+            if let Some(m) = &file.meta {
+                cache.order.insert(
+                    (m.updated_at_ms, m.id.clone(), m.workspace_id.clone()),
+                    path.clone(),
+                );
+                cache
+                    .by_id
+                    .entry(m.id.clone())
+                    .or_default()
+                    .push(path.clone());
+                if PageCatalog::has_obligation(m) {
+                    cache.pending.insert(path.clone());
+                }
+            }
+        }
+        let now = std::time::Instant::now();
+        cache.watches.clear();
+        cache.homes.clear();
+        for (sessions, seen) in std::mem::take(&mut scan.homes) {
+            for id in seen.sessions.difference(&seen.deleted) {
+                let path = sessions.join(id).join("meta.json");
+                let stamp = scan.files.get(&path).and_then(|file| file.stamp);
+                cache.watches.insert(
+                    path.clone(),
+                    crate::fs_stamp::Watch::first(&path, stamp.as_ref(), now, CATALOG_CADENCE),
+                );
+            }
+            let tombstones = sessions.with_file_name(TOMBSTONES_DIR);
+            cache.homes.insert(
+                sessions.clone(),
+                HomeSweep {
+                    listing: crate::fs_stamp::Watch::first(
+                        &sessions,
+                        seen.listing.as_ref(),
+                        now,
+                        HOME_CADENCE,
+                    ),
+                    tombstones: crate::fs_stamp::Watch::first(
+                        &tombstones,
+                        seen.tombstones.as_ref(),
+                        now,
+                        HOME_CADENCE,
+                    ),
+                    seen,
+                    validated: None,
+                },
+            );
+        }
+        for path in wrote {
+            cache.wrote(&path);
+        }
+        cache.initialized = true;
+        cache.files = scan.files;
+        cache.errors = scan.errors;
+        cache.homes_revision = revision;
+        cache.checked_at = Some(now);
+        Ok(true)
+    }
+
+    /// One pass over what is due: a stat per due path, a directory listing
+    /// only when a directory's stamp changed, and a read only when a file's
+    /// stamp changed. `scope` forces every path of that project to be due.
+    async fn sweep_catalog(
+        &self,
+        scope: Option<&str>,
+        revision: u64,
+        generation: u64,
+    ) -> Result<bool> {
+        let started = std::time::Instant::now();
+        let workload = crate::diagnostics::work::Window::start();
+        let registered = self.homes.session_dirs_for(scope);
+        let registered_dirs: HashSet<PathBuf> = registered
+            .iter()
+            .map(|(_, sessions)| sessions.clone())
+            .collect();
+        let (plans, write_revision) = {
+            let cache = self
+                .page_catalog
+                .lock()
+                .map_err(|_| anyhow!("page catalog poisoned"))?;
+            let force = scope.is_some();
+            let mut plans = Vec::new();
+            for (projects, sessions) in registered {
+                let owners = home_owners(&projects);
+                let Some(home) = cache
+                    .homes
+                    .get(&sessions)
+                    .filter(|home| home.seen.owners == owners)
+                else {
+                    plans.push(HomePlan {
+                        sessions,
+                        projects,
+                        prior: None,
+                        list: true,
+                        tombstones: true,
+                        entries: Vec::new(),
+                    });
+                    continue;
+                };
+                let entries: Vec<_> = home
+                    .seen
+                    .sessions
+                    .iter()
+                    .filter(|id| !home.seen.deleted.contains(*id))
+                    .filter_map(|id| {
+                        let path = sessions.join(id).join("meta.json");
+                        let due = force || cache.watches.get(&path).is_none_or(|w| w.due(started));
+                        due.then(|| {
+                            let file = cache.files.get(&path);
+                            let stamp = file.and_then(|f| f.stamp);
+                            // This daemon's own write holds the session's
+                            // writer lock, so its stamp needs no settling.
+                            let trusted = file.is_some_and(|f| f.changed > 0 && f.error.is_none());
+                            let failed = file.is_some_and(|f| f.error.is_some());
+                            (id.clone(), stamp, trusted && !failed)
+                        })
+                    })
+                    .collect();
+                let list = force || home.listing.due(started);
+                let tombstones = force || home.tombstones.due(started);
+                if !list && !tombstones && entries.is_empty() {
+                    continue;
+                }
+                plans.push(HomePlan {
+                    sessions,
+                    projects,
+                    prior: Some(home.seen.clone()),
+                    list,
+                    tombstones,
+                    entries,
+                });
+            }
+            (plans, cache.write_revision)
+        };
+        let mut budget = crate::blocking::WorkBudget::new();
+        let mut yield_wait = std::time::Duration::ZERO;
+        let mut counts = SweepCounts::default();
+        let mut looked = Vec::with_capacity(plans.len());
+        for plan in plans {
+            yield_wait += budget.checkpoint().await;
+            looked.push(
+                self.sweep_home(plan, &mut budget, &mut yield_wait, &mut counts)
+                    .await,
+            );
+        }
+        let mut cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        if cache.generation != generation
+            || self
+                .homes
+                .revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                != revision
+        {
+            return Ok(false);
+        }
+        let now = std::time::Instant::now();
+        for home in looked {
+            cache.apply_home(home, write_revision, scope.is_some(), now);
+        }
+        if scope.is_none() {
+            let stale: Vec<PathBuf> = cache
+                .homes
+                .keys()
+                .filter(|sessions| !registered_dirs.contains(*sessions))
+                .cloned()
+                .collect();
+            for sessions in stale {
+                cache.forget_home(&sessions);
+            }
+            cache.homes_revision = revision;
+            cache.checked_at = Some(now);
+        }
+        drop(cache);
+        let elapsed = started.elapsed();
+        tracing::debug!(
+            event = "session_catalog_swept",
+            scoped = scope.is_some(),
+            homes = counts.homes,
+            listings = counts.listings,
+            stats = counts.stats,
+            metadata_read = counts.reads,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "swept session metadata stamps"
+        );
+        if elapsed.as_millis() >= 1000 {
+            tracing::warn!(
+                event = "session_catalog_slow",
+                scoped = scope.is_some(),
+                homes = counts.homes,
+                listings = counts.listings,
+                stats = counts.stats,
+                metadata_read = counts.reads,
+                yield_wait_ms = yield_wait.as_millis() as u64,
+                inline_ms = elapsed.saturating_sub(yield_wait).as_millis() as u64,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "session metadata sweep exceeded one second"
+            );
+            workload.report(elapsed, yield_wait);
+        }
+        Ok(true)
+    }
+
+    async fn sweep_home(
+        &self,
+        plan: HomePlan,
+        budget: &mut crate::blocking::WorkBudget,
+        yield_wait: &mut std::time::Duration,
+        counts: &mut SweepCounts,
+    ) -> HomeLooked {
+        use crate::fs_stamp::settled;
+        counts.homes += 1;
+        let scopes: Vec<String> = plan.projects.iter().map(|(id, _)| id.clone()).collect();
+        let owners = home_owners(&plan.projects);
+        let fresh = plan.prior.is_none();
+        let mut seen = plan.prior.unwrap_or_else(|| HomeSeen {
+            owners: owners.clone(),
+            listing: None,
+            sessions: Default::default(),
+            tombstones: None,
+            deleted: Default::default(),
+        });
+        seen.owners = owners;
+        let tombstones_dir = plan.sessions.with_file_name(TOMBSTONES_DIR);
+        if fresh {
+            if let Some(home) = plan.sessions.parent().filter(|home| home.exists()) {
+                let _ = self.establish_home(home);
+            }
+        }
+        let mut reap_pending = false;
+        let mut looked = Vec::new();
+        if plan.tombstones {
+            counts.stats += 1;
+            let stamp = MetadataStamp::read(&tombstones_dir);
+            if fresh || stamp != seen.tombstones || !settled(seen.tombstones.as_ref()) {
+                counts.listings += 1;
+                seen.deleted = tombstone_names(&tombstones_dir);
+            }
+            seen.tombstones = stamp;
+            // Files of a deleted session wait for their writer; retry until
+            // they are gone, on every pass that looks at tombstones.
+            if let Some((workspace, _)) = plan.projects.first() {
+                let waiting: Vec<String> = seen
+                    .deleted
+                    .iter()
+                    .filter(|id| fresh || seen.sessions.contains(*id))
+                    .cloned()
+                    .collect();
+                for id in waiting {
+                    let dir = plan.sessions.join(&id);
+                    looked.push((dir.join("meta.json"), None, Look::Deleted));
+                    self.reap_tombstoned_session(workspace, &id, &dir);
+                    if dir.exists() {
+                        reap_pending = true;
+                    } else {
+                        seen.sessions.remove(&id);
+                    }
+                }
+            }
+        }
+        let mut listing_error = None;
+        let mut entries = plan.entries;
+        let (listed, tombstones_looked) = (plan.list, plan.tombstones);
+        if plan.list {
+            counts.stats += 1;
+            let stamp = MetadataStamp::read(&plan.sessions);
+            if fresh || stamp != seen.listing || !settled(seen.listing.as_ref()) {
+                counts.listings += 1;
+                let listed = {
+                    let _work = crate::diagnostics::work::FileScope::new(
+                        crate::diagnostics::work::FileWork::CatalogDirectory,
+                    );
+                    fs::read_dir(&plan.sessions).map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect::<std::collections::BTreeSet<_>>()
+                    })
+                };
+                let listed = match listed {
+                    Ok(listed) => Some(listed),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Default::default()),
+                    Err(e) => {
+                        listing_error =
+                            Some((scopes.clone(), format!("reading session directory: {e}")));
+                        None
+                    }
+                };
+                if let Some(listed) = listed {
+                    for gone in seen.sessions.difference(&listed) {
+                        looked.push((plan.sessions.join(gone).join("meta.json"), None, Look::Gone));
+                    }
+                    let known: HashSet<&String> = entries.iter().map(|(id, _, _)| id).collect();
+                    let added: Vec<String> = listed
+                        .iter()
+                        .filter(|id| fresh || !seen.sessions.contains(*id))
+                        .filter(|id| !known.contains(id))
+                        .cloned()
+                        .collect();
+                    entries.extend(added.into_iter().map(|id| (id, None, false)));
+                    seen.sessions = listed;
+                    seen.listing = stamp;
+                }
+            }
+        }
+        for (id, prior, trusted) in entries {
+            *yield_wait += budget.checkpoint().await;
+            let path = plan.sessions.join(&id).join("meta.json");
+            if !seen.sessions.contains(&id) {
+                looked.push((path, None, Look::Gone));
+                continue;
+            }
+            if seen.deleted.contains(&id) {
+                looked.push((path, None, Look::Deleted));
+                continue;
+            }
+            counts.stats += 1;
+            let stamp = {
+                let _work = crate::diagnostics::work::FileScope::new(
+                    crate::diagnostics::work::FileWork::CatalogEntry,
+                );
+                MetadataStamp::read(&path)
+            };
+            if stamp.is_none() {
+                looked.push((path, None, Look::Missing));
+                continue;
+            }
+            if stamp == prior && (trusted || settled(prior.as_ref())) {
+                looked.push((path, stamp, Look::Same));
+                continue;
+            }
+            // A tombstone written since the last listing of tombstones/ wins.
+            if tombstones_dir.join(format!("{id}.json")).exists() {
+                seen.deleted.insert(id);
+                looked.push((path, None, Look::Deleted));
+                continue;
+            }
+            counts.reads += 1;
+            match self.read_catalog_file(&plan.projects, &id, &path, stamp) {
+                Some(file) => looked.push((path, stamp, Look::Changed(file))),
+                None => looked.push((path, None, Look::Missing)),
+            }
+        }
+        HomeLooked {
+            sessions: plan.sessions,
+            scopes,
+            seen,
+            listing_error,
+            reap_pending,
+            listed,
+            tombstones_looked,
+            looked,
+        }
+    }
+
+    /// Reads and normalizes one `meta.json`. `None` when it is not there.
+    fn read_catalog_file(
+        &self,
+        projects: &[(String, WorkspaceHome)],
+        session_id: &str,
+        path: &Path,
+        stamp: Option<MetadataStamp>,
+    ) -> Option<CatalogFile> {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                return Some(CatalogFile {
+                    stamp,
+                    meta: None,
+                    error: Some(format!("reading session metadata: {e}")),
+                    changed: 0,
+                })
+            }
+        };
+        let parsed = (|| -> Result<Option<SessionMeta>> {
+            let header: MetaHeader =
+                serde_json::from_str(&raw).context("parsing session metadata header")?;
+            let Some(owner) = Self::metadata_owner(projects, &header.project_key) else {
+                return Ok(None);
+            };
+            self.load_meta_from(&owner, session_id, &raw, header)
+                .context("parsing session metadata")
+                .map(Some)
+        })();
+        Some(match parsed {
+            Ok(meta) => CatalogFile {
+                stamp,
+                meta: meta.map(Arc::new),
+                error: None,
+                changed: 0,
+            },
+            Err(error) => CatalogFile {
+                stamp,
+                meta: None,
+                error: Some(format!("{error:#}")),
+                changed: 0,
+            },
+        })
     }
 
     async fn fresh_metadata_scan(&self, workspace: Option<&str>) -> Result<Arc<CatalogScan>> {
         crate::blocking::coalesce(
             &self.catalog_reads,
             workspace.map(str::to_owned),
-            || async { self.scan_metadata(workspace, None).await.map(Arc::new) },
+            || async { self.scan_metadata(workspace).await.map(Arc::new) },
         )
         .await
     }
 
-    async fn scan_metadata(
-        &self,
-        workspace: Option<&str>,
-        known: Option<&HashMap<PathBuf, CatalogFile>>,
-    ) -> Result<CatalogScan> {
+    async fn scan_metadata(&self, workspace: Option<&str>) -> Result<CatalogScan> {
         let started = std::time::Instant::now();
         let workload = crate::diagnostics::work::Window::start();
         let mut yield_wait = std::time::Duration::ZERO;
         let mut max_yield = std::time::Duration::ZERO;
         let mut directories = 0usize;
         let mut entries_read = 0usize;
-        let mut metadata_bytes = 0usize;
         let mut metadata_read = 0usize;
         let mut budget = crate::blocking::WorkBudget::new();
         let mut out = CatalogScan::default();
@@ -2103,12 +2957,27 @@ impl Store {
             let waited = budget.checkpoint().await;
             yield_wait += waited;
             max_yield = max_yield.max(waited);
+            // Stamps are taken before the listings they describe, so a change
+            // made while listing shows up as a changed stamp next time.
+            let tombstones_dir = sessions.with_file_name(TOMBSTONES_DIR);
+            let tombstones = MetadataStamp::read(&tombstones_dir);
+            let deleted = tombstone_names(&tombstones_dir);
             if let Some((id, _)) = workspaces.first() {
-                self.reap_tombstoned_sessions(id, &sessions);
+                for session_id in &deleted {
+                    self.reap_tombstoned_session(id, session_id, &sessions.join(session_id));
+                }
             }
             if let Some(home) = sessions.parent().filter(|home| home.exists()) {
                 let _ = self.establish_home(home);
             }
+            let listing = MetadataStamp::read(&sessions);
+            let mut seen = HomeSeen {
+                owners: home_owners(&workspaces),
+                listing,
+                sessions: Default::default(),
+                tombstones,
+                deleted,
+            };
             let directory = {
                 let _work = crate::diagnostics::work::FileScope::new(
                     crate::diagnostics::work::FileWork::CatalogDirectory,
@@ -2117,7 +2986,10 @@ impl Store {
             };
             let entries = match directory {
                 Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    out.homes.insert(sessions, seen);
+                    continue;
+                }
                 Err(e) => {
                     out.errors.insert(
                         sessions,
@@ -2126,10 +2998,12 @@ impl Store {
                     continue;
                 }
             };
+            let mut complete = true;
             for entry in entries {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(e) => {
+                        complete = false;
                         out.errors.insert(
                             sessions.clone(),
                             (scopes.clone(), format!("reading session entry: {e}")),
@@ -2145,68 +3019,19 @@ impl Store {
                     crate::diagnostics::work::FileWork::CatalogEntry,
                 );
                 let session_id = entry.file_name().to_string_lossy().into_owned();
-                if sessions.parent().is_some_and(|home| {
-                    home.join(TOMBSTONES_DIR)
-                        .join(format!("{session_id}.json"))
-                        .exists()
-                }) {
+                seen.sessions.insert(session_id.clone());
+                if seen.deleted.contains(&session_id) {
                     continue;
                 }
                 let path = entry.path().join("meta.json");
                 let stamp = MetadataStamp::read(&path);
-                let file = if let Some(file) = known
-                    .and_then(|known| known.get(&path))
-                    .filter(|file| stamp.is_some() && file.error.is_none() && file.stamp == stamp)
-                {
-                    file.clone()
-                } else {
-                    let raw = match fs::read_to_string(&path) {
-                        Ok(raw) => raw,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(e) => {
-                            out.errors.insert(
-                                path.clone(),
-                                (scopes.clone(), format!("reading session metadata: {e}")),
-                            );
-                            out.files.insert(
-                                path,
-                                CatalogFile {
-                                    stamp,
-                                    meta: None,
-                                    error: Some(format!("reading session metadata: {e}")),
-                                    changed: 0,
-                                },
-                            );
-                            continue;
-                        }
-                    };
-                    metadata_bytes += raw.len();
-                    metadata_read += 1;
-                    let parsed = (|| -> Result<Option<SessionMeta>> {
-                        let header: MetaHeader = serde_json::from_str(&raw)
-                            .context("parsing session metadata header")?;
-                        let Some(owner) = Self::metadata_owner(&workspaces, &header.project_key)
-                        else {
-                            return Ok(None);
-                        };
-                        self.load_meta_from(&owner, &session_id, &raw, header)
-                            .context("parsing session metadata")
-                            .map(Some)
-                    })();
-                    match parsed {
-                        Ok(meta) => CatalogFile {
-                            stamp,
-                            meta: meta.map(Arc::new),
-                            error: None,
-                            changed: 0,
-                        },
-                        Err(error) => CatalogFile {
-                            stamp,
-                            meta: None,
-                            error: Some(format!("{error:#}")),
-                            changed: 0,
-                        },
-                    }
+                if stamp.is_none() {
+                    continue;
+                }
+                metadata_read += 1;
+                let Some(file) = self.read_catalog_file(&workspaces, &session_id, &path, stamp)
+                else {
+                    continue;
                 };
                 if let Some(error) = &file.error {
                     out.errors
@@ -2214,16 +3039,17 @@ impl Store {
                 }
                 out.files.insert(path, file);
             }
+            if complete {
+                out.homes.insert(sessions, seen);
+            }
         }
         let count = out.files.values().filter(|f| f.meta.is_some()).count();
         tracing::debug!(
             event = "session_catalog_reconciled",
             scoped = workspace.is_some(),
-            incremental = known.is_some(),
             directories,
             entries_read,
             metadata_read,
-            metadata_bytes,
             sessions = count,
             errors = out.errors.len(),
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -2236,7 +3062,6 @@ impl Store {
                 directories,
                 entries_read,
                 metadata_read,
-                metadata_bytes,
                 sessions = count,
                 yield_wait_ms = yield_wait.as_millis() as u64,
                 max_yield_ms = max_yield.as_millis() as u64,
@@ -2262,9 +3087,43 @@ impl Store {
         {
             return Ok(None);
         }
+        // The index names the homes that held this ID when last looked at.
+        // Read those files again, and walk every home only when none of them
+        // still holds it, for example a conversation another process just made.
+        let indexed: Vec<PathBuf> = self
+            .page_catalog
+            .lock()
+            .ok()
+            .filter(|cache| cache.initialized)
+            .and_then(|cache| cache.by_id.get(session_id).cloned())
+            .unwrap_or_default();
+        if !indexed.is_empty() {
+            let homes: Vec<_> = self
+                .homes
+                .all_sessions_dirs()
+                .into_iter()
+                .filter(|(_, sessions)| {
+                    indexed.iter().any(|path| {
+                        path.parent().and_then(Path::parent) == Some(sessions.as_path())
+                    })
+                })
+                .collect();
+            if let Some(found) = self.find_meta_in(session_id, homes).await? {
+                return Ok(Some(found));
+            }
+        }
+        self.find_meta_in(session_id, self.homes.all_sessions_dirs())
+            .await
+    }
+
+    async fn find_meta_in(
+        &self,
+        session_id: &str,
+        homes: Vec<(Vec<(String, WorkspaceHome)>, PathBuf)>,
+    ) -> Result<Option<SessionMeta>> {
         let mut found: Option<SessionMeta> = None;
         let mut budget = crate::blocking::WorkBudget::new();
-        for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+        for (workspaces, sessions) in homes {
             budget.checkpoint().await;
             let Some(home) = sessions.parent() else {
                 continue;
@@ -2317,26 +3176,6 @@ impl Store {
                         || home.aliases.iter().any(|alias| alias == project_key)
                 })
                 .map(|(id, _)| id.clone())
-        }
-    }
-
-    fn reap_tombstoned_sessions(&self, workspace_id: &str, sessions: &Path) {
-        let Some(home) = sessions.parent() else {
-            return;
-        };
-        let Ok(entries) = fs::read_dir(home.join(TOMBSTONES_DIR)) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let Some(session_id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if session_id.is_empty() {
-                continue;
-            }
-            self.reap_tombstoned_session(workspace_id, session_id, &sessions.join(session_id));
         }
     }
 
@@ -3550,6 +4389,327 @@ mod project_home_tests {
                 "missing structured {event} diagnostic"
             );
         }
+    }
+
+    /// Writes `meta.json` the way another GeneHub process would: a temporary
+    /// file renamed into place, optionally with an old modification time.
+    fn write_elsewhere(root: &Path, meta: &SessionMeta, modified: Option<std::time::SystemTime>) {
+        let dir = root.join(".genethub/sessions").join(&meta.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut value = serde_json::to_value(meta).unwrap();
+        value["projectKey"] = Value::String("folder".into());
+        let temporary = dir.join(".meta.json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+        if let Some(modified) = modified {
+            std::fs::File::options()
+                .write(true)
+                .open(&temporary)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        std::fs::rename(&temporary, dir.join("meta.json")).unwrap();
+    }
+
+    fn hour_ago() -> Option<std::time::SystemTime> {
+        Some(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+    }
+
+    fn titled(id: &str, title: &str, root: &Path) -> SessionMeta {
+        SessionMeta {
+            title: Some(title.into()),
+            ..meta(id, "w1", root)
+        }
+    }
+
+    async fn title_of(store: &Store, workspace: Option<&str>, id: &str) -> Option<String> {
+        store
+            .list_metadata(workspace)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|meta| meta.id == id)
+            .and_then(|meta| meta.title)
+    }
+
+    impl Store {
+        /// Everything comes due, as if the cold period had passed.
+        fn age_catalog(&self) {
+            let mut cache = self.page_catalog.lock().unwrap();
+            let now = std::time::Instant::now();
+            cache.checked_at = None;
+            for watch in cache.watches.values_mut() {
+                watch.hurry(now);
+            }
+            for home in cache.homes.values_mut() {
+                home.listing.hurry(now);
+                home.tombstones.hurry(now);
+                home.validated = None;
+            }
+        }
+
+        fn forget_validation(&self) {
+            let mut cache = self.page_catalog.lock().unwrap();
+            cache.checked_at = None;
+            for home in cache.homes.values_mut() {
+                home.validated = None;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_read_serves_the_index_and_a_scoped_read_sees_another_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        write_elsewhere(
+            root.path(),
+            &titled("s_cold", "aa", root.path()),
+            hour_ago(),
+        );
+        assert_eq!(
+            title_of(&store, None, "s_cold").await.as_deref(),
+            Some("aa")
+        );
+
+        write_elsewhere(
+            root.path(),
+            &titled("s_cold", "bb", root.path()),
+            hour_ago(),
+        );
+        store.forget_validation();
+        store.reconcile_catalog().await.unwrap();
+        assert_eq!(
+            title_of(&store, None, "s_cold").await.as_deref(),
+            Some("aa"),
+            "a background pass must not walk paths that are not due"
+        );
+        assert_eq!(
+            title_of(&store, Some("w1"), "s_cold").await.as_deref(),
+            Some("bb")
+        );
+    }
+
+    #[tokio::test]
+    async fn looking_at_some_sessions_does_not_postpone_looking_at_their_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        write_elsewhere(root.path(), &titled("s_old", "aa", root.path()), hour_ago());
+        store.reconcile_catalog().await.unwrap();
+        let listing_due = || {
+            let cache = store.page_catalog.lock().unwrap();
+            cache.homes.values().next().unwrap().listing.next_due()
+        };
+        let before = listing_due();
+        {
+            let mut cache = store.page_catalog.lock().unwrap();
+            let now = std::time::Instant::now();
+            cache.checked_at = None;
+            for watch in cache.watches.values_mut() {
+                watch.hurry(now);
+            }
+        }
+        store.reconcile_catalog().await.unwrap();
+        assert_eq!(listing_due(), before);
+    }
+
+    fn ids(changes: &CatalogChanges) -> Vec<&str> {
+        changes
+            .changed
+            .iter()
+            .map(|meta| meta.id.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_change_cursor_returns_only_what_changed_since_it() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        homes.attach("w2", other.path());
+        let store = Store::new(homes);
+        for id in ["s_a", "s_b", "s_c"] {
+            store.save_meta(&titled(id, id, root.path())).unwrap();
+        }
+        store
+            .save_meta(&SessionMeta {
+                title: Some("elsewhere".into()),
+                ..meta("s_other", "w2", other.path())
+            })
+            .unwrap();
+        let scope: HashSet<String> = ["w1".to_string()].into();
+
+        let first = store.catalog_changes(&scope, None, 2).await.unwrap();
+        assert_eq!(first.changed.len(), 2);
+        assert!(!first.complete && !first.reset);
+        let rest = store
+            .catalog_changes(&scope, Some((&first.token, first.seq)), 2)
+            .await
+            .unwrap();
+        assert!(rest.complete);
+        let mut all: Vec<_> = ids(&first).into_iter().chain(ids(&rest)).collect();
+        all.sort_unstable();
+        assert_eq!(all, ["s_a", "s_b", "s_c"], "pages cover the scope once");
+
+        let quiet = store
+            .catalog_changes(&scope, Some((&rest.token, rest.seq)), 50)
+            .await
+            .unwrap();
+        assert!(quiet.changed.is_empty() && quiet.removed.is_empty());
+        assert_eq!(quiet.seq, rest.seq);
+
+        store
+            .save_meta(&titled("s_b", "edited", root.path()))
+            .unwrap();
+        store.mark_catalog_dirty("w1", "s_c");
+        store.delete("w1", "s_a").unwrap();
+        let next = store
+            .catalog_changes(&scope, Some((&quiet.token, quiet.seq)), 50)
+            .await
+            .unwrap();
+        assert_eq!(ids(&next), ["s_b", "s_c"]);
+        assert_eq!(next.changed[0].title.as_deref(), Some("edited"));
+        assert_eq!(
+            next.removed,
+            [genehub_proto::CatalogSessionRef {
+                workspace_id: "w1".into(),
+                id: "s_a".into(),
+            }]
+        );
+
+        let foreign = store
+            .catalog_changes(&scope, Some(("another-daemon", 3)), 50)
+            .await
+            .unwrap();
+        assert!(foreign.reset && foreign.removed.is_empty());
+        let mut restarted = ids(&foreign);
+        restarted.sort_unstable();
+        assert_eq!(restarted, ["s_b", "s_c"]);
+    }
+
+    #[tokio::test]
+    async fn a_cold_change_is_found_once_it_comes_due() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        write_elsewhere(
+            root.path(),
+            &titled("s_cold", "aa", root.path()),
+            hour_ago(),
+        );
+        store.reconcile_catalog().await.unwrap();
+
+        write_elsewhere(
+            root.path(),
+            &titled("s_cold", "bb", root.path()),
+            hour_ago(),
+        );
+        store.age_catalog();
+        store.reconcile_catalog().await.unwrap();
+        assert_eq!(
+            title_of(&store, None, "s_cold").await.as_deref(),
+            Some("bb")
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_created_and_deleted_elsewhere_follow_a_scoped_read() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        store
+            .save_meta(&titled("s_own", "own", root.path()))
+            .unwrap();
+        store.reconcile_catalog().await.unwrap();
+
+        write_elsewhere(root.path(), &titled("s_new", "new", root.path()), None);
+        store.forget_validation();
+        assert_eq!(
+            title_of(&store, Some("w1"), "s_new").await.as_deref(),
+            Some("new")
+        );
+
+        let tombstones = root.path().join(".genethub").join(TOMBSTONES_DIR);
+        std::fs::create_dir_all(&tombstones).unwrap();
+        std::fs::write(tombstones.join("s_new.json"), b"{}").unwrap();
+        store.forget_validation();
+        assert_eq!(title_of(&store, Some("w1"), "s_new").await, None);
+        assert_eq!(
+            title_of(&store, None, "s_own").await.as_deref(),
+            Some("own")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_write_within_the_same_timestamp_is_not_missed() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        write_elsewhere(root.path(), &titled("s_racy", "aa", root.path()), None);
+        assert_eq!(
+            title_of(&store, None, "s_racy").await.as_deref(),
+            Some("aa")
+        );
+
+        // Same length, rewritten in place, modification time put back.
+        let path = root.path().join(".genethub/sessions/s_racy/meta.json");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"aa\"", "\"bb\"");
+        std::fs::write(&path, text).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        store.forget_validation();
+        assert_eq!(
+            title_of(&store, Some("w1"), "s_racy").await.as_deref(),
+            Some("bb")
+        );
+    }
+
+    #[tokio::test]
+    async fn find_meta_uses_the_index_and_still_finds_an_unindexed_session() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach("w1", root.path());
+        let store = Store::new(homes);
+        store
+            .save_meta(&titled("s_known", "known", root.path()))
+            .unwrap();
+        store.reconcile_catalog().await.unwrap();
+        write_elsewhere(root.path(), &titled("s_known", "edited", root.path()), None);
+        write_elsewhere(root.path(), &titled("s_late", "late", root.path()), None);
+        assert_eq!(
+            store
+                .find_meta("s_known")
+                .await
+                .unwrap()
+                .and_then(|m| m.title)
+                .as_deref(),
+            Some("edited"),
+            "an indexed lookup reads the file again"
+        );
+        assert_eq!(
+            store
+                .find_meta("s_late")
+                .await
+                .unwrap()
+                .and_then(|m| m.title)
+                .as_deref(),
+            Some("late")
+        );
+        assert!(store.find_meta("s_none").await.unwrap().is_none());
     }
 }
 

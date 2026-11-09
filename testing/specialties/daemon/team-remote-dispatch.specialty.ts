@@ -7,8 +7,8 @@ import { defineSpecialty, connectProductClient, registerControlledAgent, parseJs
 defineSpecialty({
   id: "specialty.daemon.team-remote-dispatch",
   title: "Fixed team targets dispatch once and hold the executor's writer lock until reconciliation",
-  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release",
-  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation"],
+  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release; a >8KiB task and restored 300-reference coordination snapshot reach the real remote runtime",
+  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation", "a declared remote role is rerouted by --machine or silently runs locally", "an executor accepts a role not installed for it", "remote install needs hand-written paths or scripts", "JSON business content exceeds the small command head", "Timer success hides a failed remote projection"],
   stages: ["initial-result", "resumed-result", "paused-reservation", "resumed-release"],
   tags: ["core", "expert", "team-remote"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -19,7 +19,7 @@ defineSpecialty({
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
 }, async t => {
   const python = process.env.GENEHUB_PYTHON!;
-  registerControlledAgent(t.env, { id: "ctl-cli-command", profile: "cli-command" });
+  const commandAgent = registerControlledAgent(t.env, { id: "ctl-cli-command", profile: "cli-command" });
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const relay = await startRelay({ openRoot: t.openRoot });
   const sourceData = path.join(t.env.root, "caller-data"); mkdirSync(sourceData);
@@ -76,10 +76,11 @@ defineSpecialty({
     const wrapper = path.join(targetRoot, "lose-one-reply.py"), dropped = path.join(targetRoot, "reply-dropped");
     const correctionMarker = path.join(targetRoot, "correct-before-release");
     writeFileSync(wrapper, `import json,os,pathlib,subprocess,sys,time
-q=json.loads(sys.argv[-1]); race=pathlib.Path(${JSON.stringify(correctionMarker)})
+body=sys.stdin.read() if sys.argv[-1]=='-' else None
+q=json.loads(body if body is not None else sys.argv[-1]); race=pathlib.Path(${JSON.stringify(correctionMarker)})
 def summary():
  r=subprocess.run([os.environ['GENEHUB_CLI'],'session','get',q['sessionId']],capture_output=True,text=True)
- return json.loads(r.stdout.strip().splitlines()[-1])['data']['session']['summary']
+ return json.loads(r.stdout.strip().splitlines()[-1])['data']['summary']
 if q.get('operation') == 'release' and race.exists():
  race.unlink(); before=(summary().get('latestReply') or {}).get('itemId')
  note={**q,'operation':'notice','purpose':'task','sender':'concurrent-source','text':'Finish the corrected requirement.','messageId':'x.release-correction'}
@@ -91,7 +92,7 @@ if q.get('operation') == 'release' and race.exists():
   if s['status']=='idle' and not (s.get('inputSummary') or {}).get('pendingMessageIds') and (s.get('latestReply') or {}).get('itemId') != before: break
   time.sleep(.02)
  else: raise RuntimeError('correction did not finish')
-r=subprocess.run([sys.executable,*sys.argv[1:]],capture_output=True,text=True)
+r=subprocess.run([sys.executable,*sys.argv[1:]],input=body,capture_output=True,text=True)
 p=pathlib.Path(${JSON.stringify(dropped)})
 if r.returncode == 0 and not p.exists():
  p.write_text('lost')
@@ -116,12 +117,12 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => (await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members?.some((m:any)=>m.workspaceId===qa.id&&m.machineId===machine), 10000);
     const members=(await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members;
     t.assertions.assert(members?.length===1&&members[0].workspaceId===qa.id&&members[0].machineId===machine&&!Object.hasOwn(members[0],"command"),"build lost the exact remote reference or exposed executor commands");
-    const script = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: sourceEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const script = (args: string[], extra: Record<string, string> = {}) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: { ...sourceEnv, ...extra }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = ""; child.stdout.on("data", b => stdout += b); child.stderr.on("data", b => stderr += b);
       child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
     });
-    const dispatch = ["spawn", "--kind", "work", "--space", "qa", "--machine", machine, "--request-id", "one-task", "--desc", "remote contract", "Complete the check."];
+    const dispatch = ["spawn", "--kind", "work", "--space", "qa", "--machine", machine, "--request-id", "one-task", "--desc", "remote contract", "Complete the check. " + "Remote business requirement. ".repeat(800)];
     o.mock.script({ text: "First remote result." }, { text: "Resumed remote result." }, { text: "Queued notice result." });
     const lost = await script(dispatch);
     t.assertions.assert(lost.code !== 0 && lost.stderr.includes("未确认") && existsSync(dropped), "missing reply was not reported as uncertain after actual execution: " + lost.stderr);
@@ -151,13 +152,13 @@ sys.exit(r.returncode)
     const badMedia = await script([...dispatch.slice(0, -1).map(v => v === "one-task" ? "bad-media" : v), "--model", "deepseek/text-only", "--media", "image", "Complete the check."]);
     t.assertions.assert(badMedia.code !== 0 && badMedia.stderr.includes("支持"), "text-only target model accepted an image task");
     await t.stage("initial-result", () => t.tools.waitUntil(async () => {
-      const snapshot = (await cliJson(["session", "get", record.sessionId], true)).session;
+      const snapshot = await cliJson(["session", "get", record.sessionId], true);
       if (snapshot.summary.status === "failed" || snapshot.summary.inputSummary?.error) throw new Error("initial remote execution failed: " + JSON.stringify(snapshot.summary));
       return snapshot.summary.status === "idle" && !!snapshot.summary.latestReply;
     }, 30000));
-    const initialReply = (await cliJson(["session", "get", record.sessionId], true)).session.summary.latestReply.itemId;
+    const initialReply = (await cliJson(["session", "get", record.sessionId], true)).summary.latestReply.itemId;
     await o.client.call({ type: "session.interrupt", payload: { sessionId: record.sessionId } });
-    const beforeConflict = (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.pendingMessageIds;
+    const beforeConflict = (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.pendingMessageIds;
     const mismatchedSend = await script(["send", "--machine", machine, "--workspace", otherQa.id, "--to", record.sessionId, "Must not reach a different workspace."]);
     t.assertions.assert(mismatchedSend.code !== 0 && mismatchedSend.stderr.includes("workspace"), "exact session ID silently ignored a conflicting workspace selector");
     const emptySend = await script(["send", "--machine", machine, "--workspace", "", "--to", record.sessionId, "Must not ignore an empty workspace selector."]);
@@ -172,13 +173,13 @@ sys.exit(r.returncode)
       t.assertions.assert(invalid.code !== 0 && invalid.stderr.includes("--request-id"), "invalid retry identity generated a new dispatch");
     }
     t.assertions.assert(JSON.stringify(intentsBeforeInvalid) === JSON.stringify(readdirSync(path.join(sourceRoot, ".genethub/team/dispatch")).sort()), "invalid remote options wrote new dispatch intents");
-    const afterConflict = (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.pendingMessageIds;
+    const afterConflict = (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.pendingMessageIds;
     t.assertions.assert(JSON.stringify(beforeConflict) === JSON.stringify(afterConflict), "rejected workspace selector queued a remote message");
     const sent = await script(["send", "--machine", machine, "--workspace", qa.id, "--to", record.sessionId, "Queued while paused."]);
-    t.assertions.assert(sent.code === 0 && (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.paused, "remote send lifted Human pause");
+    t.assertions.assert(sent.code === 0 && (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.paused, "remote send lifted Human pause");
     await t.flows.main.sendPrompt(o.client, record.sessionId, "Resume the task.", null, "u_remote_resume");
     await t.stage("resumed-result", () => t.tools.waitUntil(async () => {
-      const s = (await cliJson(["session", "get", record.sessionId], true)).session.summary;
+      const s = (await cliJson(["session", "get", record.sessionId], true)).summary;
       if (s.status === "failed" || s.inputSummary?.error) throw new Error("resumed remote execution failed: " + JSON.stringify(s));
       return s.status === "idle" && !s.inputSummary.paused && s.inputSummary.pendingMessageIds.length === 0 && !!s.latestReply && s.latestReply.itemId !== initialReply;
     }, 30000));
@@ -193,7 +194,7 @@ sys.exit(r.returncode)
     t.assertions.assert(hook.code === 0, "one unreachable target aborted hook: " + hook.stderr);
     t.assertions.assert(existsSync(path.join(sourceRoot, ".genethub/team/done", files[0]!)) && !existsSync(lock), "successful independent task did not close and release target lock");
     const archived = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/done", files[0]!), "utf8"));
-    t.assertions.assert(archived.done.reply === (await cliJson(["session", "get", record.sessionId], true)).session.summary.latestReply.itemId, "reconciliation delivered the earlier reply instead of the latest corrected result");
+    t.assertions.assert(archived.done.reply === (await cliJson(["session", "get", record.sessionId], true)).summary.latestReply.itemId, "reconciliation delivered the earlier reply instead of the latest corrected result");
     t.assertions.assert(JSON.parse(readFileSync(path.join(pendingDir, "000-offline.json"), "utf8")).lastReconcileError, "offline task lost its retry evidence");
     // A receiver that crashed before recording a session ID must never retry creation.
     const intentDir = path.join(sourceRoot, ".genethub/team/dispatch");
@@ -229,8 +230,8 @@ sys.exit(r.returncode)
       const receipt = JSON.parse(readFileSync(path.join(intentDir,createHash("sha256").update(dispatchId!).digest("hex")+".json"),"utf8"));
       t.assertions.assert(task.sessionId===receipt.receipt.sessionId && task.remoteDispatch.target.workspaceId===qa.id && task.remoteDispatch.target.machineId===machine,"fresh task evidence belongs to another operation or source");
       freshSessions.push(task.sessionId);
-      await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).session.summary; return s.status === "idle" && !!s.latestReply; }, 30000)
-        .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).session.summary)); });
+      await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).summary; return s.status === "idle" && !!s.latestReply; }, 30000)
+        .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).summary)); });
       const finished = await script(["hook"]);
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
     }
@@ -296,9 +297,12 @@ sys.exit(r.returncode)
     writeFileSync(path.join(targetRoot, ".genethub/task-source.json"), JSON.stringify({ machineId: reverse.machine.machineId, workspaceId: sourceQa.id, role: "qa", command: [python, path.join(sourceRoot, "tools/team.py")] }));
     const caller = await cliJson(["agent", "run", "--agent", "ctl-cli-command", "--workspace", sourceProject.id, "--creation-id", "remote.owner.front", "--prepare-only", "--no-wait", "prepare front before dispatch"]);
     const callerSid = caller.sessionId;
-    const inspectSession = async (sid: string, remote = false) => (await cliJson(["session", "get", sid], remote)).session;
+    const inspectSession = async (sid: string, remote = false) => ({
+      summary: (await cliJson(["session", "get", sid], remote)).summary,
+      items: (await cliJson(["session", "narrative", sid, "--limit", "100"], remote)).page.items,
+    });
     const idleSession = (sid: string, remote = false) => t.tools.waitUntil(async () => {
-      const snap = await inspectSession(sid, remote);
+      const snap = await cliJson(["session", "get", sid], remote);
       return snap.summary.status === "idle" && !snap.summary.inputSummary?.pendingMessageIds.length;
     }, 30000);
     const callTask = async (sid: string, root: string, args: string[], remote = false) => {
@@ -306,7 +310,12 @@ sys.exit(r.returncode)
       await idleSession(sid, remote);
       const item = (await inspectSession(sid, remote)).items.filter((i: any) => i.type === "assistantMessage").at(-1);
       if (!item) throw new Error("real task caller returned no reply");
-      return JSON.parse(item.text) as { code: number; out: string; err: string };
+      try { return JSON.parse(item.text) as { code: number; out: string; err: string }; }
+      catch {
+        const snap = await inspectSession(sid, remote);
+        const recent = snap.items.slice(-5).map((i: any) => `${i.type}: ${String(i.text ?? "").slice(0, 160)}`).join(" | ");
+        throw new Error(`task caller ${sid} (${remote ? "executor" : "source"}, agent ${snap.summary.agentId}) replied without a command result; recent items: ${recent}; agent journal: ${readFileSync(commandAgent.journalPath, "utf8").split("\n").filter(l => l.includes("unparsed")).slice(-2).join(" ").slice(-1500)}`);
+      }
     };
     // Keep author role definitions but remove the fake source execution Space.
     await cliJson(["workspace","remove",sourceQa.id]);
@@ -368,6 +377,19 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"task return restored a fake local QA workspace");
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
+    // Restored previous-owner references can outgrow the small exchange head
+    // without increasing the number of currently running workers.
+    const evidenceRefs = Array.from({length: 300}, (_, n) => "s_" + n.toString(16).padStart(32, "0"));
+    const currentTask = JSON.parse(readFileSync(sourceTaskFile, "utf8"));
+    currentTask.state = "active";
+    currentTask.previousOwners = evidenceRefs.map(sessionId => ({sessionId}));
+    writeFileSync(sourceTaskFile, JSON.stringify(currentTask));
+    const projected = await script(["hook"]);
+    t.assertions.assert(projected.code === 0, "large projection maintenance failed: " + projected.stderr);
+    const largeSourceProjection = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/session-coordination.json"), "utf8"));
+    const largeTargetProjection = JSON.parse(readFileSync(path.join(targetRoot, "spaces/qa/.genethub/session-coordination.json"), "utf8"));
+    t.assertions.assert(Buffer.byteLength(JSON.stringify(largeSourceProjection)) > 8192 && largeTargetProjection.revision === largeSourceProjection.revision && evidenceRefs.every(sid => largeTargetProjection.references.includes(sid)), "Timer success hid a failed large remote projection");
+    currentTask.state = "delivered"; writeFileSync(sourceTaskFile, JSON.stringify(currentTask));
     // Ordered single-source delivery uses receiving time, never wall-clock
     // comparison with the source. Replay and accidental foreign use retain it.
     const projectionPath=path.join(targetRoot,"spaces/qa/.genethub/session-coordination.json");
@@ -411,6 +433,72 @@ sys.exit(r.returncode)
     const afterUpgrade=JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8"));
     installed=buildArtifact();t.assertions.assert(installed.status===0&&JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8")).archiveSha256===afterUpgrade.archiveSha256,"unchanged build did not recover the same install receipt");
     t.assertions.assert((await inspectSession(installedTask.owner.sessionId,true)).summary.workspaceId===installedBinding.workspaceId,"artifact upgrade lost the native history binding");
+    // Migrate the same team to the role-level TEAM_MACHINE contract: one declaration per role,
+    // installed by `employee sync` into a platform-chosen directory, never re-routed by a flag.
+    const builder={TEAM_SPACEBUILDER:path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py")};
+    const declare=(role:string,value:string|null)=>{
+      const file=path.join(sourceRoot,"spaces",role,".genethub/open.env");
+      const lines=existsSync(file)?readFileSync(file,"utf8").split("\n").filter(l=>l&&!l.startsWith("TEAM_MACHINE=")):[];
+      if(value!==null)lines.push("TEAM_MACHINE="+value);
+      mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,lines.join("\n")+"\n");
+    };
+    const intentsBeforeDeclared=readdirSync(intentDir).sort(), pendingBeforeDeclared=readdirSync(pendingDir).sort();
+    const sourceSettings=path.join(sourceRoot,".genethub/open.env"), sourceSettingsText=readFileSync(sourceSettings,"utf8");
+    writeFileSync(sourceSettings,sourceSettingsText+"TEAM_MACHINE="+machine+"\n");
+    const teamWide=await script(["spawn","--kind","research","--space","qa","--desc","team-wide machine","Must not dispatch."]);
+    t.assertions.assert(teamWide.code!==0&&teamWide.stderr.includes("只能写在岗位"),"team-level TEAM_MACHINE was accepted: "+teamWide.stderr);
+    writeFileSync(sourceSettings,sourceSettingsText);
+    declare("qa",machine);
+    const legacyHook=await script(["employee","sync"],builder);
+    t.assertions.assert(legacyHook.code!==0&&legacyHook.stderr.includes("install_remote"),"sync ran beside the legacy install build hook: "+legacyHook.stderr);
+    const withoutHook=JSON.parse(readFileSync(sourceDescriptor,"utf8"));delete withoutHook.buildHooks;writeFileSync(sourceDescriptor,JSON.stringify(withoutHook));
+    declare("research",machine);
+    const notInstalled=await script(["spawn","--kind","research","--space","research","--desc","undeployed role","Must not run locally."]);
+    t.assertions.assert(notInstalled.code!==0&&notInstalled.stderr.includes("还没有安装"),"declared but uninstalled role did not stop dispatch: "+notInstalled.stderr);
+    declare("research",null);
+    const sourceMachine=(await cliJson(["context"])).daemon.machineId;
+    const rerouted=await script(["spawn","--kind","research","--space","qa","--machine",sourceMachine,"--desc","reroute","Must not move the role."]);
+    t.assertions.assert(rerouted.code!==0&&rerouted.stderr.includes("不能用 --machine"),"--machine moved a declared role: "+rerouted.stderr);
+    t.assertions.assert(JSON.stringify(intentsBeforeDeclared)===JSON.stringify(readdirSync(intentDir).sort())&&JSON.stringify(pendingBeforeDeclared)===JSON.stringify(readdirSync(pendingDir).sort()),"a rejected declared-role dispatch left intents or pending work");
+    let synced=await script(["employee","sync"],builder);
+    const agentSettings=synced.stderr.match(/TEAM_AGENT=<agent id> to (\/\S+?open\.env)/)?.[1];
+    if(synced.code!==0&&agentSettings){mkdirSync(path.dirname(agentSettings),{recursive:true});writeFileSync(agentSettings,"TEAM_AGENT=ctl-cli-command\n");synced=await script(["employee","sync"],builder);}
+    t.assertions.assert(synced.code===0,"employee sync did not install the declared role: "+synced.stdout+synced.stderr);
+    const syncReport=JSON.parse(synced.stdout.trim().split("\n").at(-1)!);
+    const declaredBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
+    const declaredRuntime=path.dirname(path.dirname(declaredBinding.command[1]));
+    t.assertions.assert(syncReport.installed.length===1&&syncReport.installed[0].roles.join()==="qa"&&declaredBinding.machineId===machine&&declaredBinding.workspaceId===syncReport.installed[0].workspaces.qa,"sync did not write exactly the declared binding");
+    t.assertions.assert(declaredRuntime.startsWith(path.join(t.env.home,".genehub-teams","team."))&&declaredRuntime!==runtimeRoot,"runtime directory was not chosen by the platform: "+declaredRuntime);
+    writeFileSync(path.join(declaredRuntime,".genethub/open.env"),"TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=9999\n");
+    const declaredReceipt=JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8"));
+    const installedRoleSettings=path.join(declaredRuntime,"spaces/qa/.genethub/open.env");
+    t.assertions.assert(declaredReceipt.members.map((m:any)=>m.name).join()==="qa"&&(!existsSync(installedRoleSettings)||!readFileSync(installedRoleSettings,"utf8").includes("TEAM_MACHINE")),"installed copy carries the source's machine declaration or extra roles");
+    const listedRoles=await script(["employee","ls"]);
+    t.assertions.assert(listedRoles.code===0&&/- qa \[.*机器: .*已安装/.test(listedRoles.stdout),"employee ls hides the role's machine: "+listedRoles.stdout);
+    // The executor accepts only roles installed for it, even if someone registers another role by hand.
+    const intruder=(await cliJson(["space","open",path.join(declaredRuntime,"spaces/research")],true));
+    const intruderId=(intruder.workspace??intruder).id;
+    const foreign=spawnSync(python,[path.join(declaredRuntime,"tools/team.py"),"receive",JSON.stringify({id:"uninstalled-role",workspaceId:intruderId,role:"research"})],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    const foreignError=(()=>{try{return JSON.parse(foreign.stdout.trim().split("\n").at(-1)!).error?.what??"";}catch{return "";}})();
+    t.assertions.assert(foreign.status!==0&&foreignError.includes("没有安装到这台机器"),"executor accepted a role that was not installed for it: "+foreign.stdout+foreign.stderr);
+    await cliJson(["workspace","remove",intruderId],true);
+    const declaredStart=await callTask(callerSid,sourceRoot,["task","start","--space","qa","--request-id","declared.owner","--desc","declared owner","Complete one task on the declared machine"]);
+    t.assertions.assert(declaredStart.code===0,"declared role did not auto-route without --machine: "+declaredStart.err);
+    const declaredTask=JSON.parse(declaredStart.out.trim().split("\n").at(-1)!);
+    await t.tools.waitUntil(async()=>{
+      const snap=await inspectSession(declaredTask.owner.sessionId,true);
+      return snap.summary.coordination?.taskId===declaredTask.taskId&&snap.summary.status==="idle"&&!snap.summary.inputSummary?.pendingMessageIds.length&&snap.items.some((i:any)=>i.type==="assistantMessage");
+    },30000);
+    t.assertions.assert((await inspectSession(declaredTask.owner.sessionId,true)).summary.workspaceId===declaredBinding.workspaceId,"declared role ran outside its installed workspace");
+    const declaredFinish=await callTask(declaredTask.owner.sessionId,declaredRuntime,["task","finish",declaredTask.taskId,"--outcome","success","DECLARED_MACHINE_OWNER_COMPLETE"],true);
+    t.assertions.assert(declaredFinish.code===0,"declared Owner could not return: "+declaredFinish.err);
+    await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",declaredTask.taskId+".json"),"utf8")).state==="delivered";},30000);
+    // Removing the declaration brings the role home; the old registration is reported, not silently orphaned.
+    declare("qa",null);
+    const home=await script(["employee","sync"],builder);
+    t.assertions.assert(home.code===0,"sync could not bring the role back: "+home.stderr);
+    const homeReport=JSON.parse(home.stdout.trim().split("\n").at(-1)!);
+    t.assertions.assert(!(JSON.parse(readFileSync(sourceDescriptor,"utf8")).members??[]).some((m:any)=>m.name==="qa")&&homeReport.local.includes("qa")&&homeReport.retained.some((r:any)=>r.role==="qa"&&r.workspaceId===declaredBinding.workspaceId),"undeclared role kept a remote binding or lost the retained registration report: "+home.stdout);
     t.note("real relay + two daemon state directories; one successful stdout lost and recovered; writer/identity/model/pause/reconcile/unknown-create contracts verified");
   } finally {
     sourceClient?.close();

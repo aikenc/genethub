@@ -15,7 +15,7 @@
 
 ## 跨机与部署
 
-定义源和权威任务账本留在项目指定的 dev 主机。远端使用已安装完整执行制品、源端 members 绑定及实际本机模型；配置了 WORKTREE_DIR 时按固定工位串行，未配置时可准备同岗位多个独立会话，实际写项目之前各自 bind-directory；不 clone 团队定义源、不另起前台/timer。
+定义源和权威任务账本留在项目指定的 dev 主机。远端使用岗位 `TEAM_MACHINE` 声明、`employee sync` 安装的完整执行制品及实际本机模型；配置了 WORKTREE_DIR 时按固定工位串行，未配置时可准备同岗位多个独立会话，实际写项目之前各自 bind-directory；不 clone 团队定义源、不另起前台/timer。
 
 日常只按岗位发任务。原接单回执保存来源机器／Space 与返回命令；远端 task 操作使用本会话的原回执返回源账本，修改安装默认不会改投在途任务。`.genethub/task-source.json` 由 build post 生成，仅作安装默认及旧任务兼容；Agent 不手填。它是路由与单源目录约定，不是平台 ACL。
 

@@ -141,7 +141,27 @@ def genet(*args, ok_codes=(0,)):
         raise ExpertError("genet 返回了无法核对的响应", "结果未知，不能按空目录或不存在处理", "保留原会话、派单与写锁，先查询原操作回执")
     if len(args) >= 2 and args[0] == "space" and args[1] == "open":
         _WORKSPACES_CACHE["items"] = None
+    if not _reads_only(args):
+        _SYNC["fresh"].clear()
     return envelope.get("data") or {}
+
+
+_READ_VERBS = {
+    "session": {"list", "get", "inspect", "narrative", "rounds", "trunks", "trunk", "blob", "context"},
+    "workspace": {"list", "show"},
+    "machine": None,
+    "context": None,
+    "capabilities": None,
+    "schema": None,
+}
+
+
+def _reads_only(args):
+    """Whether a genet call cannot change sessions, so a synced snapshot stays current."""
+    if not args or args[0] not in _READ_VERBS:
+        return False
+    verbs = _READ_VERBS[args[0]]
+    return verbs is None or (len(args) > 1 and args[1] in verbs)
 
 
 def read_json(path, default=None):
@@ -397,6 +417,58 @@ def remote_target(root, machine, role, explicit=None):
     return dict(target, machineId=canonical_machine(target["machineId"]))
 
 
+def machine_entry(selector):
+    """(canonical id, is this machine) for one exact `machine list` selector."""
+    entry = genet("machine", "show", selector)
+    own = entry.get("deviceHandle") or entry["machineId"]
+    here = (genet("context").get("daemon") or {}).get("machineId")
+    return own, entry.get("local") is True or here in (entry.get("machineId"), entry.get("deviceHandle"))
+
+
+def role_machine(root, role):
+    """The machine a role belongs to: `TEAM_MACHINE` in that role's own open.env, nothing else."""
+    if open_env(root).get("TEAM_MACHINE") is not None:
+        raise ExpertError("TEAM_MACHINE 只能写在岗位自己的 spaces/<岗位>/.genethub/open.env", "没有派单",
+                          "从团队根 .genethub/open.env 删除 TEAM_MACHINE，改到需要放到其他机器的岗位里")
+    if not role or role in ("root", "front", "default") or role not in child_role_names(root):
+        return None
+    value = open_env(os.path.join(root, "spaces", role)).get("TEAM_MACHINE")
+    if value == "":
+        raise ExpertError("岗位 %s 的 TEAM_MACHINE 为空" % role, "没有派单", "填写 machine list 返回的精确 ID；在本机运行就删除这一行")
+    return value
+
+
+def role_route(root, role, requested=None, workspace=None):
+    """(machine, binding) when a role executes elsewhere, None when it executes here.
+
+    A declared role has exactly one machine: dispatch follows it and `--machine` cannot move it.
+    Roles without a declaration keep a legacy members/remote-targets binding only when one is named."""
+    declared = role_machine(root, role)
+    if declared is None:
+        if requested is None:
+            legacy = remote_targets(root).get(role)
+            if not isinstance(legacy, dict) or not legacy.get("machineId"):
+                return None
+            requested = legacy["machineId"]
+        print("提示：岗位 %s 使用旧的远端绑定；在 spaces/%s/.genethub/open.env 写 TEAM_MACHINE 后运行 employee sync 迁移" % (role, role), file=sys.stderr)
+        binding = remote_target(root, requested, role, workspace)
+        return binding["machineId"], binding
+    own, here = machine_entry(declared)
+    if requested is not None and canonical_machine(requested) != own:
+        raise ExpertError("岗位 %s 属于机器 %s，不能用 --machine %s 改派" % (role, declared, requested), "没有创建或发送消息",
+                          "去掉 --machine；要换机器就改岗位的 TEAM_MACHINE 后运行 employee sync")
+    if here:
+        if workspace is not None:
+            raise ExpertError("岗位 %s 在本机执行，不接受 --workspace" % role, "没有创建或发送消息", "去掉 --workspace")
+        return None
+    target = remote_targets(root).get(role)
+    if not isinstance(target, dict) or not target.get("machineId") or canonical_machine(target["machineId"]) != own:
+        raise ExpertError("岗位 %s 声明在机器 %s，但还没有安装到那台机器" % (role, declared), "没有创建或发送消息",
+                          "在定义源运行 `run.py employee sync`，安装完成后重试原命令")
+    binding = remote_target(root, declared, role, workspace)
+    return binding["machineId"], binding
+
+
 def remote_receive(target, request):
     """Run the installed executor through the real shell stream, without a command shell."""
     cli, env = _resolve_genet_env()
@@ -404,10 +476,10 @@ def remote_receive(target, request):
         raise ExpertError("环境里没有 GENEHUB_CLI", "没有派单", "在 GeneHub 会话内运行")
     argv = [cli, "shell", "--machine", target["machineId"], "--workspace", target["workspaceId"],
             "--timeout", "110", "--max-output", "65536", "--", *target["command"],
-            "receive", json.dumps(request, ensure_ascii=False)]
+            "receive", "-"]
     cause = ""
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120)
+        done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=120)
         frames = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
         failure = next((f.get("error") for f in frames if isinstance(f.get("error"), dict)), None)
         if failure:
@@ -470,7 +542,10 @@ def _cmd_receive(args):
     Requires an installed team script, but never discovers/registers fronts or starts a timer.
     The shell connection already needed the target account's execution authority.
     """
-    request = json.loads(args.request)
+    raw = sys.stdin.buffer.read(1024 * 1024 + 1) if args.request == "-" else args.request
+    if len(raw if isinstance(raw, bytes) else raw.encode("utf-8")) > 1024 * 1024:
+        raise ExpertError("接单请求超过 1MiB", "没有执行操作，原任务和回执保留", "缩小请求或用已有文件传输传递产物")
+    request = json.loads(raw)
     key = request.get("id")
     if not isinstance(key, str) or not key or len(key) > 200:
         raise ExpertError("缺少有效派单编号", "没有创建会话", "传入 1–200 字符的稳定 id")
@@ -488,6 +563,12 @@ def _cmd_receive(args):
             or role not in child_role_names(root)
             or workspace_root(entry) != os.path.realpath(os.path.join(root, "spaces", role))):
         raise ExpertError("workspace 不属于此接单命令的指定岗位", "没有创建或发送会话", "核对目标机 team.py 路径、岗位与 workspaceId")
+    installed = read_dispatch_record(os.path.join(root, ".genethub", "install-receipt.json"))
+    if installed and not source_operation:
+        bound = {item.get("name") for item in (installed.get("members") or [installed.get("member") or {}])}
+        if role not in bound:
+            raise ExpertError("岗位 %s 没有安装到这台机器" % role, "没有创建或发送会话",
+                              "在定义源把该岗位的 TEAM_MACHINE 指向本机后运行 `run.py employee sync`")
     role_root = workspace_root(entry)
     if request.get("operation") == "coordination":
         snapshot = request.get("snapshot")
@@ -721,6 +802,153 @@ HOOK_SESSIONS_TTL = 20.0
 
 def clear_sessions_cache():
     _WORKSPACE_SESSIONS_CACHE.clear()
+    _SYNC["fresh"].clear()
+
+
+# 定时钩子每台机器每轮一次 `session list --since` 增量同步，本轮的 sessions_of/session_summary 由它提供；
+# 本轮里自己改过会话（派单、发消息等）后下次读取再同步一次。只换数据来源：每处到点、超时、卡住等时间判定
+# 仍按当前时间每轮照常计算，钩子不因“没有变化”跳过任何一轮。目标机不支持或同步失败时，本轮回到逐个查询。
+_SYNC = {"root": None, "wanted": {}, "fresh": set(), "rows": {}, "covered": {}, "off": set()}
+SYNC_MAX_PAGES = 50
+SYNC_MAX_WORKSPACES = 100
+SYNC_FORGET_MS = 24 * 3600 * 1000
+
+
+def _sync_pull(machine, scope, since):
+    """Changed rows, removed ids, the next cursor, and whether the target restarted the scope."""
+    flags = ["session", "list"]
+    for workspace_id in sorted(scope):
+        flags += ["--workspace", workspace_id]
+    flags += [*machine_args(machine), "--since", since or "start"]
+    changed, removed, reset = {}, set(), False
+    for _ in range(SYNC_MAX_PAGES):
+        page = genet(*flags)
+        rows, gone, cursor = page.get("sessions"), page.get("removed"), page.get("cursor")
+        if not isinstance(rows, list) or not isinstance(gone, list) or not isinstance(cursor, str) or not cursor:
+            raise ExpertError("会话增量响应无法核对", "本轮回到逐个查询，没有按空列表处理", "核对目标机 session list --since 回执")
+        if page.get("reset") is True:
+            changed.clear()
+            removed.clear()
+            reset = True
+        for ref in gone:
+            if not isinstance(ref, dict) or not isinstance(ref.get("id"), str):
+                raise ExpertError("会话增量删除记录无法核对", "本轮回到逐个查询", "核对目标机 session list --since 回执")
+            key = (ref.get("workspaceId"), ref["id"])
+            changed.pop(key, None)
+            removed.add(key)
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str) or not SESSION_ID.match(row["id"])
+                    or row.get("workspaceId") not in scope or not isinstance(row.get("status"), str)):
+                raise ExpertError("会话增量记录无法核对", "本轮回到逐个查询，没有发布部分结果", "核对目标机 session list --since 回执")
+            key = (row["workspaceId"], row["id"])
+            removed.discard(key)
+            changed[key] = row
+        if page.get("complete") is True:
+            return changed, removed, cursor, reset
+        flags[-1] = cursor
+    raise ExpertError("会话增量同步没有收敛", "本轮回到逐个查询", "核对目标机 session list --since 的 cursor 是否推进")
+
+
+def _sync_state():
+    path = state_dir(_SYNC["root"], "sync.json")
+    state = read_json(path, {}) or {}
+    machines = state.get("machines") if state.get("version") == 1 and isinstance(state.get("machines"), dict) else {}
+    return path, machines
+
+
+def _sync_used(entry, key, now):
+    used = {w: t for w, t in ((entry or {}).get("workspaces") or {}).items()
+            if isinstance(w, str) and isinstance(t, int) and now - t < SYNC_FORGET_MS}
+    for workspace_id in _SYNC["wanted"].get(key, ()):
+        used[workspace_id] = now
+    return used
+
+
+def _sync_machine(key):
+    """Bring one machine's snapshot current with one incremental read, persisting the cursor."""
+    path, machines = _sync_state()
+    entry = machines.get(key) if isinstance(machines.get(key), dict) else {}
+    now = now_ms()
+    used = _sync_used(entry, key, now)
+    scope = set(used)
+    if not scope:
+        _SYNC["off"].add(key)
+        return
+    if len(scope) > SYNC_MAX_WORKSPACES:
+        raise ExpertError("岗位工作区超过增量同步上限", "本轮回到逐个查询", "减少同一机器上的岗位数")
+    machine = key or None
+    covered = set(entry.get("covered") or [])
+    cursor = entry.get("cursor") if isinstance(entry.get("cursor"), str) and covered else None
+    rows = {}
+    for row in entry.get("sessions") or []:
+        if isinstance(row, dict) and row.get("workspaceId") in covered & scope and isinstance(row.get("id"), str):
+            rows[(row["workspaceId"], row["id"])] = row
+    if cursor is None:
+        rows, _, cursor, _ = _sync_pull(machine, scope, None)
+    else:
+        added = scope - covered
+        if added:
+            fresh, _, _, _ = _sync_pull(machine, added, None)
+            rows.update(fresh)
+        changed, removed, cursor, reset = _sync_pull(machine, scope, cursor)
+        if reset:
+            rows = changed
+        else:
+            for gone in removed:
+                rows.pop(gone, None)
+            rows.update(changed)
+    machines[key] = {"cursor": cursor, "covered": sorted(scope), "workspaces": used,
+                     "sessions": list(rows.values()), "syncedAtMs": now_ms()}
+    write_json(path, {"version": 1, "machines": machines})
+    _SYNC["rows"][key] = rows
+    _SYNC["covered"][key] = scope
+    _SYNC["fresh"].add(key)
+
+
+def _sync_remember():
+    """Keep workspaces learned from direct reads so the next tick's sync covers them."""
+    if _SYNC["root"] is None:
+        return
+    path, machines = _sync_state()
+    now, changed = now_ms(), False
+    for key, wanted in _SYNC["wanted"].items():
+        entry = machines.get(key) if isinstance(machines.get(key), dict) else {}
+        if wanted - set(entry.get("workspaces") or {}):
+            machines[key] = dict(entry, workspaces=_sync_used(entry, key, now))
+            changed = True
+    if changed:
+        write_json(path, {"version": 1, "machines": machines})
+
+
+def _synced(machine, workspace_id=None):
+    """This tick's rows for one machine, or None when it must be read directly."""
+    if _SYNC["root"] is None:
+        return None
+    key = machine or ""
+    if key in _SYNC["off"]:
+        return None
+    wanted = _SYNC["wanted"].setdefault(key, set())
+    if key and not wanted:
+        # A remote role's own workspace, as installed, before any read has named it.
+        try:
+            targets = remote_targets(_SYNC["root"])
+        except ExpertError:
+            targets = {}
+        wanted.update(target["workspaceId"] for target in targets.values()
+                      if isinstance(target, dict) and target.get("machineId") == key
+                      and isinstance(target.get("workspaceId"), str) and target["workspaceId"])
+    if workspace_id:
+        wanted.add(workspace_id)
+    if key not in _SYNC["fresh"] or (workspace_id and workspace_id not in _SYNC["covered"].get(key, ())):
+        try:
+            _sync_machine(key)
+        except ExpertError:
+            # Offline or not upgraded: the stored snapshot is kept for the next tick, never used now.
+            _SYNC["off"].add(key)
+            return None
+    if key not in _SYNC["fresh"]:
+        return None
+    return _SYNC["rows"].get(key, {}), _SYNC["covered"].get(key, set())
 
 
 def auto_describe_session(session_id, text):
@@ -743,11 +971,12 @@ def machine_args(machine):
     return ["--machine", machine] if machine else []
 
 
-def dispatch_machine(args):
+def dispatch_machine(args, routed=False):
+    """`routed` callers resolve the role's own machine first and check remote-only options themselves."""
     machine = getattr(args, "machine", None)
     if machine == "":
         raise ExpertError("--machine 不能为空", "没有执行操作", "从 machine list 取得精确 ID；本机派单移除 --machine")
-    if machine is None and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
+    if machine is None and not routed and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
         raise ExpertError("--workspace/--request-id 仅用于 --machine 派单", "没有执行操作", "本机派单用 --space 选择岗位；移除无效的远端选项")
     request_id = getattr(args, "request_id", None)
     if request_id is not None and (not isinstance(request_id, str) or not request_id or len(request_id) > 200):
@@ -784,6 +1013,10 @@ def session_history(workspace_id, machine=None):
 def sessions_of(workspace_id, machine=None, max_age=None):
     if not workspace_id:
         return []
+    synced = _synced(machine, workspace_id)
+    if synced is not None and workspace_id in synced[1]:
+        items = [row for (wid, _), row in synced[0].items() if wid == workspace_id]
+        return sorted(items, key=lambda row: (row.get("updatedAtMs") or 0, row["id"]), reverse=True)
     now = time.time()
     age = SESSIONS_TTL if max_age is None else max_age
     key = (machine or "", workspace_id)
@@ -803,10 +1036,17 @@ def session_summary(session_id, machine=None):
     # Coordination needs live status and inbox metadata, not the Agent's full
     # native conversation. The explicit summary mode skips the history view,
     # including narrative cloning and digesting, in watchdog/lock checks.
-    result = genet("session", "get", session_id, "--summary", *machine_args(machine))
+    synced = _synced(machine)
+    if synced is not None:
+        found = [row for (_, sid), row in synced[0].items() if sid == session_id]
+        if len(found) == 1:
+            return found[0]
+    result = genet("session", "get", session_id, *machine_args(machine))
     summary = result.get("summary")
     if not isinstance(summary, dict) or summary.get("id") != session_id or not isinstance(summary.get("status"), str):
         raise ExpertError("会话摘要响应无法核对原 ID 和状态", "查询结果未知，不能认定会话不存在或已结束", "保留原派单和写锁，查询同一会话回执")
+    if _SYNC["root"] is not None and isinstance(summary.get("workspaceId"), str) and summary["workspaceId"]:
+        _SYNC["wanted"].setdefault(machine or "", set()).add(summary["workspaceId"])
     return summary
 
 
@@ -1372,7 +1612,10 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
                 "没有排入任何消息",
                 "用 `--machine <id> --to <岗位名>`（如 qa、leader）或 `--to s_xxx`；远端不注册团队根和前台",
             )
-        target = remote_target(root, machine, role, workspace)
+        route = role_route(root, role, machine, workspace)
+        if not route:
+            raise ExpertError("岗位 %s 在本机执行" % role, "没有排入任何消息", "去掉 --machine，按本机岗位发送")
+        machine, target = route
         existing = []
         for item in live_sessions(target["workspaceId"], machine):
             record = read_dispatch_record(state_dir(root, "pending", item["id"] + ".json")) or {}
@@ -1553,6 +1796,10 @@ def cmd_send(args):
         return send_explicit_resume(root, args, sender, machine)
     if getattr(args, "message_id", None):
         raise ExpertError("--message-id 仅用于明确恢复", "没有忽略指定操作 ID 后另行投递", "普通 send 使用团队自带的稳定投递身份")
+    own_role = "leader" if args.to == "work" else args.to
+    if not SESSION_ID.match(args.to) and own_role in child_role_names(root) and role_machine(root, own_role) is not None:
+        route = role_route(root, own_role, machine, getattr(args, "workspace", None))
+        machine = route[0] if route else None
     body_text = " ".join(args.text)
     target, created_now, target_root, target_role = resolve_send_target(
         root, args.to, args.kind, body_text, sender, machine, getattr(args, "workspace", None)
@@ -1719,18 +1966,25 @@ def _cut_worker_sub_worktree(target_root, role, base_repo_hint, desc, explicit_s
 
 def cmd_spawn(args):
     root = find_root()
-    machine = dispatch_machine(args)
+    machine = dispatch_machine(args, routed=True)
     if machine and getattr(args, "expert", None):
         raise ExpertError("--machine 只能派给本团队在其它机器上的岗位", "没有创建会话", "先在本机定位到该团队再派单，或去掉 --team")
     target_root = find_expert(root, getattr(args, "expert", None)) if getattr(args, "expert", None) else root
     name, mine = me(target_root)
     role = getattr(args, "space", None) or args.kind
+    if role == "work" and not getattr(args, "space", None) and "work" not in child_role_names(target_root):
+        role = "leader"
+    declared = machine or role_machine(target_root, role) is not None
+    route = role_route(target_root, role, machine, getattr(args, "workspace", None)) if declared else None
+    machine = route[0] if route else None
+    if not machine and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
+        raise ExpertError("--workspace/--request-id 仅用于其他机器上的岗位", "没有执行操作", "本机岗位直接用 --space 派单；移除远端选项")
+    if machine and getattr(args, "expert", None):
+        raise ExpertError("其他团队的远端岗位不能从这里派单", "没有创建会话", "在该团队的定义源里派单")
     if machine and (getattr(args, "worktree", None) or args.dir):
-        raise ExpertError("--machine 不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
+        raise ExpertError("其他机器上的岗位不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
     if machine:
-        if role == "work" and not getattr(args, "space", None):
-            role = "leader"
-        remote_binding = remote_target(root, machine, role, getattr(args, "workspace", None))
+        remote_binding = route[1]
         workspace_id = remote_binding["workspaceId"]
     else:
         workspace_id = mine["spaces"].get(role)
@@ -2264,6 +2518,7 @@ def cmd_employee(args):
             print("（还没有子空间岗位）")
             return
         by_workspace = session_snapshot_by_workspace() if any(spaces_map.get(role) for role in roles) else {}
+        bindings = remote_targets(root)
         for r in roles:
             rdir = os.path.join(root, "spaces", r)
             info = descriptor(rdir) or {}
@@ -2272,7 +2527,29 @@ def cmd_employee(args):
             wid = spaces_map.get(r, "")
             live = by_workspace.get(wid, []) if wid else []
             state_tag = "active(在岗)" if active else "standby(待岗)"
-            print("- %s [%s]: %s | 工位: %s | 活跃会话: %d" % (r, state_tag, info.get("description") or "-", wt or "未绑定", len(live)))
+            declared = role_machine(root, r)
+            installed = (bindings.get(r) or {}).get("machineId")
+            if declared:
+                try:
+                    own, here = machine_entry(declared)
+                except ExpertError:
+                    where = "%s（目标机器不在 machine list 中）" % declared
+                else:
+                    where = "本机" if here else "%s（%s）" % (declared, "已安装" if installed == own else "未安装，运行 employee sync")
+            else:
+                where = "本机" if not installed else "%s（旧绑定，写 TEAM_MACHINE 后 employee sync 迁移）" % installed
+            print("- %s [%s]: %s | 机器: %s | 工位: %s | 活跃会话: %d" % (r, state_tag, info.get("description") or "-", where, wt or "未绑定", len(live)))
+        return
+    if subcmd == "sync":
+        require_definition_source(root)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_remote", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "install_remote.py"))
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        try:
+            installer.sync(root)
+        except RuntimeError as error:
+            raise ExpertError("岗位安装没有完成: %s" % str(error)[-600:], "已安装的旧版本与原绑定保留", "按提示补齐目标机配置后重新运行 employee sync") from error
         return
     if subcmd in ("retire", "standby"):
         role = (args.name or "").strip()
@@ -2281,7 +2558,7 @@ def cmd_employee(args):
         print("已将岗位 spaces/%s 解除工位绑定转入待岗（原工位: %s）" % (role, old_wt or "无"))
         return
     if subcmd != "add":
-        raise ExpertError("未知 employee 子命令", "没有改动", "用 `team.py employee add|ls|retire`")
+        raise ExpertError("未知 employee 子命令", "没有改动", "用 `team.py employee add|ls|sync|retire`")
     require_definition_source(root)
     role = (args.name or "").strip()
     if not role or "/" in role or "\\" in role or role.startswith("."):
@@ -4557,8 +4834,10 @@ def cmd_hook(_args):
     global SESSIONS_TTL
     SESSIONS_TTL = HOOK_SESSIONS_TTL  # 一轮钩子共用一份 session 快照；非钩子命令仍用 2s
     root = find_root()
+    _SYNC.update(root=root, wanted={}, fresh=set(), rows={}, covered={}, off=set())
     SYSTEM_ISSUES_SEEN.discard(root)
     name, mine = me(root)
+    _SYNC["wanted"][""] = set(mine["spaces"].values())
     builtin_admin = is_builtin_admin(root)
     write_json(state_dir(root, "alive"), {"atMs": now_ms()})
     routines = (sync_identity, clean_temp_hourly) if builtin_admin else (sync_identity, clean_temp_hourly, platform_watch)
@@ -4591,6 +4870,11 @@ def cmd_hook(_args):
     except Exception as error:  # noqa: BLE001 - turned into a system message below, never swallowed
         report(root, name, mine, "出了什么: 未处理的异常 %r\n现在状态: 待办记录都还在 .genethub/team/pending/\n下一步: 检查 tools/team.py；修好后下一次运行自动恢复" % error)
         raise
+    finally:
+        try:
+            _sync_remember()
+        except (OSError, ExpertError):
+            pass
 
 
 SYSTEM_ISSUES_SEEN = set()
@@ -4675,6 +4959,7 @@ def main(argv):
         emp_add.add_argument("--branch", help="optional branch name when cutting worktree from --repo")
         emp_add.add_argument("--no-worktree", action="store_true", help="do not auto-cut a worktree slot")
         emp_sub.add_parser("ls")
+        emp_sub.add_parser("sync", help="install every role whose open.env declares TEAM_MACHINE on that machine")
         for ret_name in ("retire", "standby"):
             emp_ret = emp_sub.add_parser(ret_name)
             emp_ret.add_argument("name")
@@ -4765,7 +5050,7 @@ def main(argv):
     sub.add_parser("sync-identity")
     sub.add_parser("hook")
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
-    receive.add_argument("request", help="dispatch/release JSON envelope")
+    receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):

@@ -107,11 +107,13 @@ Owner、协作者都以 `task finish` 记录明确结论，普通中间回复不
 | 需求 | 做法 |
 |---|---|
 | 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
-| 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
+| 会话本身在 B | 岗位 `spaces/<岗位>/.genethub/open.env` 写 `TEAM_MACHINE=<B 的机器 ID>`，定义源运行 `run.py employee sync`；之后 `task start`/`spawn`/`send --to <岗位>` 自动在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
 
-`--machine` 接受 `genet machine list` 返回的精确 ID。派单方在 `agent-space.genet.json` 的 `members` 为每个远端岗位
-固定 `machineId`、`workspaceId` 与 `command`（目标机 Python、已安装 `tools/team.py` 的绝对路径 argv）。
-不再按岗位短名/目录名猜归属，`--workspace` 只能核对同一个绑定。完整配置与恢复见
+一个岗位只属于一台机器，唯一来源是该岗位自己的 `TEAM_MACHINE`（团队根不允许写）。`employee sync` 构建独立输出，
+每台目标机安装一次到平台决定的 `~/.genehub-teams/<源 Team 标识>`，只登记声明到该机的岗位，并生成
+`agent-space.genet.json` 的 `members`（`machineId`、`workspaceId`、`command`）。`--machine` 与声明不一致直接拒绝；
+声明了但未安装时拒绝派单而不退回本机；目标机只接安装回执中的岗位。不按岗位短名/目录名猜归属，
+`--workspace` 只能核对同一个绑定。完整配置、旧绑定迁移与恢复见
 [远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/genet_builtin/team-core/references/remote-targets.md)。
 
 **派单账本在发起方，写锁与创建回执在执行端**。`spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
@@ -158,7 +160,7 @@ SpaceBuilder 0.1.5 可 `build <岗位源目录> --output <制品目录>`，移�
 
 ### 跨机器 Space 的固定引用
 
-项目的 `agent-space.genet.json` 可用 `members` 声明外部 Space：
+项目的 `agent-space.genet.json` 可用 `members` 声明外部 Space（团队样板由 `employee sync` 生成，不手写）：
 
 ```json
 {"members":[{"name":"qa","machineId":"<目录中精确机器ID>","workspaceId":"<远端已登记Space ID>","command":["<远端Python绝对路径>","<远端team.py绝对路径>"]}]}

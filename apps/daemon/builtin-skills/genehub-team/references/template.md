@@ -22,9 +22,10 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 | 命令 | 用途 |
 |---|---|
 | `task start --space <岗位> --desc "一句话" --request-id <稳定编号> "目标"` | 创建绑定 Owner 会话的任务；追加、支持、控制和收尾按团队 team-core Skill 的任务指引执行 |
-| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--machine` 派到固定绑定的远端岗位 workspace；`--team <名>` 派到本机另一支团队 |
+| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；岗位声明了 `TEAM_MACHINE` 时自动派到那台机器，`--machine` 只能与声明一致；`--team <名>` 派到本机另一支团队 |
 | `send --to <岗位\|会话\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断；`--machine` 投给远端岗位或远端会话 |
 | `employee add\|ls\|retire` | 动态扩编或待岗岗位，自动建子空间与工位 |
+| `employee sync` | 把 `.genethub/open.env` 写了 `TEAM_MACHINE` 的岗位安装到对应机器（平台决定目标目录），并生成 members 绑定 |
 | `worktree create\|bind\|ls` | 从主仓切 worktree 并写子空间 `open.env` 的 `WORKTREE_DIR` |
 | `publish release <源> --name vX.Y` / `publish report <源> --slug <名>` / `publish rollback` | 发可玩版本到 `datas/releases/`、报告到 `datas/reports/`、紧急回滚 `latest` |
 | `board start\|refresh` | 确保常驻看板服务在线并刷新 `datas/board/index.html` |
@@ -43,8 +44,9 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 - 同一批子任务全部结束后合并为一条 `result` 回执；中途异常由看门狗拉起，不必人工催促。
 - 一个目录同一时间只有一个写会话；并发组员在各自 worktree 提交，由组长 `git merge-tree` 预检后合入。
 - 档位是平台路由标签，不是模型 id；团队只写标签，不钉 `modelId`。
-- **跨机器**：先按团队自己的 `skills/genet_builtin/team-core/references/remote-targets.md` 配置固定 machine/workspace/接单命令，
-  再 `spawn --machine <ID>`。执行端校验模型并持有写锁、创建回执；派单方保留待办和结果回传。
+- **跨机器**：一个岗位只属于一台机器。在岗位 `.genethub/open.env` 写 `TEAM_MACHINE=<机器 ID>`，定义源运行
+  `employee sync`；之后按岗位派单即自动到那台机器，不手写安装脚本、目标路径或 members。细节见团队自己的
+  `skills/genet_builtin/team-core/references/remote-targets.md`。执行端校验模型并持有写锁、创建回执；派单方保留待办和结果回传。
   丢失回复用同一 `--request-id` 查回执，unknown 不重派。`send` 只投递已有会话且不解除暂停。
   配置了 team 的完整 portable 团队制品包含运行工具与团队配置；旧制品或单独子岗位仍须补齐。自定义资源策略在目标团队的新 task 入口执行，旧 receive 不承接它。
 - 自动身份刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`：有 Space pre/post 或 Provider post

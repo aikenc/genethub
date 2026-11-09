@@ -17,7 +17,7 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 | `board start\|refresh` / `directory` / `models check` / `temp new\|ls\|rm\|clean` | 启动/刷新常驻团队看板服务 `datas/board/index.html` / 看当前任务目录 / 管临时区 |
 | `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给 `team-reflect` 留言 / 立即启动团队反思；`snapshot` / `drift` 管理团队仓库与模板差异；`reset` 只在用户明确要求时用 |
 失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；点名模型勿套档位，详见 `references/models.md`。
-日常按岗位使用 task 即可，机器与返回来源由原回执固定。维护远端绑定或恢复旧派单时再读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
+日常按岗位使用 task 即可，机器与返回来源由原回执固定。岗位要放到另一台机器时，只在该岗位 `.genethub/open.env` 写 `TEAM_MACHINE=<机器 ID>` 再运行 `run.py employee sync`，不写安装脚本；细节或恢复旧派单时读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
 暂停会话的显式恢复、署名、去重与验收，先读 [references/resume-paused.md](references/resume-paused.md)。
 自动身份刷新不执行 Space pre/post 或 Provider post；有此类配置时，定时任务保留上一版生成身份，不因此唤起异常反思，手工 `sync-identity` 返回 `SB018`。
 修改源后显式 build 更新身份；发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
@@ -29,7 +29,7 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 ## 项目登记与移除
 `experts`、`me`、看板和 timer 中的目录查询只读，不能把缺失的项目或成员自动 `space open`。用户从列表移除团队后，保留的目录和会话不等于恢复登记的授权；恢复由明确的打开、安装或建队操作执行。项目移除由平台一次处理整个成员树，任何成员运行中或等待交互时拒绝整组移除，不通过逐个移除成员绕过检查。
 已有团队升级时，在定义源合入本条及内置 `tools/genet_builtin/team.py` 的查询修复，保留业务 Class、数据与回执，构建完整制品后安装。旧版 `tools/team.py` 若仍含查询时自动打开的实现，也要在迁移时移除该副作用；只更新平台不会自动改写已有团队副本。
-状态、成员与看板读取完整活动集合，包含归档中尚未完成的事项；已知会话用 `session get <id> --summary`。需要历史的反思检查只查本团队的 Space，用 `session list --workspace <id> --limit 50` 并按 `nextCursor` 读完。缺少 `--limit` 的历史查询（即使有 `--workspace` 或 `--lean`）会返回 `unboundedQueryDisabled`；修改原脚本的读取方式，不原样重试，保留原任务、会话 ID、派单与写锁。失败表示未知，不能按空列表重复创建任务。
+状态、成员与看板读取完整活动集合，包含归档中尚未完成的事项；已知会话用 `session get <id>`。需要历史的反思检查只查本团队的 Space，用 `session list --workspace <id> --limit 50` 并按 `nextCursor` 读完。默认 `session list` 只返回最近 50 条；旧 `--lean`/标签/来源等隐式完整历史写法缺少 `--limit` 或 `--active` 时会返回 `unboundedQueryDisabled`；修改原脚本的读取方式，不原样重试，保留原任务、会话 ID、派单与写锁。失败表示未知，不能按空列表重复创建任务。
 ## Timer计时与恢复
 Team hook使用默认`fixed-delay`：一轮退出并收尾后再等待`every`；运行中不并发、不追补，冷却释放名额，失败或超时也等待。不要为了追求固定启动频率改成`interval`，该模式执行时限最多为间隔的15%，会强制结束超时进程组，适合很短且幂等的命令。长调用需要合理timeout，明显慢查询仍需修复；alive不代表一轮完成。更新模板hook源后build完整制品，再核对实际hook、daemon版本和回传；仅替换文件不代表正在执行的回调已采用新规则。
 机制 report/health/watchdog 熔断默认写内部 notes；例行反思静默，真实交付与用户问题保留原路由。

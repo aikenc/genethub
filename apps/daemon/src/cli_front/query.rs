@@ -8,7 +8,7 @@ use base64::Engine;
 use genehub_proto::{
     BlobRef, ErrorCode, HelloResult, ProtocolError, Reply, Request, RoundLayer, RoundTrunk,
     SessionContext, SessionInspection, SessionNarrativePage, SessionPageRequest, SessionRoundPage,
-    SessionSnapshot, SessionSummary, WorkspaceInfo,
+    SessionSummary, WorkspaceInfo,
 };
 use serde_json::{json, Value};
 
@@ -180,9 +180,15 @@ enum Query {
         limit: Option<u32>,
         cursor: Option<String>,
     },
+    /// `session list --since`: what changed in several projects.
+    SessionChanges {
+        workspace_ids: Vec<String>,
+        since: Option<String>,
+        include_archived: bool,
+        lean: bool,
+    },
     SessionGet {
         session_id: String,
-        summary_only: bool,
     },
     SessionComponents {
         session_id: String,
@@ -424,7 +430,8 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     };
     match verb {
         "list" => {
-            let mut workspace_id = None;
+            let mut workspace_ids: Vec<String> = Vec::new();
+            let mut since = None;
             let mut labels = Vec::new();
             let mut source_kind = None;
             let mut include_archived = false;
@@ -436,11 +443,6 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             while index < args.len() {
                 match args[index].as_str() {
                     "--workspace" => {
-                        if workspace_id.is_some() {
-                            return Err(CliFailure::invalid_args(
-                                "--workspace may be supplied only once",
-                            ));
-                        }
                         index += 1;
                         let value = args.get(index).ok_or_else(|| {
                             CliFailure::invalid_args("--workspace needs a workspace id")
@@ -450,7 +452,25 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                                 "--workspace needs a non-empty workspace id",
                             ));
                         }
-                        workspace_id = Some(value.clone());
+                        if workspace_ids.contains(value) {
+                            return Err(CliFailure::invalid_args(
+                                "--workspace may name each project only once",
+                            ));
+                        }
+                        workspace_ids.push(value.clone());
+                    }
+                    "--since" if since.is_none() => {
+                        index += 1;
+                        since = Some(
+                            args.get(index)
+                                .filter(|s| !s.is_empty() && s.len() <= 4096)
+                                .ok_or_else(|| {
+                                    CliFailure::invalid_args(
+                                        "--since needs start or a returned cursor",
+                                    )
+                                })?
+                                .clone(),
+                        );
                     }
                     "--label" => {
                         index += 1;
@@ -519,11 +539,45 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 }
                 index += 1;
             }
+            if let Some(since) = since {
+                if workspace_ids.is_empty() || workspace_ids.len() > 100 {
+                    return Err(CliFailure::invalid_args(
+                        "--since needs 1..100 --workspace projects",
+                    ));
+                }
+                if active
+                    || limit.is_some()
+                    || cursor.is_some()
+                    || !labels.is_empty()
+                    || source_kind.is_some()
+                {
+                    return Err(CliFailure::invalid_args(
+                        "--since combines only with --workspace, --include-archived and --lean",
+                    ));
+                }
+                return Ok(Query::SessionChanges {
+                    workspace_ids,
+                    since: (since != "start").then_some(since),
+                    include_archived,
+                    lean,
+                });
+            }
+            if workspace_ids.len() > 1 {
+                return Err(CliFailure::invalid_args(
+                    "--workspace may be supplied only once without --since",
+                ));
+            }
+            let workspace_id = workspace_ids.pop();
+            // Discovery is one page by default. Legacy complete-list spellings
+            // remain explicit migration errors rather than silently losing rows.
+            if !active && limit.is_none() && !lean && labels.is_empty() && source_kind.is_none() {
+                limit = Some(50);
+            }
             if cursor.is_some() && limit.is_none() {
-                return Err(CliFailure::invalid_args("--cursor requires --limit"));
+                limit = Some(50);
             }
             if limit.is_some() && (!labels.is_empty() || source_kind.is_some()) {
-                return Err(CliFailure::invalid_args("paged history currently supports --workspace, --active and --include-archived; label/source filters require a scoped complete query"));
+                return Err(CliFailure::invalid_args("--label/--source-kind filter current work only: use session list --active --include-archived [--workspace <id>] with those filters, without --limit/--cursor. For history, read --limit pages and filter each returned page locally; continue nextCursor until complete:true before claiming no match."));
             }
             Ok(Query::SessionList {
                 workspace_id,
@@ -539,12 +593,10 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
         "get" => match &args[1..] {
             [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionGet {
                 session_id: session_id.clone(),
-                summary_only: false,
             }),
             [session_id, flag] if !session_id.trim().is_empty() && flag == "--summary" => {
                 Ok(Query::SessionGet {
                     session_id: session_id.clone(),
-                    summary_only: true,
                 })
             }
             _ => Err(CliFailure::invalid_args(
@@ -846,6 +898,56 @@ async fn execute(
                 json!({"workspaceId": workspace_id, "removed": true}),
             ))
         }
+        Query::SessionChanges {
+            workspace_ids,
+            since,
+            include_archived,
+            lean,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            if !rpc
+                .hello()
+                .features
+                .iter()
+                .flatten()
+                .any(|f| f == "session.changes.v1")
+            {
+                return Err(CliFailure::business(
+                    "upgradeRequired",
+                    "target needs session.changes.v1 for --since; read with --limit pages instead",
+                    None,
+                ));
+            }
+            // A cursor this target cannot have issued restarts the scope
+            // instead of failing the caller's sync.
+            let (since, foreign) = match since {
+                None => (None, false),
+                Some(raw) => match decode_page_cursor(&raw, rpc.hello()) {
+                    Ok(cursor) => (Some(cursor), false),
+                    Err(_) => (None, true),
+                },
+            };
+            let reply = rpc
+                .call(Request::SessionChanges {
+                    workspace_ids: workspace_ids.clone(),
+                    since,
+                    include_archived,
+                    lean,
+                    limit: 200,
+                })
+                .await
+                .map_err(rpc_error)?;
+            let Reply::SessionChanges(changes) = reply else {
+                return Err(unexpected_reply("session changes", &reply));
+            };
+            let reset = changes.reset || foreign;
+            Ok((
+                "session.list",
+                json!({"workspaceIds": workspace_ids, "sessions": changes.sessions,
+                "removed": changes.removed, "cursor": encode_page_cursor(changes.cursor, rpc.hello()),
+                "complete": changes.complete, "reset": reset, "machineId": rpc.hello().machine_id}),
+            ))
+        }
         Query::SessionList {
             workspace_id,
             labels,
@@ -859,7 +961,7 @@ async fn execute(
             if !active && limit.is_none() {
                 return Err(CliFailure::business(
                     "unboundedQueryDisabled",
-                    "无界历史查询已禁用，指定项目也必须分页。查已知会话用 session get <id> --summary；查当前任务用 session list --workspace <id> --active --include-archived；查历史用 session list --workspace <id> --limit 50，并将 nextCursor 原样传给 --cursor 续页。--lean 不能替代 --limit。请修改原脚本的读取方式，保留原任务、会话 ID 和回执；不要原样重试，不要按空结果重新派单。",
+                    "旧完整列表写法已禁用。查状态：session get <id>，读取 data.summary（--summary 仅为兼容别名）；查当前工作：session list --active --include-archived，可加 --workspace/--label/--source-kind；查历史：session list --limit 50，可加 --workspace，按 nextCursor 续页至 complete:true。--lean 是兼容字段选项，不能代替查询范围。修改原脚本，保留任务、会话 ID 和回执；读取失败表示未知，不要原样重试或重新派单。",
                     None,
                 ));
             }
@@ -1009,49 +1111,33 @@ async fn execute(
             });
             Ok((
                 "session.list",
-                json!({"workspaceId": workspace_id, "sessions": sessions}),
+                json!({"workspaceId": workspace_id, "sessions": sessions, "complete": true, "nextCursor": null, "machineId": rpc.hello().machine_id}),
             ))
         }
-        Query::SessionGet {
-            session_id,
-            summary_only,
-        } => {
+        Query::SessionGet { session_id } => {
             let rpc = connect_selected(selection).await?;
-            if summary_only {
-                if !rpc
-                    .hello()
-                    .features
-                    .iter()
-                    .flatten()
-                    .any(|f| f == "session.summary.v1")
-                {
-                    return Err(CliFailure::business("upgradeRequired", "target needs session.summary.v1; history expansion is not a summary fallback", None));
-                }
-                let reply = rpc
-                    .call(Request::SessionGet {
-                        session_id,
-                        summary_only: Some(true),
-                        recent_rounds: None,
-                        before_item_id: None,
-                    })
-                    .await
-                    .map_err(rpc_error)?;
-                return match reply {
-                    Reply::Session(summary) => Ok(("session.get", json!({"summary": summary}))),
-                    other => Err(unexpected_reply("session summary", &other)),
-                };
+            if !rpc
+                .hello()
+                .features
+                .iter()
+                .flatten()
+                .any(|f| f == "session.summary.v1")
+            {
+                return Err(CliFailure::business("upgradeRequired", "target needs session.summary.v1; session get returns status, not history; upgrade the target", None));
             }
-            let snapshot = snapshot(
-                rpc.call(Request::SessionGet {
-                    summary_only: None,
+            let reply = rpc
+                .call(Request::SessionGet {
+                    session_id,
+                    summary_only: Some(true),
                     recent_rounds: None,
                     before_item_id: None,
-                    session_id: session_id.clone(),
                 })
                 .await
-                .map_err(rpc_error)?,
-            )?;
-            Ok(("session.get", json!({"session": snapshot})))
+                .map_err(rpc_error)?;
+            match reply {
+                Reply::Session(summary) => Ok(("session.get", json!({"summary": summary}))),
+                other => Err(unexpected_reply("session summary", &other)),
+            }
         }
         Query::SessionComponents { session_id } => {
             let rpc = connect_selected(selection).await?;
@@ -1368,42 +1454,18 @@ pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> 
             .await
             .map_err(|error| remote_connect_error(machine_id, error));
     }
-    hosted(machine_id).await
+    super::hosted::shared(machine_id).await
 }
 
-/// The hosted-Hub path: a per-connection ticket, fetched through the local
-/// daemon's enrolment.
-///
-/// The CLI holds no Hub enrolment of its own, so this only works where a local
-/// daemon is running and paired. That is a real limit and it is reported as
-/// one — a machine that is unreachable because nothing here is enrolled must
-/// not read as a machine that does not exist.
-async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
-    let local = Rpc::connect().await.map_err(connect_error)?;
-    let ticket = match local
-        .call(Request::HubConnect {
-            machine_id: machine_id.to_string(),
-        })
-        .await
-    {
-        Ok(Reply::HubTicket(ticket)) => ticket,
-        Ok(other) => return Err(CliFailure::protocol(format!("unexpected reply: {other:?}"))),
-        Err(error) => {
-            let mut failure = rpc_error(error);
-            failure.message = format!(
-                "Hub ticket request for {machine_id} failed: {}",
-                failure.message
-            );
-            failure.details = Some(
-                json!({"machineId": machine_id, "stage": "hubTicket", "upstream": failure.details}),
-            );
-            return Err(failure);
+/// The same choice for a command that follows the target's events. Those
+/// belong to one connection, so a hosted target gets one of its own.
+pub async fn connect_selected_dedicated(selection: &Selection) -> Result<Rpc, CliFailure> {
+    match selection.machine.as_deref() {
+        Some(machine_id) if super::machines::lookup(machine_id)?.is_none() => {
+            super::hosted::dedicated(machine_id).await
         }
-    };
-    drop(local);
-    Rpc::connect_hosted(&ticket)
-        .await
-        .map_err(|error| remote_connect_error(machine_id, error))
+        _ => connect_selected(selection).await,
+    }
 }
 
 fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
@@ -1630,21 +1692,22 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --active) [--workspace <id>] [--include-archived] [--lean]",
+            "genet session list [--limit <1..100>] [--cursor <nextCursor>] [--active] [--workspace <id>] [--include-archived] [--lean] | --since <start|cursor> --workspace <id>... [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
                     "workspaceId": {"type": ["string", "null"], "minLength": 1,
-                        "description": "--workspace; scope to a project; history always requires --limit, including scoped/lean queries"},
+                        "description": "--workspace; scope to a project; ordinary discovery defaults to one page of 50; repeat only with --since to sync several projects"},
                     "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100,
-                        "description": "--limit; read exactly one bounded summary page; does not auto-follow nextCursor; excludes label/source filters"},
-                    "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query, requires --limit"},
+                        "description": "--limit; one summary page, default 50; does not auto-follow nextCursor; excludes label/source filters"},
+                    "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query; page size defaults to 50"},
+                    "since": {"type": ["string", "null"], "description": "--since start|<cursor>; with one or more --workspace, returns sessions changed since the cursor plus removed, cursor, complete and reset; repeat with the returned cursor until complete; reset means the reply restarts the whole scope; needs session.changes.v1"},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
-                        "description": "--label, repeatable; keeps sessions carrying every given label"},
+                        "description": "--label, repeatable; AND filter on complete --active queries only, without --limit/--cursor; for history filter each page locally"},
                     "sourceKind": {"enum": ["human", "system", null],
-                        "description": "--source-kind; keeps sessions matching the given sourceKind (human or system)"},
+                        "description": "--source-kind; human/system filter on complete --active queries only, without --limit/--cursor; for history filter each page locally"},
                     "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
-                    "lean": {"type": "boolean", "description": "--lean; bounded summary fields"},
+                    "lean": {"type": "boolean", "description": "--lean; legacy field projection, not a query scope; use with explicit --limit, --active or --since; bare --lean is refused to prevent old scripts mistaking one page for all history"},
                     "active": {"type": "boolean", "description": "--active; complete current work via session.active-page.v1; combine --include-archived for archived obligations"},
                 }),
                 &[],
@@ -1655,7 +1718,7 @@ fn command_schema(name: &str) -> Value {
             true,
             object_input(
                 json!({"sessionId": {"type": "string", "minLength": 1},
-                    "summaryOnly": {"type": "boolean", "description": "--summary; return data.summary using metadata/current state only; requires session.summary.v1"}}),
+                    "summaryOnly": {"type": "boolean", "description": "Compatibility alias; session get always returns data.summary from metadata/current state, without history; requires session.summary.v1"}}),
                 &["sessionId"],
             ),
         ),
@@ -2104,6 +2167,37 @@ fn command_schema(name: &str) -> Value {
         "streaming": streams(name),
         "inputSchema": with_selectors(name, run_selection_schema(name, input)),
         "outputSchema": match name {
+            "session.get" => {
+                let mut schema = single_output(name);
+                schema["properties"]["data"] = object_input(
+                    json!({"summary": session_summary_schema()}), &["summary"]);
+                schema["properties"]["data"]["description"] = json!(
+                    "Current state only, including with legacy --summary. Read data.summary, not data.session.summary; use session narrative/rounds for messages. A failed read is unknown, never idle or absent success.");
+                schema
+            },
+            "session.list" => {
+                let mut schema = single_output(name);
+                schema["properties"]["data"] = json!({
+                    "type": "object",
+                    "required": ["sessions", "complete", "machineId"],
+                    "properties": {
+                        "sessions": {"type": "array", "items": session_summary_schema()},
+                        "complete": {"type": "boolean", "description": "Whether this query scope is complete; false is not evidence that a missing session does not exist"},
+                        "machineId": {"type": "string", "description": "Source machine; never mix its cursors with another machine"},
+                        "workspaceId": nullable_string(),
+                        "nextCursor": {"type": ["string", "null"], "description": "History page: pass unchanged to --cursor with the same machine, workspace, archive and activity choices; null ends paging. Default list is one page of 50; --active without a limit drains current work, not idle history"},
+                        "workspaceIds": {"type": "array", "items": {"type": "string"}},
+                        "cursor": {"type": "string", "description": "--since mode only: use with --since, never --cursor; continue even after complete:true to poll for later changes"},
+                        "removed": {"type": "array", "items": {"type": "string"}, "description": "--since mode only: remove these session IDs from the cached scope"},
+                        "reset": {"type": "boolean", "description": "--since mode only: discard the previous scoped snapshot before applying this response and its continuations"}
+                    },
+                    "oneOf": [
+                        {"required": ["workspaceId", "nextCursor"], "not": {"required": ["cursor"]}},
+                        {"required": ["workspaceIds", "cursor", "removed", "reset"], "not": {"required": ["nextCursor"]}}
+                    ]
+                });
+                schema
+            },
             "update.check" => single_output("update.check"),
             "update.live" | "update.app" | "update.status" => single_output("update.status"),
             "status" | "daemon.status" => json!({
@@ -2195,6 +2289,29 @@ fn single_output(name: &str) -> Value {
             "schema": {"const": CLI_SCHEMA},
             "type": {"const": name},
             "data": {"type": "object"},
+        }
+    })
+}
+
+// Describe the CLI's useful state fields without cloning the entire evolving
+// protocol type; optional coordination/interaction projections remain additive.
+fn session_summary_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "workspaceId", "agentId", "status", "archived", "createdAtMs", "updatedAtMs"],
+        "properties": {
+            "id": {"type": "string"},
+            "workspaceId": {"type": "string"},
+            "agentId": {"type": "string"},
+            "title": nullable_string(),
+            "status": {"type": "string", "description": "Native execution status; inspect interactionSummary and coordination for pending input/work independently"},
+            "modelId": nullable_string(),
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "archived": {"type": "boolean"},
+            "createdAtMs": {"type": "integer"},
+            "updatedAtMs": {"type": "integer"},
+            "interactionSummary": {"type": "object", "description": "Optional pending user-interaction projection; absence is not a history transcript"},
+            "coordination": {"type": "object", "description": "Optional current coordination obligations, independent of native status"}
         }
     })
 }
@@ -2337,13 +2454,6 @@ fn sessions(reply: Reply) -> Result<Vec<SessionSummary>, CliFailure> {
     }
 }
 
-fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
-    match reply {
-        Reply::Snapshot(snapshot) => Ok(snapshot),
-        other => Err(unexpected_reply("session snapshot", &other)),
-    }
-}
-
 fn component_instances(
     reply: Reply,
 ) -> Result<Vec<genehub_proto::ComponentInstanceInfo>, CliFailure> {
@@ -2442,6 +2552,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
         Reply::SessionPages(_) => "sessionPages",
+        Reply::SessionChanges(_) => "sessionChanges",
         Reply::SessionDrafts(_) => "session drafts",
         Reply::PreviewAnnotations(_) => "preview annotations",
         Reply::SessionComponents(_) => "session components",
@@ -2544,7 +2655,6 @@ mod tests {
             parse(&words(&["session", "get", "s_1"])).unwrap(),
             Query::SessionGet {
                 session_id: "s_1".into(),
-                summary_only: false,
             }
         );
         assert_eq!(
@@ -2607,7 +2717,7 @@ mod tests {
                 include_archived: false,
                 lean: false,
                 active: false,
-                limit: None,
+                limit: Some(50),
                 cursor: None,
             }
         );
@@ -2648,6 +2758,85 @@ mod tests {
         .unwrap_err();
         assert_eq!(duplicate.code, "invalidArgs");
         assert!(duplicate.message.contains("only once"));
+    }
+
+    #[test]
+    fn session_list_since_reads_changes_across_projects() {
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--workspace",
+                "w_2",
+                "--since",
+                "start",
+                "--lean"
+            ]))
+            .unwrap(),
+            Query::SessionChanges {
+                workspace_ids: vec!["w_1".into(), "w_2".into()],
+                since: None,
+                include_archived: false,
+                lean: true,
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "abc"
+            ]))
+            .unwrap(),
+            Query::SessionChanges {
+                workspace_ids: vec!["w_1".into()],
+                since: Some("abc".into()),
+                include_archived: false,
+                lean: false,
+            }
+        );
+        for wrong in [
+            &["session", "list", "--since", "start"][..],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+                "--limit",
+                "5",
+            ],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+                "--active",
+            ],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+            ],
+        ] {
+            assert_eq!(
+                parse(&words(wrong)).unwrap_err().code,
+                "invalidArgs",
+                "{wrong:?}"
+            );
+        }
     }
 
     #[test]
@@ -2841,7 +3030,6 @@ mod tests {
             vec![summary]
         );
         assert!(sessions(Reply::Ack).is_err());
-        assert!(snapshot(Reply::Ack).is_err());
     }
 
     #[test]

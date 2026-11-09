@@ -46,6 +46,6 @@ description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力�
 
 ## 脚本查询与升级迁移
 
-已知任务沿账本中的会话 ID 用 `session get <id> --summary`；当前工作用 `session list --workspace <id> --active --include-archived`。需要历史时用 `--workspace <id> --limit 50`，保持机器和条件按 `nextCursor` 续页至 `complete: true`。
+已知任务沿账本中的会话 ID 用 `session get <id>`；当前工作用 `session list --workspace <id> --active --include-archived`。需要历史时用 `--workspace <id> --limit 50`，保持机器和条件按 `nextCursor` 续页至 `complete: true`。
 
 `unboundedQueryDisabled` 是读取方式需要修改：即使已指定项目，历史也必须分页。先修团队自己的工具源，再运行同一待办；保留原 task/session ID、派单、回传配置和写锁，不原样重试，不按空目录重建任务，不用提高频率或超时绕过错误。一般读取失败仍表示未知。Timer 无待办时不查前台历史；有原请求方引用时直接使用，避免每轮重新发现全目录。

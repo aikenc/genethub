@@ -7,6 +7,7 @@ mod converse;
 mod desktop;
 mod file;
 mod hook;
+mod hosted;
 mod hub;
 mod machine;
 mod machines;

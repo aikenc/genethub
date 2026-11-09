@@ -20,6 +20,7 @@ pub mod diagnostics;
 pub(crate) mod file_access;
 pub mod files;
 pub(crate) mod fs_cap;
+pub(crate) mod fs_stamp;
 pub mod git;
 pub(crate) mod guest_paths;
 pub mod hooks;

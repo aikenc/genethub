@@ -73,4 +73,4 @@ Rust 版构建器已移除（2026-10-28），`genet space builder …` 与 `agen
 
 生成hook保留源文件的`schedule`字段；未写时daemon按`fixed-delay`处理，即上次完成并收尾后再等`every`。需要开始计时的短命令才显式使用`interval`，其有效执行期限是`min(timeout, every×15%)`，可低于1秒；到期强制结束整组。Team模板显式声明`fixed-delay`，修改源hook后重新build并验证实际制品，不编辑生成hook。
 
-团队样板已有 `tools/install_remote.py` 可作为根 post 使用，参数为 `{outputRoot}`、岗位、目标机器及目标目录。维护流程见 team-core `references/remote-targets.md`；通用 Builder 本身仍不认识远端机器。远端安装检查完整 output-lock 及全部文件，拒绝未列入回执的作者输入；不以仅 verify 成功推定纯产物。
+团队样板的远端岗位由岗位 `.genethub/open.env` 的 `TEAM_MACHINE` 声明，`run.py employee sync` 构建独立输出并安装；旧团队把 `tools/install_remote.py` 作为根 post 的用法仅兼容保留。维护流程见 team-core `references/remote-targets.md`；通用 Builder 本身仍不认识远端机器。远端安装检查完整 output-lock 及全部文件，拒绝未列入回执的作者输入；不以仅 verify 成功推定纯产物。

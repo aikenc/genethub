@@ -153,7 +153,7 @@ defineSpecialty(meta(
     while (Date.now() < end) {
       try { sends = readFileSync(path.join(t.env.workspace, "self-update-sends.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)); } catch {}
       try { receipt = (await f.call(["update", "status", "--request-id", "self-live"])).data; } catch {}
-      if (sends.length) try { session = (await f.call(["session", "get", sends[0].sessionId])).data.session; } catch {}
+      if (sends.length) try { session = {summary: (await f.call(["session", "get", sends[0].sessionId])).data.summary, items: (await f.call(["session", "narrative", sends[0].sessionId, "--limit", "100"])).data.page.items}; } catch {}
       if (receipt?.updateState === "succeeded" && receipt.continuation.state === "resumed" && session?.summary.status === "idle") break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
@@ -186,7 +186,7 @@ for (const action of ["interrupt", "close"] as const) defineSpecialty(meta(
       return receipt?.updateState === "succeeded" && receipt.continuation.state === "skipped";
     }, 60000);
     const sends = readFileSync(journal, "utf8").trim().split("\n");
-    const session = (await f.call(["session", "get", first.sessionId])).data.session;
+    const session = (await f.call(["session", "get", first.sessionId])).data;
     t.assertions.assert(sends.length === 1 && session.summary.inputSummary.paused === true && f.downloads() === 1,
       "completed update resumed a paused Session or repeated a side effect");
   } finally { await f.close(); }

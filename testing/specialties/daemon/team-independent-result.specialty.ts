@@ -57,7 +57,7 @@ defineSpecialty({
     await cli(["session", "send", child, "Retained old task", "--message-id", "x.retained-old-task", "--no-wait"]);
     await t.tools.waitUntil(() => o.mock.requests.length > beforeRequests, 15_000);
     await cli(["session", "interrupt", child]);
-    const summary = async (sid: string) => (await cli(["session", "get", sid])).session.summary;
+    const summary = async (sid: string) => (await cli(["session", "get", sid])).summary;
     await t.tools.waitUntil(async () => { const s = await summary(child); return s.status === "idle" && s.inputSummary.paused; }, 15_000);
     const pausedInput = (await summary(child)).inputSummary.pendingMessageIds;
     t.assertions.assert(pausedInput.includes("x.retained-old-task"), "Original paused input missing");
@@ -80,12 +80,13 @@ defineSpecialty({
     const waitingEntries = existsSync(inbox) ? readFileSync(inbox, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
     t.assertions.assert(waitingEntries.filter(entry => String(entry.text).includes(marker)).every(entry => entry.accepted === true), "Completed independent result is still unaccepted behind an older paused child");
     await t.tools.waitUntil(async () => { const s = await summary(parent); return s.status === "idle" && !!s.latestReply; }, 15_000);
-    const first = (await cli(["session", "get", parent])).session;
+    const first = (await cli(["session", "narrative", parent, "--limit", "100"])).page;
     const matches = (s: any) => s.items.filter((item: any) => item.type === "userMessage" && String(item.text).includes(marker));
     t.assertions.assert(matches(first).length === 1, "Platform did not retain one independent result message");
+    const firstReply = (await summary(parent)).latestReply.itemId;
     const replay = await command(args); t.assertions.assert(replay.code === 0, replay.stderr);
-    const again = (await cli(["session", "get", parent])).session;
-    t.assertions.assert(matches(again).length === 1 && again.summary.latestReply.itemId === first.summary.latestReply.itemId, "Same result replay created another input or response");
+    const again = (await cli(["session", "narrative", parent, "--limit", "100"])).page;
+    t.assertions.assert(matches(again).length === 1 && (await summary(parent)).latestReply.itemId === firstReply, "Same result replay created another input or response");
     const after = await summary(child);
     t.assertions.assert(after.inputSummary.paused && JSON.stringify(after.inputSummary.pendingMessageIds) === JSON.stringify(pausedInput), "Result delivery resumed or discarded the paused sibling");
     t.assertions.assert(readFileSync(writer, "utf8") === reservation && readFileSync(join(pending, child + ".json"), "utf8") === record, "Independent result released or rewrote the paused writer/ledger");

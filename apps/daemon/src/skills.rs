@@ -56,47 +56,100 @@ fn normalize_front_door_cli(value: Option<std::ffi::OsString>) -> Option<PathBuf
     crate::guest_paths::inbound_absolute(PathBuf::from(raw))
 }
 
+/// How long a verified root is trusted before its files' stamps are looked at again.
+const VERIFIED_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A root whose files were last seen matching what this daemon ships.
+struct Verified {
+    at: std::time::Instant,
+    /// One stamp per [`BUILTIN_FILES`] entry, then the entrypoint manifest.
+    stamps: Vec<Option<crate::fs_stamp::Stamp>>,
+    skills: Option<Vec<Skill>>,
+}
+
+fn verified() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Verified>> {
+    static VERIFIED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Verified>>,
+    > = std::sync::OnceLock::new();
+    VERIFIED.get_or_init(Default::default)
+}
+
+fn entrypoint_manifest() -> String {
+    let mut entrypoints = BUILTIN_ENTRYPOINTS.join("\n");
+    entrypoints.push('\n');
+    entrypoints
+}
+
 /// Write built-in Skill files so Agents can `read` a real path.
+///
+/// The first call for a root compares every file's contents and removes what
+/// this daemon no longer ships. Later calls trust that for [`VERIFIED_FOR`],
+/// then compare only files whose stamp changed or is still settling.
 pub fn materialize(root: &Path) -> Option<PathBuf> {
-    for file in BUILTIN_FILES {
-        let target = root.join(file.relative_path);
-        if std::fs::read(&target).ok().as_deref() == Some(file.contents) {
+    let now = std::time::Instant::now();
+    let previous = {
+        let mut verified = verified().lock().expect("never poisoned");
+        match verified.get(root) {
+            Some(known) if now.duration_since(known.at) < VERIFIED_FOR => {
+                return Some(root.to_path_buf());
+            }
+            _ => verified.remove(root),
+        }
+    };
+    let manifest = root.join(ENTRYPOINT_MANIFEST);
+    let entrypoints = entrypoint_manifest();
+    let targets = BUILTIN_FILES
+        .iter()
+        .map(|file| (root.join(file.relative_path), file.contents))
+        .chain(std::iter::once((manifest, entrypoints.as_bytes())));
+    let mut stamps = Vec::with_capacity(BUILTIN_FILES.len() + 1);
+    let mut rewrote = false;
+    for (index, (target, contents)) in targets.enumerate() {
+        let stamp = crate::fs_stamp::Stamp::read_link(&target);
+        let unchanged = previous.as_ref().is_some_and(|known| {
+            stamp.is_some()
+                && known.stamps.get(index) == Some(&stamp)
+                && crate::fs_stamp::settled(stamp.as_ref())
+        });
+        if unchanged || std::fs::read(&target).ok().as_deref() == Some(contents) {
+            stamps.push(stamp);
             continue;
         }
-        let parent = target.parent()?;
-        if let Err(error) = std::fs::create_dir_all(parent) {
+        if let Err(error) = install_file(&target, contents) {
             tracing::warn!(
-                path = %file.relative_path,
-                %error,
-                "could not create built-in skill directory"
-            );
-            return None;
-        }
-        if let Err(error) = install_file(&target, file.contents) {
-            tracing::warn!(
-                path = %file.relative_path,
+                path = %target.display(),
                 %error,
                 "could not install built-in skill file"
             );
             return None;
         }
+        rewrote = true;
+        stamps.push(crate::fs_stamp::Stamp::read_link(&target));
     }
-    let mut entrypoints = BUILTIN_ENTRYPOINTS.join("\n");
-    entrypoints.push('\n');
-    let manifest = root.join(ENTRYPOINT_MANIFEST);
-    if std::fs::read(&manifest).ok().as_deref() != Some(entrypoints.as_bytes()) {
-        if let Err(error) = install_file(&manifest, entrypoints.as_bytes()) {
-            tracing::warn!(%error, "could not install built-in Skill entrypoint manifest");
-            return None;
-        }
+    if previous.is_none() {
+        prune_stale(root, root, &|relative| {
+            relative == ENTRYPOINT_MANIFEST
+                || BUILTIN_FILES
+                    .iter()
+                    .any(|file| file.relative_path == relative)
+        });
     }
-    prune_stale(root, root, &|relative| {
-        relative == ENTRYPOINT_MANIFEST
-            || BUILTIN_FILES
-                .iter()
-                .any(|file| file.relative_path == relative)
-    });
+    let skills = previous.and_then(|known| known.skills).filter(|_| !rewrote);
+    verified().lock().expect("never poisoned").insert(
+        root.to_path_buf(),
+        Verified {
+            at: now,
+            stamps,
+            skills,
+        },
+    );
     Some(root.to_path_buf())
+}
+
+/// Removed before the next look so a test or repair sees the files again.
+#[cfg(test)]
+fn forget_verified(root: &Path) {
+    verified().lock().expect("never poisoned").remove(root);
 }
 
 /// Remove what an older daemon materialized and this one no longer ships. The directory is
@@ -167,7 +220,17 @@ pub fn load(skills_root: &Path) -> Vec<Skill> {
     // A failure installing one file must not hide the files that are already
     // there: the catalog is safety guidance, and a partial catalog is better
     // than none. materialize() logs the specific file it could not write.
-    let _ = materialize(skills_root);
+    let installed = materialize(skills_root).is_some();
+    if installed {
+        if let Some(skills) = verified()
+            .lock()
+            .expect("never poisoned")
+            .get(skills_root)
+            .and_then(|known| known.skills.clone())
+        {
+            return skills;
+        }
+    }
     let mut skills = Vec::new();
     for entrypoint in BUILTIN_ENTRYPOINTS {
         if let Some(skill) = parse_skill_file(&skills_root.join(entrypoint)) {
@@ -175,6 +238,17 @@ pub fn load(skills_root: &Path) -> Vec<Skill> {
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    // Only a root that matches what ships is parsed once; a partial one is
+    // read again until its files are installed.
+    if installed {
+        if let Some(known) = verified()
+            .lock()
+            .expect("never poisoned")
+            .get_mut(skills_root)
+        {
+            known.skills = Some(skills.clone());
+        }
+    }
     skills
 }
 
@@ -732,6 +806,32 @@ mod tests {
                 "platform.md no longer links {core}"
             );
         }
+    }
+
+    #[test]
+    fn a_verified_root_is_trusted_until_its_files_change() {
+        let root = temp_dir("verified");
+        let skills = load(&root);
+        let entry = skills[0].file_path.clone();
+        let shipped = std::fs::read(&entry).unwrap();
+
+        std::fs::write(&entry, b"edited").unwrap();
+        assert_eq!(load(&root), skills, "a verified root reuses its catalog");
+        assert_eq!(std::fs::read(&entry).unwrap(), b"edited");
+
+        verified().lock().unwrap().get_mut(&root).unwrap().at -= VERIFIED_FOR;
+        assert_eq!(load(&root), skills);
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            shipped,
+            "a changed file is restored"
+        );
+
+        let stale = root.join("genehub").join("retired.md");
+        std::fs::write(&stale, b"old").unwrap();
+        forget_verified(&root);
+        let _ = load(&root);
+        assert!(!stale.exists(), "a first look prunes what no longer ships");
     }
 
     #[test]

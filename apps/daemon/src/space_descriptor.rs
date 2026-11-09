@@ -11,7 +11,10 @@
 //! starts; discovery refreshes the derived member view used by workspace.list.
 //! That presentation cache never replaces file validation at execution time.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+
+use crate::fs_stamp::Stamp;
 
 pub const FILE: &str = "agent-space.genet.json";
 const MAX_BYTES: u64 = 256 * 1024;
@@ -236,7 +239,7 @@ pub async fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
     };
     let mut problems = Vec::new();
     let mut budget = crate::blocking::WorkBudget::new();
-    let children = children_of(dir, 1, &mut problems, &mut budget).await;
+    let children = children_uncached(dir, 1, &mut problems, &mut budget).await;
     for problem in &problems {
         tracing::warn!(%problem, "a child Space descriptor cannot be used");
     }
@@ -254,13 +257,140 @@ pub async fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
 /// is all the depth there is, so a scan never walks `node_modules` or a
 /// worktree, and hidden directories and symbolic links are never entered.
 pub async fn discover(spaces_root: &Path) -> Discovery {
+    discover_cached(spaces_root, &mut DiscoveryCache::default(), true).await
+}
+
+/// How often discovery looks at one listing or descriptor again. The top of
+/// the tree and its sets are looked at on every pass; inside a Space, at
+/// least once per `cold`. Opening a Space registers it at once regardless.
+const DISCOVERY_CADENCE: crate::fs_stamp::Cadence = crate::fs_stamp::Cadence {
+    hot: std::time::Duration::from_secs(2),
+    cold: std::time::Duration::from_secs(30),
+    hot_for: std::time::Duration::from_secs(60),
+};
+
+type Parsed = Result<Option<Descriptor>, String>;
+
+/// What discovery last saw, so a pass reads only what changed.
+#[derive(Default)]
+pub struct DiscoveryCache {
+    listings: HashMap<PathBuf, (Option<Stamp>, Vec<PathBuf>, crate::fs_stamp::Watch)>,
+    descriptors: HashMap<PathBuf, (Option<Stamp>, Parsed, crate::fs_stamp::Watch)>,
+    /// A first pass is over: what appears after it was just deployed and is
+    /// likely to be edited again soon, so it starts hot.
+    primed: bool,
+}
+
+struct Pass<'a> {
+    cache: &'a mut DiscoveryCache,
+    force: bool,
+    now: std::time::Instant,
+    listings: HashSet<PathBuf>,
+    descriptors: HashSet<PathBuf>,
+}
+
+impl Pass<'_> {
+    fn first_watch(&self, path: &Path, stamp: Option<&Stamp>) -> crate::fs_stamp::Watch {
+        if !self.cache.primed {
+            return crate::fs_stamp::Watch::first(path, stamp, self.now, DISCOVERY_CADENCE);
+        }
+        let mut watch = crate::fs_stamp::Watch::now(self.now);
+        watch.looked(stamp, true, self.now, DISCOVERY_CADENCE);
+        watch
+    }
+
+    async fn subdirectories(
+        &mut self,
+        dir: &Path,
+        always: bool,
+        budget: &mut crate::blocking::WorkBudget,
+    ) -> Vec<PathBuf> {
+        self.listings.insert(dir.to_path_buf());
+        let known = self.cache.listings.get(dir);
+        if !self.force && !always {
+            if let Some((_, listed, _)) = known.filter(|(_, _, watch)| !watch.due(self.now)) {
+                return listed.clone();
+            }
+        }
+        let stamp = Stamp::read(dir);
+        if let Some((_, listed, _)) = known.filter(|(known, _, _)| {
+            !self.force && *known == stamp && crate::fs_stamp::settled(known.as_ref())
+        }) {
+            let listed = listed.clone();
+            if let Some((_, _, watch)) = self.cache.listings.get_mut(dir) {
+                watch.looked(stamp.as_ref(), false, self.now, DISCOVERY_CADENCE);
+            }
+            return listed;
+        }
+        let listed = subdirectories(dir, budget).await;
+        let watch = match self.cache.listings.remove(dir) {
+            Some((_, _, mut watch)) => {
+                watch.looked(stamp.as_ref(), true, self.now, DISCOVERY_CADENCE);
+                watch
+            }
+            None => self.first_watch(dir, stamp.as_ref()),
+        };
+        self.cache
+            .listings
+            .insert(dir.to_path_buf(), (stamp, listed.clone(), watch));
+        listed
+    }
+
+    fn read(&mut self, dir: &Path) -> Parsed {
+        self.descriptors.insert(dir.to_path_buf());
+        let known = self.cache.descriptors.get(dir);
+        if !self.force {
+            if let Some((_, parsed, _)) = known.filter(|(_, _, watch)| !watch.due(self.now)) {
+                return parsed.clone();
+            }
+        }
+        let stamp = Stamp::read_link(&dir.join(FILE));
+        if let Some((_, parsed, _)) = known.filter(|(known, _, _)| {
+            !self.force && *known == stamp && crate::fs_stamp::settled(known.as_ref())
+        }) {
+            let parsed = parsed.clone();
+            if let Some((_, _, watch)) = self.cache.descriptors.get_mut(dir) {
+                watch.looked(stamp.as_ref(), false, self.now, DISCOVERY_CADENCE);
+            }
+            return parsed;
+        }
+        let parsed = read(dir);
+        let watch = match self.cache.descriptors.remove(dir) {
+            Some((_, _, mut watch)) => {
+                watch.looked(stamp.as_ref(), true, self.now, DISCOVERY_CADENCE);
+                watch
+            }
+            None => self.first_watch(dir, stamp.as_ref()),
+        };
+        self.cache
+            .descriptors
+            .insert(dir.to_path_buf(), (stamp, parsed.clone(), watch));
+        parsed
+    }
+}
+
+/// [`discover`], reusing what `cache` saw for listings and descriptors whose
+/// stamps did not change. `force` looks at everything again.
+pub async fn discover_cached(
+    spaces_root: &Path,
+    cache: &mut DiscoveryCache,
+    force: bool,
+) -> Discovery {
+    let mut pass = Pass {
+        cache,
+        force,
+        now: std::time::Instant::now(),
+        listings: HashSet::new(),
+        descriptors: HashSet::new(),
+    };
     let mut found = Discovery::default();
     let mut budget = crate::blocking::WorkBudget::new();
-    for dir in subdirectories(spaces_root, &mut budget).await {
+    for dir in pass.subdirectories(spaces_root, true, &mut budget).await {
         budget.checkpoint().await;
-        match read(&dir) {
+        match pass.read(&dir) {
             Ok(Some(descriptor)) => {
-                let children = children_of(&dir, 1, &mut found.problems, &mut budget).await;
+                let children =
+                    children_of(&mut pass, &dir, 1, &mut found.problems, &mut budget).await;
                 found.roots.push(Found {
                     dir,
                     descriptor,
@@ -268,12 +398,13 @@ pub async fn discover(spaces_root: &Path) -> Discovery {
                 });
             }
             Ok(None) => {
-                for inner in subdirectories(&dir, &mut budget).await {
+                for inner in pass.subdirectories(&dir, true, &mut budget).await {
                     budget.checkpoint().await;
-                    match read(&inner) {
+                    match pass.read(&inner) {
                         Ok(Some(descriptor)) => {
                             let children =
-                                children_of(&inner, 1, &mut found.problems, &mut budget).await;
+                                children_of(&mut pass, &inner, 1, &mut found.problems, &mut budget)
+                                    .await;
                             found.roots.push(Found {
                                 dir: inner,
                                 descriptor,
@@ -290,10 +421,20 @@ pub async fn discover(spaces_root: &Path) -> Discovery {
             Err(problem) => found.problems.push(format!("{}: {problem}", dir.display())),
         }
     }
+    let Pass {
+        cache,
+        listings,
+        descriptors,
+        ..
+    } = pass;
+    cache.listings.retain(|dir, _| listings.contains(dir));
+    cache.descriptors.retain(|dir, _| descriptors.contains(dir));
+    cache.primed = true;
     found
 }
 
 async fn children_of(
+    pass: &mut Pass<'_>,
     dir: &Path,
     level: usize,
     problems: &mut Vec<String>,
@@ -303,11 +444,14 @@ async fn children_of(
         return Vec::new();
     }
     let mut children = Vec::new();
-    for child in subdirectories(&dir.join("spaces"), budget).await {
+    for child in pass
+        .subdirectories(&dir.join("spaces"), false, budget)
+        .await
+    {
         budget.checkpoint().await;
-        match read(&child) {
+        match pass.read(&child) {
             Ok(Some(descriptor)) => {
-                let nested = Box::pin(children_of(&child, level + 1, problems, budget)).await;
+                let nested = Box::pin(children_of(pass, &child, level + 1, problems, budget)).await;
                 children.push(Found {
                     dir: child,
                     descriptor,
@@ -319,6 +463,23 @@ async fn children_of(
         }
     }
     children
+}
+
+async fn children_uncached(
+    dir: &Path,
+    level: usize,
+    problems: &mut Vec<String>,
+    budget: &mut crate::blocking::WorkBudget,
+) -> Vec<Found> {
+    let mut cache = DiscoveryCache::default();
+    let mut pass = Pass {
+        cache: &mut cache,
+        force: true,
+        now: std::time::Instant::now(),
+        listings: HashSet::new(),
+        descriptors: HashSet::new(),
+    };
+    children_of(&mut pass, dir, level, problems, budget).await
 }
 
 /// Real, visible directories directly inside `dir`, by name. A missing

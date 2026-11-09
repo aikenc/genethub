@@ -58,6 +58,9 @@ const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
 /// Upper bound for one `*.batchGet` call. Abuse control, not a security
 /// boundary: keeps a single request from turning into an unbounded scan.
 const MAX_BATCH_GET: usize = 64;
+/// How often a running session's activity reaches the change log, so a
+/// change cursor sees a fresh `lastActivityAtMs` without one entry per event.
+const ACTIVITY_NOTED_EVERY_MS: i64 = 5_000;
 
 /// A session id that matches nothing in memory or on disk. The router maps
 /// this typed error to `notFound`; the Display text is user-facing and free
@@ -180,6 +183,8 @@ struct Live {
     /// reads it: silence is not evidence of death, and the only party who can
     /// tell a long thought from a wedged process is the one who asked.
     last_activity_ms: AtomicI64,
+    /// When activity was last reported to the change log.
+    activity_noted_ms: AtomicI64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
     /// Shared rather than owned so a caller can take a handle to the agent and
@@ -1915,6 +1920,75 @@ impl SessionManager {
             ));
         }
         summary
+    }
+
+    /// `session.changes`: rows that changed in `workspace_ids` after `since`,
+    /// each the same summary `session get --summary` returns.
+    pub async fn changes(
+        &self,
+        workspace_ids: &[String],
+        since: Option<&str>,
+        include_archived: bool,
+        lean: bool,
+        limit: u32,
+    ) -> Result<genehub_proto::SessionChangesResult> {
+        let since = match since {
+            None => None,
+            Some(raw) => Some(
+                raw.split_once(':')
+                    .and_then(|(token, seq)| Some((token, seq.parse::<u64>().ok()?)))
+                    .ok_or_else(|| anyhow::anyhow!("invalid session changes cursor"))?,
+            ),
+        };
+        let workspaces: HashSet<String> = workspace_ids.iter().cloned().collect();
+        let changes = self
+            .store
+            .catalog_changes(&workspaces, since, limit as usize)
+            .await?;
+        let mut removed = changes.removed;
+        let mut sessions = Vec::with_capacity(changes.changed.len());
+        let mut budget = crate::blocking::WorkBudget::new();
+        for indexed in changes.changed {
+            budget.checkpoint().await;
+            let live = self.sessions.read().await.get(&indexed.id).cloned();
+            let meta = match live {
+                Some(live) => {
+                    let current = live.meta.lock().await.clone();
+                    if current.workspace_id == indexed.workspace_id {
+                        current
+                    } else {
+                        indexed
+                    }
+                }
+                None => indexed,
+            };
+            if meta.archived && !include_archived {
+                if !changes.reset {
+                    removed.push(genehub_proto::CatalogSessionRef {
+                        workspace_id: meta.workspace_id.clone(),
+                        id: meta.id.clone(),
+                    });
+                }
+                continue;
+            }
+            let mut summary = self.project_meta(&meta).await;
+            if lean {
+                summary.lineage = None;
+                if let Some(preview) = &mut summary.message_preview {
+                    if preview.text.chars().count() > 200 {
+                        preview.text = preview.text.chars().take(200).collect::<String>() + "…";
+                    }
+                }
+            }
+            sessions.push(summary);
+        }
+        Ok(genehub_proto::SessionChangesResult {
+            sessions,
+            removed,
+            cursor: format!("{}:{}", changes.token, changes.seq),
+            complete: changes.complete,
+            reset: changes.reset,
+        })
     }
 
     pub async fn page(
@@ -5517,6 +5591,7 @@ impl Live {
             blob_hints: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             last_activity_ms: AtomicI64::new(0),
+            activity_noted_ms: AtomicI64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
@@ -5584,11 +5659,21 @@ impl Live {
         // Every kind of event counts, deltas included: the question this
         // answers is "is anything still coming out of it", not "has it made
         // progress", which nobody outside the agent can judge.
-        self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
+        let now = now_ms();
+        self.last_activity_ms.store(now, Ordering::SeqCst);
         let (session_id, workspace_id) = {
             let meta = self.meta.lock().await;
             (meta.id.clone(), meta.workspace_id.clone())
         };
+        let noted = self.activity_noted_ms.load(Ordering::Relaxed);
+        if now - noted >= ACTIVITY_NOTED_EVERY_MS
+            && self
+                .activity_noted_ms
+                .compare_exchange(noted, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.store.note_activity(&workspace_id, &session_id);
+        }
         if matches!(
             &event,
             SessionEvent::SessionStatusChanged { .. }
