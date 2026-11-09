@@ -53,6 +53,16 @@ gets an explicit independent startup adapter. Only the actual adjacent channel
 CLI/Host/component are replaced; other channels' binaries are not selected by
 name or killed by image matching. A bad package leaves the old daemon running.
 
+On macOS, a privacy grant (Full Disk Access and friends) is remembered against a program's code identity,
+not its bytes. An ad-hoc signature makes that identity the file hash, so every update would look like a new
+program. When the machine has set up its local signing identity (Settings > 系统权限, or
+`genet access request mac.code-identity`), the staged `genet`/Host are signed with it **before** they replace
+the old ones, under the identifiers of the files they replace, so the designated requirement is unchanged and
+grants survive. This is best effort and never blocks an update. Order matters: an unsigned new program that reads
+protected data even once can cause the system to rewrite the grant to "denied", and re-signing afterwards does not
+bring it back. Verified on a Mac mini by running the same signing command on two different published builds
+(see `docs/platform-access-permissions-proposal.md` section 0); the hook itself has only been compile-checked.
+
 If replacement fails before the new Host starts and the data is not in use, the
 worker restores its backup. Before opening a new guest, the Host records a durable
 startup observation. Once that exists, even an exited new process is reported
