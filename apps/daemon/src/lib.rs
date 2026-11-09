@@ -17,6 +17,7 @@ pub mod config;
 pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
+pub(crate) mod access;
 pub(crate) mod file_access;
 pub mod files;
 pub(crate) mod fs_cap;

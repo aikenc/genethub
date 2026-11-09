@@ -210,7 +210,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         return output::fail(error);
     }
     match args.first().map(String::as_str) {
-        Some("schema" | "context" | "capabilities" | "workspace" | "preview" | "file-access") => {
+        Some("schema" | "context" | "capabilities" | "workspace" | "preview" | "file-access" | "access") => {
             Box::pin(query::run(&args, &selection)).await
         }
         Some("session") => match args.get(1).map(String::as_str) {

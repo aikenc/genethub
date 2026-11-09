@@ -180,6 +180,7 @@ pub(super) async fn prepare(paths: &Paths, request: &Request) -> Result<()> {
         "prepared Python runtime does not start"
     );
     records::write(&dir.join("python.json"), &pointer)?;
+    sign_staged(paths, &unpack);
     let backup = dir.join("backup");
     std::fs::create_dir_all(&backup)?;
     for (source, name) in files(request)? {
@@ -306,5 +307,41 @@ pub(super) fn start(paths: &Paths, request: &Request) -> Result<()> {
         Ok(())
     } else {
         supervisor::start_manual(paths, request)
+    }
+}
+
+/// On macOS, keep the new programs recognisable to the system.
+///
+/// A privacy grant is remembered against a program's designated requirement. An
+/// ad-hoc signature makes that requirement the file's hash, so every update
+/// would look like a different program and lose its grants. When this machine
+/// has set up its local signing identity (Settings > 系统权限), the staged
+/// programs are signed with it under the identifiers of the files they replace,
+/// so the requirement is unchanged and grants survive. This is best effort and
+/// never blocks an update: without the identity or the helper, the update goes
+/// ahead exactly as before and the page offers to re-sign afterwards.
+fn sign_staged(paths: &Paths, unpack: &Path) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let helper = paths.root.join("access").join("macos_identity.py");
+    let identity = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/GeneHubCapture/signing/identity.json"));
+    if !helper.is_file() || !identity.is_some_and(|path| path.is_file()) {
+        return;
+    }
+    let mut command = Command::new("/usr/bin/python3");
+    command.arg(&helper).arg("sign");
+    for name in [channel::CLI_BINARY, channel::HOST_BINARY] {
+        command.arg(format!("{}::{}", unpack.join(name).display(), name));
+    }
+    match command.output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "note: the new programs were not re-signed ({}); permissions may need to be re-checked",
+            String::from_utf8_lossy(&out.stdout).trim()
+        ),
+        Err(error) => eprintln!("note: could not run the signing helper: {error}"),
     }
 }
