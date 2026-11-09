@@ -577,7 +577,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 limit = Some(50);
             }
             if limit.is_some() && (!labels.is_empty() || source_kind.is_some()) {
-                return Err(CliFailure::invalid_args("paged history currently supports --workspace, --active and --include-archived; label/source filters require a scoped complete query"));
+                return Err(CliFailure::invalid_args("--label/--source-kind filter current work only: use session list --active --include-archived [--workspace <id>] with those filters, without --limit/--cursor. For history, read --limit pages and filter each returned page locally; continue nextCursor until complete:true before claiming no match."));
             }
             Ok(Query::SessionList {
                 workspace_id,
@@ -961,7 +961,7 @@ async fn execute(
             if !active && limit.is_none() {
                 return Err(CliFailure::business(
                     "unboundedQueryDisabled",
-                    "旧完整列表写法已禁用，不能将默认一页当作全部。session list 默认一页（50条）；旧 --lean/标签/来源写法需明确查询范围。查已知会话用 session get <id> --summary；查当前任务用 session list --workspace <id> --active --include-archived；查历史用 session list --workspace <id> --limit 50，并将 nextCursor 原样传给 --cursor 续页。--lean 不能替代 --limit。请修改原脚本的读取方式，保留原任务、会话 ID 和回执；不要原样重试，不要按空结果重新派单。",
+                    "旧完整列表写法已禁用。查状态：session get <id>，读取 data.summary（--summary 仅为兼容别名）；查当前工作：session list --active --include-archived，可加 --workspace/--label/--source-kind；查历史：session list --limit 50，可加 --workspace，按 nextCursor 续页至 complete:true。--lean 是兼容字段选项，不能代替查询范围。修改原脚本，保留任务、会话 ID 和回执；读取失败表示未知，不要原样重试或重新派单。",
                     None,
                 ));
             }
@@ -1697,17 +1697,17 @@ fn command_schema(name: &str) -> Value {
             object_input(
                 json!({
                     "workspaceId": {"type": ["string", "null"], "minLength": 1,
-                        "description": "--workspace; scope to a project; ordinary discovery defaults to one page of 50"},
+                        "description": "--workspace; scope to a project; ordinary discovery defaults to one page of 50; repeat only with --since to sync several projects"},
                     "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100,
                         "description": "--limit; one summary page, default 50; does not auto-follow nextCursor; excludes label/source filters"},
                     "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query; page size defaults to 50"},
                     "since": {"type": ["string", "null"], "description": "--since start|<cursor>; with one or more --workspace, returns sessions changed since the cursor plus removed, cursor, complete and reset; repeat with the returned cursor until complete; reset means the reply restarts the whole scope; needs session.changes.v1"},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
-                        "description": "--label, repeatable; keeps sessions carrying every given label"},
+                        "description": "--label, repeatable; AND filter on complete --active queries only, without --limit/--cursor; for history filter each page locally"},
                     "sourceKind": {"enum": ["human", "system", null],
-                        "description": "--source-kind; keeps sessions matching the given sourceKind (human or system)"},
+                        "description": "--source-kind; human/system filter on complete --active queries only, without --limit/--cursor; for history filter each page locally"},
                     "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
-                    "lean": {"type": "boolean", "description": "--lean; bounded summary fields"},
+                    "lean": {"type": "boolean", "description": "--lean; legacy field projection, not a query scope; use with explicit --limit, --active or --since; bare --lean is refused to prevent old scripts mistaking one page for all history"},
                     "active": {"type": "boolean", "description": "--active; complete current work via session.active-page.v1; combine --include-archived for archived obligations"},
                 }),
                 &[],
@@ -2167,6 +2167,37 @@ fn command_schema(name: &str) -> Value {
         "streaming": streams(name),
         "inputSchema": with_selectors(name, run_selection_schema(name, input)),
         "outputSchema": match name {
+            "session.get" => {
+                let mut schema = single_output(name);
+                schema["properties"]["data"] = object_input(
+                    json!({"summary": session_summary_schema()}), &["summary"]);
+                schema["properties"]["data"]["description"] = json!(
+                    "Current state only, including with legacy --summary. Read data.summary, not data.session.summary; use session narrative/rounds for messages. A failed read is unknown, never idle or absent success.");
+                schema
+            },
+            "session.list" => {
+                let mut schema = single_output(name);
+                schema["properties"]["data"] = json!({
+                    "type": "object",
+                    "required": ["sessions", "complete", "machineId"],
+                    "properties": {
+                        "sessions": {"type": "array", "items": session_summary_schema()},
+                        "complete": {"type": "boolean", "description": "Whether this query scope is complete; false is not evidence that a missing session does not exist"},
+                        "machineId": {"type": "string", "description": "Source machine; never mix its cursors with another machine"},
+                        "workspaceId": nullable_string(),
+                        "nextCursor": {"type": ["string", "null"], "description": "History page: pass unchanged to --cursor with the same machine, workspace, archive and activity choices; null ends paging. Default list is one page of 50; --active without a limit drains current work, not idle history"},
+                        "workspaceIds": {"type": "array", "items": {"type": "string"}},
+                        "cursor": {"type": "string", "description": "--since mode only: use with --since, never --cursor; continue even after complete:true to poll for later changes"},
+                        "removed": {"type": "array", "items": {"type": "string"}, "description": "--since mode only: remove these session IDs from the cached scope"},
+                        "reset": {"type": "boolean", "description": "--since mode only: discard the previous scoped snapshot before applying this response and its continuations"}
+                    },
+                    "oneOf": [
+                        {"required": ["workspaceId", "nextCursor"], "not": {"required": ["cursor"]}},
+                        {"required": ["workspaceIds", "cursor", "removed", "reset"], "not": {"required": ["nextCursor"]}}
+                    ]
+                });
+                schema
+            },
             "update.check" => single_output("update.check"),
             "update.live" | "update.app" | "update.status" => single_output("update.status"),
             "status" | "daemon.status" => json!({
@@ -2258,6 +2289,29 @@ fn single_output(name: &str) -> Value {
             "schema": {"const": CLI_SCHEMA},
             "type": {"const": name},
             "data": {"type": "object"},
+        }
+    })
+}
+
+// Describe the CLI's useful state fields without cloning the entire evolving
+// protocol type; optional coordination/interaction projections remain additive.
+fn session_summary_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "workspaceId", "agentId", "status", "archived", "createdAtMs", "updatedAtMs"],
+        "properties": {
+            "id": {"type": "string"},
+            "workspaceId": {"type": "string"},
+            "agentId": {"type": "string"},
+            "title": nullable_string(),
+            "status": {"type": "string", "description": "Native execution status; inspect interactionSummary and coordination for pending input/work independently"},
+            "modelId": nullable_string(),
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "archived": {"type": "boolean"},
+            "createdAtMs": {"type": "integer"},
+            "updatedAtMs": {"type": "integer"},
+            "interactionSummary": {"type": "object", "description": "Optional pending user-interaction projection; absence is not a history transcript"},
+            "coordination": {"type": "object", "description": "Optional current coordination obligations, independent of native status"}
         }
     })
 }

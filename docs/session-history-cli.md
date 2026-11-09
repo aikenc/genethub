@@ -33,6 +33,10 @@ the existing `session` reply; the target must advertise `session.summary.v1`.
 The CLI refuses unsupported targets instead of silently expanding history.
 `--summary` remains a compatibility alias. CLI `get` no longer returns `data.session`: callers needing only status migrate to `data.summary`; callers needing messages use the explicit narrative/round commands below. The workbench RPC snapshot contract is unchanged.
 
+For existing JSON readers, replace `reply.data.session.summary` with `reply.data.summary`; do not catch a missing old field and substitute an empty session. `schema session.get` and `schema session.list` describe these output fields, including the two distinct list continuations: `nextCursor` is passed to `--cursor` for history pages; `cursor` is passed to `--since` for incremental sync. Never interchange them. A sync `reset` discards the old scoped snapshot before applying the returned changes.
+
+`--lean` is a legacy field projection, not a scope. With an explicit `--limit`, `--active` or `--since` it remains supported; bare `--lean` is rejected so an old full-list reader cannot silently treat 50 rows as the complete directory. Label/source filters require `--active` without `--limit`/`--cursor`; for history, filter each page locally and drain the scope before claiming no match. A failed query is unknown, not an empty result, and must not trigger duplicate dispatch.
+
 For historical analysis, start with `inspect`, then use `context` or a small narrative/round page. Follow `nextCursor` backward. Open a trunk only when process detail matters; resolve a blob only from an opaque `blobRefs[].ref` returned by `session trunk`. The CLI does not accept paths or caller-constructed blob offsets.
 
 `--through-round` freezes a historical boundary. Each result identifies its source session, boundary, digest and untrusted status. Context projections carry `ghref:item:<session-id>:<item-id>` references; resolve one with:

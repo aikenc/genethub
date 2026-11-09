@@ -51,9 +51,9 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 
 细节、命令形态和排障见 [multi-machine.md](references/multi-machine.md)。
 
-会话列表默认按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
+工作台界面的会话列表按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
 历史未展开不代表空闲；进行中和计数独立读取全部活动页，未确认完整时保留下限／未知，不显示精确零。
-Agent 按目的读取即可：
+Agent 的 CLI 按目的读取（与工作台的显示页大小无关）：
 
 | 目的 | CLI 与结果 |
 |---|---|
@@ -63,7 +63,9 @@ Agent 按目的读取即可：
 | 持续同步项目 | `session list --workspace <id>... --since start`，之后原样使用返回的 cursor；按 reset/removed/complete 更新同一份快照 |
 | 看发生了什么 | 按需 `session narrative` / `session rounds`；需要历史证据与摘要哈希时才用 `session inspect`，详见 genehub-introspect |
 
-目录可用 `--limit 1..100` 调整页大小，续页保持原机器、项目和归档条件。旧 `--lean` 或标签／来源筛选不能隐式代表完整历史：历史需显式 `--limit`（分页暂不支持标签／来源），当前工作加 `--active`。这些旧完整列表写法会给出迁移错误，不能原样重试、按空结果派单或丢弃原回执。读取失败表示未知。
+目录可用 `--limit 1..100` 调整页大小，续页保持原机器、项目、归档和活动条件。`complete: false` 时，未出现在这一页不能证明会话不存在；需要确定未找到时先读完该范围。已知会话 ID 直接 `get`，无需扫描目录。
+
+旧脚本迁移：`get` 的状态从 `data.session.summary` 改读 `data.summary`；正文改用 narrative/rounds，不把结构变化当作空会话。`--lean` 只是兼容字段选项，需配合显式 `--limit`、`--active` 或 `--since`；裸 `--lean` 会报迁移错误，避免旧脚本静默漏掉历史。标签／来源筛选仅用于不带页大小的 `--active` 查询；历史则逐页读取并在脚本内筛选。修改原查询后再运行，保留原任务、会话 ID 和回执。读取失败表示未知，不能据此重新派单。
 团队对账不能仅凭页面当前显示的记录数判断。
 
 ## 按任务导航
