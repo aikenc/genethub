@@ -56,9 +56,39 @@ fn running(paths: &Paths) -> io::Result<bool> {
 }
 
 pub(super) fn mark_stop(paths: &Paths) -> Result<(), String> {
-    lock_file(paths, STOP)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    mark_stop_mode(paths, b"immediate\n")
+}
+
+pub(super) fn mark_graceful_stop(paths: &Paths) -> Result<(), String> {
+    mark_stop_mode(paths, b"graceful\n")
+}
+
+fn mark_stop_mode(paths: &Paths, mode: &[u8]) -> Result<(), String> {
+    // Publish mode and stop intent together. An empty, partly written graceful
+    // marker would let the guardian terminate the Host before /shutdown drains.
+    let temporary = paths.root.join(format!(".{STOP}-{}", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|e| e.to_string())?;
+    let result = (|| -> io::Result<()> {
+        file.write_all(mode)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, paths.root.join(STOP))
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result.map_err(|e| e.to_string())
+}
+
+fn graceful_stop(paths: &Paths) -> bool {
+    std::fs::read(paths.root.join(STOP))
+        .map(|mode| mode == b"graceful\n")
+        .unwrap_or(false)
 }
 
 fn stopping(paths: &Paths) -> bool {
@@ -230,6 +260,7 @@ fn supervise() -> anyhow::Result<()> {
         }
         eprintln!("daemon supervisor: started Host pid={}", child.id());
         let mut stop_at = None;
+        let mut terminate_at = None;
         let mut reaped = 0;
         let mut peak_rss = 0;
         let mut sample_at = Instant::now();
@@ -243,13 +274,17 @@ fn supervise() -> anyhow::Result<()> {
                 sample_at = Instant::now() + Duration::from_secs(1);
             }
             if stopping(&paths) {
-                if stop_at.is_none() {
+                let requested = *stop_at.get_or_insert_with(Instant::now);
+                let draining = graceful_stop(&paths) && requested.elapsed() < STOP_TIMEOUT;
+                if terminate_at.is_none() && !draining {
+                    // A proven endpoint gets its normal /shutdown budget first.
+                    // Recovery without an endpoint still signals immediately.
                     // We own this unreaped Child, so its PID cannot be reused.
                     unsafe {
                         libc::kill(child.id() as i32, libc::SIGTERM);
                     }
-                    stop_at = Some(Instant::now());
-                } else if stop_at.is_some_and(|at: Instant| at.elapsed() >= STOP_TIMEOUT) {
+                    terminate_at = Some(Instant::now());
+                } else if terminate_at.is_some_and(|at: Instant| at.elapsed() >= STOP_TIMEOUT) {
                     child.kill()?;
                 }
             }
@@ -279,7 +314,9 @@ fn supervise() -> anyhow::Result<()> {
             match pressure::available_memory() {
                 Ok(bytes) if bytes < reserve => {
                     if !reported_wait {
-                        eprintln!("daemon supervisor: waiting for memory headroom; available={bytes} reserve={reserve}");
+                        eprintln!(
+                            "daemon supervisor: waiting for memory headroom; available={bytes} reserve={reserve}"
+                        );
                         reported_wait = true;
                     }
                 }

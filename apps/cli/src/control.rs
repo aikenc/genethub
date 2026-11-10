@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use genet_frontdoor::Paths;
 use genet_frontdoor::channel;
 use genet_frontdoor::lifecycle;
-use genet_frontdoor::Paths;
 
-use crate::{fail, ok, EXIT_FAILED, EXIT_UNREACHABLE};
+use crate::{EXIT_FAILED, EXIT_UNREACHABLE, fail, ok};
 
 #[cfg(target_os = "linux")]
 mod supervisor;
@@ -367,7 +367,11 @@ fn start_unmanaged(paths: Paths) -> i32 {
             return ok(value);
         }
         if Instant::now() >= settling {
-            fail("daemon_unreachable", "the daemon lock is held but its endpoint did not become ready; inspect daemon logs", EXIT_UNREACHABLE);
+            fail(
+                "daemon_unreachable",
+                "the daemon lock is held but its endpoint did not become ready; inspect daemon logs",
+                EXIT_UNREACHABLE,
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -577,7 +581,7 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
     }
 
     #[cfg(target_os = "linux")]
-    supervisor::mark_stop(paths)?;
+    supervisor::mark_graceful_stop(paths)?;
     ask_to_stop(&endpoint);
     if wait_unhealthy(&endpoint, STOP_TIMEOUT) {
         return wait_stopped(paths, lock);
@@ -943,9 +947,11 @@ mod service_tests {
             service.command("restart"),
             "systemctl --user restart genehub-beta.service"
         );
-        assert!(service
-            .refusal("stop")
-            .contains("systemctl --user stop genehub-beta.service"));
+        assert!(
+            service
+                .refusal("stop")
+                .contains("systemctl --user stop genehub-beta.service")
+        );
 
         let agents = home.path().join("Library/LaunchAgents");
         std::fs::create_dir_all(&agents).unwrap();
