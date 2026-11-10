@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
     PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
@@ -1461,6 +1461,20 @@ impl PageCatalog {
     }
 }
 
+/// Removes a coalesced refresh even when its task is aborted or unwinds.
+struct ScopeRefresh {
+    pending: Arc<std::sync::Mutex<HashSet<Vec<PathBuf>>>>,
+    homes: Vec<PathBuf>,
+}
+
+impl Drop for ScopeRefresh {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.homes);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
@@ -1469,6 +1483,7 @@ pub struct Store {
     /// One sweep or catalog load at a time; readers wait for it rather than
     /// starting another walk.
     sweep: Arc<tokio::sync::Mutex<()>>,
+    scope_refreshes: Arc<std::sync::Mutex<HashSet<Vec<PathBuf>>>>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
     catalog_wake: Arc<tokio::sync::Notify>,
 }
@@ -1480,6 +1495,7 @@ impl Store {
             coordination: Default::default(),
             catalog_reads: Default::default(),
             sweep: Default::default(),
+            scope_refreshes: Default::default(),
             page_catalog: Default::default(),
             catalog_wake: Default::default(),
         }
@@ -2442,11 +2458,80 @@ impl Store {
         }
     }
 
-    /// A read scoped to one project sees what other processes changed there,
-    /// at the cost of looking at that project's files at most once per
-    /// [`SCOPE_REUSE`]. Unscoped reads are served from the index as it is.
+    /// Cold scopes establish a durable observation before presentation. A
+    /// successfully observed scope serves its projection while one coalesced
+    /// refresh runs after SCOPE_REUSE; expiry never blocks a warm page on IO.
     async fn validate_scope(&self, workspace: &str) -> Result<()> {
+        let revision = self
+            .homes
+            .revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut homes: Vec<PathBuf> = self
+            .homes
+            .session_dirs_for(Some(workspace))
+            .into_iter()
+            .map(|(_, sessions)| sessions)
+            .collect();
+        homes.sort();
+        homes.dedup();
+        let warm = {
+            let cache = self
+                .page_catalog
+                .lock()
+                .map_err(|_| anyhow!("page catalog poisoned"))?;
+            cache.initialized
+                && cache.homes_revision == revision
+                && homes.iter().all(|sessions| {
+                    cache
+                        .homes
+                        .get(sessions)
+                        .and_then(|home| home.validated)
+                        .is_some()
+                })
+        };
+        if warm {
+            let fresh = {
+                let cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                homes.iter().all(|sessions| {
+                    cache
+                        .homes
+                        .get(sessions)
+                        .and_then(|home| home.validated)
+                        .is_some_and(|at| at.elapsed() < SCOPE_REUSE)
+                })
+            };
+            if !fresh {
+                let inserted = self
+                    .scope_refreshes
+                    .lock()
+                    .map_err(|_| anyhow!("scope refresh registry poisoned"))?
+                    .insert(homes.clone());
+                if inserted {
+                    let guard = ScopeRefresh {
+                        pending: self.scope_refreshes.clone(),
+                        homes,
+                    };
+                    let store = self.clone();
+                    let workspace = workspace.to_owned();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        let _sweep = store.sweep.lock().await;
+                        if let Err(error) = store.validate_scope_now(&workspace).await {
+                            tracing::warn!(%workspace, %error, "scope catalog refresh failed");
+                        }
+                    });
+                }
+            }
+            return Ok(());
+        }
         let _sweep = self.sweep.lock().await;
+        self.validate_scope_now(workspace).await
+    }
+
+    async fn validate_scope_now(&self, workspace: &str) -> Result<()> {
         loop {
             let revision = self
                 .homes
@@ -2921,7 +3006,7 @@ impl Store {
                     meta: None,
                     error: Some(format!("reading session metadata: {e}")),
                     changed: 0,
-                })
+                });
             }
         };
         let parsed = (|| -> Result<Option<SessionMeta>> {
@@ -3105,9 +3190,9 @@ impl Store {
         {
             return Ok(None);
         }
-        // The index names the homes that held this ID when last looked at.
-        // Read those files again, and walk every home only when none of them
-        // still holds it, for example a conversation another process just made.
+        // Indexed homes are first, but a compatible writer may have placed a
+        // newer copy in another registered home. Read only this ID's direct
+        // path there; never open unrelated conversation files.
         let indexed: Vec<PathBuf> = self
             .page_catalog
             .lock()
@@ -3115,23 +3200,13 @@ impl Store {
             .filter(|cache| cache.initialized)
             .and_then(|cache| cache.by_id.get(session_id).cloned())
             .unwrap_or_default();
-        if !indexed.is_empty() {
-            let homes: Vec<_> = self
-                .homes
-                .all_sessions_dirs()
-                .into_iter()
-                .filter(|(_, sessions)| {
-                    indexed.iter().any(|path| {
-                        path.parent().and_then(Path::parent) == Some(sessions.as_path())
-                    })
-                })
-                .collect();
-            if let Some(found) = self.find_meta_in(session_id, homes).await? {
-                return Ok(Some(found));
-            }
-        }
-        self.find_meta_in(session_id, self.homes.all_sessions_dirs())
-            .await
+        let mut homes = self.homes.all_sessions_dirs();
+        homes.sort_by_key(|(_, sessions)| {
+            !indexed
+                .iter()
+                .any(|path| path.parent().and_then(Path::parent) == Some(sessions.as_path()))
+        });
+        self.find_meta_in(session_id, homes).await
     }
 
     async fn find_meta_in(
@@ -3414,7 +3489,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
                 return Err(error)
-                    .context("reading the interrupted answer before accepting new writes")
+                    .context("reading the interrupted answer before accepting new writes");
             }
         };
         contents
@@ -3620,7 +3695,7 @@ impl Store {
                 return Ok(RoundTrunk {
                     summary: summary.clone(),
                     batches: Vec::new(),
-                })
+                });
             }
             Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
         };
@@ -4269,10 +4344,11 @@ mod project_home_tests {
         let listed = store.list_meta().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].workspace_id, "w_workspace");
-        assert!(root
-            .path()
-            .join(".genethub/sessions/s_folder/meta.json")
-            .is_file());
+        assert!(
+            root.path()
+                .join(".genethub/sessions/s_folder/meta.json")
+                .is_file()
+        );
 
         homes.attach_project("w_folder", "folder", root.path());
         assert_eq!(store.list_meta().await.unwrap().len(), 2);
