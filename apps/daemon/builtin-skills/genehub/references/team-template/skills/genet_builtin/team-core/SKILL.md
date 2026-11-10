@@ -33,3 +33,4 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 ## Timer计时与恢复
 Team hook使用默认`fixed-delay`：一轮退出并收尾后再等待`every`；运行中不并发、不追补，冷却释放名额，失败或超时也等待。不要为了追求固定启动频率改成`interval`，该模式执行时限最多为间隔的15%，会强制结束超时进程组，适合很短且幂等的命令。长调用需要合理timeout，明显慢查询仍需修复；alive不代表一轮完成。更新模板hook源后build完整制品，再核对实际hook、daemon版本和回传；仅替换文件不代表正在执行的回调已采用新规则。
 机制 report/health/watchdog 熔断默认写内部 notes；例行反思静默，真实交付与用户问题保留原路由。
+本队改不了的样板/内核/公共 Skill 问题用 `run.py feedback add/ls/verify`，见 team-reflect 的平台反馈参考；只写本队文件，不唤醒模型，采用后由本队复验。

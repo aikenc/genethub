@@ -15,5 +15,6 @@ description: 1+N 项目团队的反思与进化会话：非实时回看全队会
    - **第一级提炼（岗位级 L2）**：扫描 `leader`、各管线组员（如 `skill-lead`、`combat-lead`）、`qa`、`research` 的增量会话，把该角色专属的踩坑教训、模块架构约束、`rg` 检索词 + `ghref` 证据指针写入对应 `spaces/<岗位>/index.md`（以及 `front/index.md`）。
    - **第二级提炼（团队根级 L1）**：将跨角色共性、高频复现的全局铁律浓缩进根目录 `memory.md`（严格守 ≤30 行，满了先合并或降级到对应岗位 `index.md`）。
 3. **自主维护与演进**：优先改 `soul.md` / `memory.md` / 岗位身份，再改 `skills/<业务分组>/` 与 `tools/<业务包>/`。按 team-core `references/extensions.md` 继承公开 Class，由根描述的 `team` 选择；不要复制调度器、替换内部函数或追加第二份锁。`tools/genet_builtin/`、`skills/genet_builtin/` 尽量随平台整体升级；确需修改时记录必要补丁与验证，不能宣称以后无需合并。每个 `SKILL.md` ≤40 行，合并指令 ≤32 KiB。
+   改本队能解决的自己改；样板负责且未改过的步骤、内核原因码或不得不绕行的问题，按 [平台反馈](references/platform-feedback.md) 写 `run.py feedback`。归因证据不足先标线索，不能只向用户传话或反复写无人读取的报告。反馈只写文件，不触发模型；采用修复后由本队复验原编号，平台不代写 fixed。
 4. **生效与记录（必做闭环）**：定义源改完运行 `"$GENEHUB_PYTHON" <团队根>/tools/run.py sync-identity`，独立制品由源端 build 后部署、执行端 `spacebuilder verify --artifacts-only`；执行副本的 `sync-identity` 不会重编，不能据此声称新规范已生效。保留原候选与未提交成果，记录源提交、构建与实际岗位采用；最后 `run.py snapshot -m "…"`，并 `run.py notes done <编号> --result "做了什么"`。
 5. **默认静默**：例行诊断、记忆/模板更新写 notes 和报告，不向前台发 report 或“已静默更新”note；普通 Agent note 仍会触发模型。只有用户主动索要结论、业务交付或确需用户决定时用 `run.py tell-user` 一次回传，回答体验影响、处理状态、防复发；故障类别本身不是通知理由。升级见 `references/upgrade.md`。

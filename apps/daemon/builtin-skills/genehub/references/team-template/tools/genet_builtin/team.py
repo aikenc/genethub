@@ -4912,10 +4912,12 @@ def report(root, name, mine, text):
 
 
 def main(argv):
+    from . import feedback
     runtime = get_runtime(find_root())
     parser = argparse.ArgumentParser(prog="tools/run.py")
     sub = parser.add_subparsers(dest="command", required=True)
     team_tasks.parser(sub)
+    feedback.register(sub)
     send = sub.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
@@ -5064,14 +5066,14 @@ def main(argv):
         args.words.extend(remaining)
     else:
         args = parser.parse_args(argv)
-    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
+    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "feedback": lambda a: feedback.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
                 "employee": cmd_employee, "member": cmd_employee, "worktree": cmd_worktree, "publish": cmd_publish, "board": cmd_board, "models": cmd_models,
                 "directory": cmd_directory, "mount": cmd_mount, "unmount": cmd_unmount, "path": cmd_path, "datas": cmd_datas, "temp": cmd_temp, "reset": cmd_reset, "sync-identity": cmd_sync_identity, "hook": cmd_hook,
                 "note": cmd_note, "notes": cmd_notes, "tell-user": cmd_tell_user, "reflect": cmd_reflect, "snapshot": cmd_snapshot, "drift": cmd_drift}
     handlers.update(business)
     try:
         try:
-            if args.command != "receive":
+            if args.command not in ("receive", "feedback"):
                 check_and_flush_self_inbox_inline(find_root(), args.command)
         except ExpertError:
             raise
