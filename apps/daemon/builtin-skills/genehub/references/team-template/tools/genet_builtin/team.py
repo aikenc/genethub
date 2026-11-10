@@ -752,7 +752,7 @@ def _cmd_receive(args):
             if not old.get("recoverable") or not old.get("selection"):
                 raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
         # Validate selection BEFORE taking a lock or writing a creation intent.
-        model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+        model_key = role_model_key(role)
         selection = old["selection"] if old else choose(role_root, model_key, request.get("tier"), request.get("model"), request.get("media"), executor=True)
         lock = old.get("lock") if old else None
         directory = old.get("directory") if old else None
@@ -1194,12 +1194,22 @@ def pick_equivalent(inherited, everything, with_medium):
     return min(fits, key=lambda r: (abs(COST_RANK.get(r["cost"], 2) - cost), COST_RANK.get(r["cost"], 2), r["agentId"], r["modelId"]), default=None)
 
 
-def choose(root, model_key, tier=None, model=None, media=None, machine=None, executor=False):
+def role_model_key(role):
+    if role in ("team-reflect", "reflect"):
+        return "TEAM_MODEL_REFLECT"
+    return "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+
+
+def choose(root, model_key, tier=None, model=None, media=None, machine=None, executor=False, role=None):
     """The `agent run` arguments that pick the Agent and model, and one line saying why.
     Order: asked for explicitly, then this machine's own override, then what the requester runs on."""
     if tier and model:
         raise ExpertError("--tier 和 --model 不能同时给", "没有创建任何会话", "只留一个：档位让平台选，模型是点名")
     env = open_env(root)
+    # The registered destination owns its local route. The caller/root remains
+    # the fallback; saved dispatch selections are reused by their caller.
+    if role and role in child_role_names(root):
+        env = {**env, **open_env(os.path.join(root, "spaces", role))}
     if executor and not tier:
         env = {**open_env(_walk_expert_root(root) or root), **env}
         agent = env.get("TEAM_AGENT")
@@ -1276,7 +1286,7 @@ def front_session(root, spaces):
 
 def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None, machine=None, selection=None, operation_id=None, prepare_only=False):
     """Starts the session and returns (its id, why this Agent and model)."""
-    picked, why = selection or choose(root, model_key, tier, model, media, machine)
+    picked, why = selection or choose(root, model_key, tier, model, media, machine, role=role)
     # The title defaults to the first line of the task, which starts with the user's own words: every session of one
     # request would then carry the same title in the list. Name it by what it does instead.
     role_label = ROLE_LABELS.get(role, role)[:10]
@@ -1728,7 +1738,7 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
     wt_dir = role_env.get("WORKTREE_DIR")
     wt_hint = ("，专属工位目录 WORKTREE_DIR: %s" % wt_dir) if wt_dir else ""
     prompt = "[系统说明：本会话由 %s 跨团队/跨岗位发起（用途: %s，团队根目录: %s，数据仓根目录: %s%s）。完成后直接在本会话输出最终结论即可，系统会自动将你的最终回复转交发起方。]\n\n%s" % (sender, kind, target_root, datas_root(target_root), wt_hint, text)
-    model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+    model_key = role_model_key(role)
     session_id, _ = start(
         target_root,
         workspace_id,
@@ -2045,7 +2055,7 @@ def cmd_spawn(args):
         # own front session instead of waking `admin` across space boundaries.
         if not same_expert_session(target_root, requester, mine.get("spaces")):
             requester = front_session(target_root, mine["spaces"]) if "root" in (mine.get("spaces") or {}) else None
-    local_selection = None if machine else choose(target_root, "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK", args.tier, args.model, args.media)
+    local_selection = None if machine else choose(target_root, role_model_key(role), args.tier, args.model, args.media, role=role)
     role_env = {} if machine else open_env(os.path.join(target_root, "spaces", role))
     wt_dir = role_env.get("WORKTREE_DIR")
     spawned_wt = None
@@ -2121,7 +2131,7 @@ def cmd_spawn(args):
     turn = latest_round(requester) if requester else None
     round_key = (turn or {}).get("roundId") or (turn or {}).get("userItemId")
     batch = "%s:%s" % (requester, round_key) if requester and round_key else None
-    model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+    model_key = role_model_key(role)
     remote_dispatch = None
     try:
         if machine:
@@ -2921,7 +2931,7 @@ def cmd_models(args):
         env.update(open_env(role_dir))
         effort = env.get("TEAM_EFFORT") or "default"
         wt = env.get("WORKTREE_DIR") or "-"
-        model_cfg = env.get("TEAM_MODEL") or env.get("TEAM_MODEL_%s" % role.upper().replace("-", "_")) or "auto(Max/Pro)"
+        model_cfg = env.get("TEAM_MODEL") or env.get(role_model_key(role)) or "auto(Max/Pro)"
         print("- %s: model=%s | effort=%s | worktree=%s" % (role, model_cfg, effort, wt))
 
 

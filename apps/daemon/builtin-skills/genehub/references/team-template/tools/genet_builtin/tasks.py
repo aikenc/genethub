@@ -100,7 +100,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         lock = old.get('lock')
         picked = old.get('selection') if old else None
         if not machine and not picked:
-            args, why = t.choose(root, 'TEAM_MODEL_WORK', tier, model, None)
+            args, why = t.choose(root, t.role_model_key(role), tier, model, None, role=role)
             picked = [args, why]
         old.update(selection=picked, lock=lock)
         t.write_json(path, old)
@@ -161,7 +161,7 @@ def prepare_intent(t, root, record):
         sid, why = result['sessionId'], result['why']
         remote = dict(id=op_id, target=target)
     else:
-        sid, why = t.start(root, mine['spaces'][role], role, desc, prompt, 'TEAM_MODEL_WORK',
+        sid, why = t.start(root, mine['spaces'][role], role, desc, prompt, t.role_model_key(role),
                            selection=(picked[0], picked[1]), operation_id=op_id, prepare_only=True)
     if not sid:
         raise t.ExpertError('派单创建回执未知', '原编号、意图和资源保留', '用同一 task 操作重试，禁止换编号')
