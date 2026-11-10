@@ -123,7 +123,18 @@ def accept(config):
             # Never replace scripts under in-flight or uncertain work.
             for receipt in target.glob('spaces/*/.genethub/team/dispatch/*.json'):
                 value = read(receipt)
-                if not value or not value.get('released'):
+                request = value.get('request') if isinstance(value, dict) else None
+                request_id = request.get('id') if isinstance(request, dict) else None
+                # A fenced prepare never created a Session or claimed a resource.
+                # Keep its exact receipt through replacement so late prepares
+                # remain refused; unknown proof still blocks the installation.
+                withdrawn = (isinstance(value, dict) and value.get('status') == 'withdrawn'
+                             and type(value.get('fenceProtocol')) is int and value['fenceProtocol'] == 1
+                             and isinstance(request_id, str) and bool(request_id)
+                             and request.get('prepareOnly') is True and not request.get('operation')
+                             and receipt.name == hashlib.sha256(request_id.encode()).hexdigest() + '.json'
+                             and not any(key in value for key in ('sessionId', 'lock', 'directory', 'selection')))
+                if not value or not (value.get('released') or withdrawn):
                     raise RuntimeError('in-flight/uncertain receipt retained; finish original task before build update')
             old_lock = read(target/'.spacebuilder/output-lock.json')
             if not old_lock and not configured_only:
