@@ -476,6 +476,42 @@ sys.exit(r.returncode)
     t.assertions.assert(declaredReceipt.members.map((m:any)=>m.name).join()==="qa"&&(!existsSync(installedRoleSettings)||!readFileSync(installedRoleSettings,"utf8").includes("TEAM_MACHINE")),"installed copy carries the source's machine declaration or extra roles");
     const listedRoles=await script(["employee","ls"]);
     t.assertions.assert(listedRoles.code===0&&/- qa \[.*机器: .*已安装/.test(listedRoles.stdout),"employee ls hides the role's machine: "+listedRoles.stdout);
+    // A durable withdrawal is a terminal, uncreated operation, so it must
+    // survive the next real artifact installation without blocking upgrades.
+    const returnForFence = JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/task-source.json"),"utf8"));
+    const originalFence = {id:"upgrade.withdrawn", workspaceId:declaredBinding.workspaceId, role:"qa", desc:"uncreated bounded work", text:"Never start this old work", prepareOnly:true, tier:null, model:null, media:null, returnTo:returnForFence};
+    const installedReceive = (request:unknown, fence=false) => spawnSync(python,[path.join(declaredRuntime,"tools/run.py"),"receive",JSON.stringify(request),...(fence?["--require-dispatch-fence"]:[])],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    const fenced = installedReceive({id:originalFence.id,workspaceId:declaredBinding.workspaceId,role:"qa",operation:"withdraw-prepare",originalRequest:originalFence},true);
+    t.assertions.assert(fenced.status===0&&JSON.parse(fenced.stdout.trim().split("\n").at(-1)!).withdrawn===true,"public installed receiver did not fence old work: "+fenced.stdout+fenced.stderr);
+    const fencePath=path.join(declaredRuntime,"spaces/qa/.genethub/team/dispatch",createHash("sha256").update(originalFence.id).digest("hex")+".json");
+    const fenceBytes=readFileSync(fencePath,"utf8");
+    // Explicit future-protocol storage fixture: unknown proof must stay closed.
+    writeFileSync(fencePath,JSON.stringify({...JSON.parse(fenceBytes),fenceProtocol:99}));
+    const unsupportedBytes=readFileSync(fencePath,"utf8");
+    writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'upgrade after withdrawal'\n");
+    let blockedFence=await script(["employee","sync"],builder);
+    t.assertions.assert(blockedFence.code!==0&&readFileSync(fencePath,"utf8")===unsupportedBytes&&JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256===declaredReceipt.archiveSha256,"unsupported withdrawal proof was replaced during upgrade");
+    writeFileSync(fencePath,fenceBytes);
+    const fenceUpgrade=await script(["employee","sync"],builder);
+    t.assertions.assert(fenceUpgrade.code===0,"terminal withdrawal blocked real upgrade: "+fenceUpgrade.stdout+fenceUpgrade.stderr);
+    const upgradedDigest=JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256;
+    t.assertions.assert(upgradedDigest!==declaredReceipt.archiveSha256&&readFileSync(fencePath,"utf8")===fenceBytes,"upgrade lost the original durable fence or did not change artifacts");
+    const lateFence=installedReceive(originalFence);
+    t.assertions.assert(lateFence.status!==0&&readFileSync(fencePath,"utf8")===fenceBytes,"late prepare escaped the preserved fence after upgrade");
+    const preparedForUpgrade={...originalFence,id:"upgrade.real-prepared"};
+    const preparedNative=installedReceive(preparedForUpgrade);
+    t.assertions.assert(preparedNative.status===0,"actual prepared receiver failed: "+preparedNative.stdout+preparedNative.stderr);
+    const preparedSid=JSON.parse(preparedNative.stdout.trim().split("\n").at(-1)!).sessionId;
+    const preparedFile=path.join(path.dirname(fencePath),createHash("sha256").update(preparedForUpgrade.id).digest("hex")+".json");
+    const preparedBytes=readFileSync(preparedFile,"utf8");
+    t.assertions.assert(typeof preparedSid==="string"&&!(await inspectSession(preparedSid,true)).items.some((i:any)=>i.type==="assistantMessage"),"native preparation activated business");
+    writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'prepared work must block upgrade'\n");
+    const blockedPrepared=await script(["employee","sync"],builder);
+    t.assertions.assert(blockedPrepared.code!==0&&JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256===upgradedDigest&&readFileSync(preparedFile,"utf8")===preparedBytes,"an actual prepared native Session was replaced as terminal work");
+    const releasedPrepared=installedReceive({id:preparedForUpgrade.id,workspaceId:declaredBinding.workspaceId,role:"qa",operation:"release",sessionId:preparedSid});
+    t.assertions.assert(releasedPrepared.status===0,"prepared release failed: "+releasedPrepared.stdout+releasedPrepared.stderr);
+    const releasedUpgrade=await script(["employee","sync"],builder);
+    t.assertions.assert(releasedUpgrade.code===0&&readFileSync(fencePath,"utf8")===fenceBytes,"settled upgrade discarded the fence: "+releasedUpgrade.stdout+releasedUpgrade.stderr);
     // The executor accepts only roles installed for it, even if someone registers another role by hand.
     const intruder=(await cliJson(["space","open",path.join(declaredRuntime,"spaces/research")],true));
     const intruderId=(intruder.workspace??intruder).id;
