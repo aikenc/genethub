@@ -1088,6 +1088,10 @@ def discover_space_tree(root: Path) -> SpaceTree:
         for entry in entries:
             if entry.is_symlink() or is_discovery_excluded(entry) or not entry.is_dir():
                 continue
+            # Portable runtime outputs can be stored beneath a source (for example,
+            # a reflection candidate). They and their descendants are not definitions.
+            if (entry / ".spacebuilder" / "output-lock.json").exists():
+                continue
             manifest_path = entry / "agent-space.genet.json"
             if manifest_path.is_symlink():
                 fail("SB017", "Nested agent-space.genet.json must not be a symlink", sources=(manifest_path.as_posix(),))
