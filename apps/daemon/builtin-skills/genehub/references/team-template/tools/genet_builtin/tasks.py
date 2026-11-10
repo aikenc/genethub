@@ -6,11 +6,12 @@ All operations persist their intent before starting or messaging another session
 import hashlib
 import json
 import os
+import re
 import subprocess
 from types import SimpleNamespace
 from .runtime import get_runtime, json_value, check_decision
 from .api import TeamConfigurationError
-from . import resources
+from . import resources, quality_events
 
 
 def identity(value):
@@ -46,7 +47,7 @@ def receipt(t, root, sid):
     return None
 
 
-def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None, directory=None, tier=None, model=None, parameters=None):
+def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None, directory=None, tier=None, model=None, parameters=None, follows=None, standing=False):
     """A stable per-operation intent; native creation and first input share its ID."""
     runtime = get_runtime(root)
     runtime.verify_task(task)
@@ -61,6 +62,12 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
     request = dict(taskId=task['taskId'], role=role, desc=desc, goal=goal, requester=requester,
                    machine=machine, directory=directory, tier=tier, model=model)
     if parameters: request['parameters'] = json_value(parameters)
+    if follows is not None:
+        if not re.fullmatch(r'taskop\.[0-9a-f]{64}', follows) or not t.read_dispatch_record(t.state_dir(root, 'task-dispatch', follows + '.json')):
+            raise t.ExpertError('follows 必须指向本团队已有派单', '没有创建支持单', '使用原支持单的 operationId')
+        request['follows'] = follows
+    if standing:
+        request['standing'] = True
     req = resources.request(task['taskId'], role, goal, requester, machine, directory, parameters)
     resources.gate(runtime, req, op_id)
     with t.inbox_lock(root, op_id, purpose='任务派单'):
@@ -96,6 +103,9 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
                 old = dict(version=1, operationId=op_id, request=request, state='creating',
                            selection=None, lock=None, createdAtMs=t.now_ms(), recoverable=False, createAttempted=False)
                 t.write_json(path, old)
+        quality_events.emit(t, root, 'dispatch', op_id, at_ms=old['createdAtMs'],
+                            taskId=task['taskId'], operationId=op_id, requester=requester,
+                            role=role, machine=machine, follows=follows, standing=bool(standing))
         resolved = resources.prepare(t, root, old, req, path)
         lock = old.get('lock')
         picked = old.get('selection') if old else None
@@ -182,6 +192,8 @@ def prepare_intent(t, root, record):
     # If interrupted after this receipt, retry reconstructs the same pending relationship.
     t.write_json(t.state_dir(root, 'task-dispatch', op_id + '.json'), record)
     t.write_json(t.state_dir(root, 'pending', sid + '.json'), pending)
+    quality_events.emit(t, root, 'dispatch-confirmed', op_id, taskId=request['taskId'],
+                        operationId=op_id, sessionId=sid, machine=machine)
     return sid
 
 
@@ -210,6 +222,10 @@ def activate(t, root, record, path):
         t.genet('session', 'send', sid, record['prompt'], '--system', '--message-id', record['operationId'], '--no-wait')
     record['state'] = 'created'
     t.write_json(path, record)
+    quality_events.emit(t, root, 'input-accepted', record['operationId'],
+                        taskId=task['taskId'], operationId=record['operationId'],
+                        sessionId=sid, messageId=record['operationId'], purpose='task',
+                        machine=record['request'].get('machine'), timeBasis='observed-acceptance')
 
 
 def forward(t, root, args):
@@ -256,6 +272,8 @@ def command(t, args, root=None, sender=None):
                 task = dict(framework=runtime.identity(), version=1, taskId=task_id, request=requested, front=sid, owner=None,
                             state='active', revision=1, createdAtMs=t.now_ms(), collaborators=[])
                 t.write_json(path, task)
+            quality_events.emit(t, root, 'task-created', task_id, at_ms=task['createdAtMs'],
+                                taskId=task_id, front=sid)
             result = dispatch(t, root, task, task_id + ':owner', args.space, args.desc, requested['goal'], sid,
                               args.machine, args.directory, args.tier, args.model, parameters)
             if not task.get('owner'):
@@ -284,7 +302,8 @@ def command(t, args, root=None, sender=None):
             raise t.ExpertError('支持请求需要 --request-id', '没有派单', '重试复用本次支持编号')
         op = task['taskId'] + ':support:' + args.request_id
         result = dispatch(t, root, task, op, args.space, args.desc, ' '.join(args.words), sid,
-                          args.machine, args.directory, args.tier, args.model, parameters)
+                          args.machine, args.directory, args.tier, args.model, parameters,
+                          follows=getattr(args, 'follows', None), standing=getattr(args, 'standing', False))
         with t.inbox_lock(root, task['taskId'], purpose='协作关系'):
             task = read_task(t, root, task['taskId'])
             if not any(x['operationId'] == result['operationId'] for x in task['collaborators']):
@@ -315,6 +334,9 @@ def command(t, args, root=None, sender=None):
                     if item['sessionId'] == sid:
                         item['finished'] = outcome
             t.write_json(path, task)
+        quality_events.emit(t, root, 'conclusion', task['taskId'] + ':' + sid + ':' + str(outcome['atMs']),
+                            at_ms=outcome['atMs'], taskId=task['taskId'], sessionId=sid,
+                            outcome=outcome['outcome'])
         print(json.dumps(dict(taskId=task['taskId'], recorded=True), ensure_ascii=False))
     elif action == 'send':
         if not args.request_id:
@@ -582,6 +604,8 @@ def _reconcile_control(t, root, task):
     task['state'] = {'pause': 'paused', 'resume': 'active', 'cancel': 'canceled', 'handover': 'active'}[action]
     if action == 'resume': task.pop('finished', None)
     t.write_json(task_path(t, root, task['taskId']), task)
+    quality_events.emit(t, root, 'control', task['taskId'] + ':' + str(task['revision']),
+                        taskId=task['taskId'], action=action, state=task['state'], revision=task['revision'])
 
 
 def records(t, root, area):
@@ -640,6 +664,9 @@ def release_local(t, root, record):
             if not decision.allowed:
                 return True  # result delivery and resource reuse are different obligations
         os.remove(lock)
+        quality_events.emit(t, root, 'resource-released', operation or record['sessionId'],
+                            taskId=record.get('taskId'), operationId=operation,
+                            sessionId=record['sessionId'], proof='local-idle-process-and-lease-check')
         if intent and intent.get('resourceBinding'):
             intent['resourceReleased'] = True
             t.write_json(intent_path, intent)
@@ -925,7 +952,10 @@ def parser(sub):
     actions = task.add_subparsers(dest='task_action', required=True)
     for action in ('start', 'support'):
         p = actions.add_parser(action)
-        if action == 'support': p.add_argument('task_id')
+        if action == 'support':
+            p.add_argument('task_id')
+            p.add_argument('--follows', help='operationId of this Team work item being redone')
+            p.add_argument('--standing', action='store_true', help='standing support, excluded from finite-work latency and R2')
         p.add_argument('--space', required=True); p.add_argument('--desc', required=True)
         p.add_argument('--request-id', required=True); p.add_argument('--machine'); p.add_argument('--directory')
         p.add_argument('--tier'); p.add_argument('--model'); p.add_argument('--parameters', help='business JSON object; normally supplied by a project command'); p.add_argument('words', nargs='+')

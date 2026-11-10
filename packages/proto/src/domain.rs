@@ -805,6 +805,26 @@ pub struct SessionReadSource {
     pub untrusted: bool,
 }
 
+/// Retained input delivery facts for support diagnostics and coordination.
+/// No message body or idempotency digest is exposed. A missing handoff time
+/// stays unknown, including historical receipts written by older versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInputReceipt {
+    pub message_id: String,
+    pub source: String,
+    #[ts(type = "number")]
+    pub received_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub delivered_at_ms: Option<i64>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<String>,
+}
+
 /// A small structural entry point. It deliberately contains no free-form
 /// transcript text; callers choose a bounded narrative page explicitly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -822,6 +842,11 @@ pub struct SessionInspection {
     pub latest_round_id: Option<String>,
     pub coverage: HistoryCoverage,
     pub layers: Vec<String>,
+    /// Present only for current inspection, never mixed into a historical
+    /// throughRound boundary. Retention is bounded; absence is not nonreceipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub retained_inputs: Option<Vec<SessionInputReceipt>>,
 }
 
 /// A recent-first page of narrative items, returned in chronological order.

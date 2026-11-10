@@ -18,3 +18,5 @@ description: 1+N 项目团队的反思与进化会话：非实时回看全队会
    改本队能解决的自己改；样板负责且未改过的步骤、内核原因码或不得不绕行的问题，按 [平台反馈](references/platform-feedback.md) 写 `run.py feedback`。归因证据不足先标线索，不能只向用户传话或反复写无人读取的报告。反馈只写文件，不触发模型；采用修复后由本队复验原编号，平台不代写 fixed。
 4. **生效与记录（必做闭环）**：定义源改完运行 `"$GENEHUB_PYTHON" <团队根>/tools/run.py sync-identity`，独立制品由源端 build 后部署、执行端 `spacebuilder verify --artifacts-only`；执行副本的 `sync-identity` 不会重编，不能据此声称新规范已生效。保留原候选与未提交成果，记录源提交、构建与实际岗位采用；最后 `run.py snapshot -m "…"`，并 `run.py notes done <编号> --result "做了什么"`。
 5. **默认静默**：例行诊断、记忆/模板更新写 notes 和报告，不向前台发 report 或“已静默更新”note；普通 Agent note 仍会触发模型。只有用户主动索要结论、业务交付或确需用户决定时用 `run.py tell-user` 一次回传，回答体验影响、处理状态、防复发；故障类别本身不是通知理由。升级见 `references/upgrade.md`。
+
+质量简报含最新小时卡、实际采用版本与失分账单；正式分、暂定分和缺失数据分开读。用 `run.py quality card`、`quality history` 或 `quality describe` 核对；按原因自主选择改流程、知识或反馈平台，不要求额外的改进格式。口径见 team-core `references/quality.md`。

@@ -1621,13 +1621,25 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
+/**
+ * Retained input delivery facts for support diagnostics and coordination.
+ * No message body or idempotency digest is exposed. A missing handoff time
+ * stays unknown, including historical receipts written by older versions.
+ */
+export type SessionInputReceipt = { messageId: string, source: string, receivedAtMs: number, deliveredAtMs?: number, state: string, turnId?: string, };
+
 export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
 
 /**
  * A small structural entry point. It deliberately contains no free-form
  * transcript text; callers choose a bounded narrative page explicitly.
  */
-export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, };
+export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, 
+/**
+ * Present only for current inspection, never mixed into a historical
+ * throughRound boundary. Retention is bounded; absence is not nonreceipt.
+ */
+retainedInputs?: Array<SessionInputReceipt>, };
 
 export type SessionInteractionRef = { requestId: string, kind: PermissionRequestKind, title: string, };
 

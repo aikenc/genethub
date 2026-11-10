@@ -222,6 +222,7 @@ impl SessionManager {
                 next.inbox.entries.push(InboxEntry {
                     message_id: message_id.clone(),
                     received_at_ms: now_ms(),
+                    delivered_at_ms: None,
                     digest,
                     source: source.into(),
                     task_run_id,
@@ -548,6 +549,22 @@ impl SessionManager {
         if !taken {
             execution.input_ids.retain(|id| !ids.contains(id));
             self.mark_steered(live, &ids, None, false).await?;
+        } else {
+            // Steering may refuse the input. Record delivery only after the
+            // Agent actually took it, keeping the first acknowledged handoff.
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            for entry in &mut next.inbox.entries {
+                if ids.contains(&entry.message_id) {
+                    entry.delivered_at_ms.get_or_insert_with(now_ms);
+                }
+            }
+            match self.store.save_meta(&next) {
+                Ok(()) => *meta = next,
+                Err(error) => {
+                    tracing::warn!(%error, "input handoff receipt unavailable; business continues")
+                }
+            }
         }
         Ok(taken)
     }
@@ -874,6 +891,7 @@ mod tests {
         InboxEntry {
             message_id: message_id.into(),
             received_at_ms: 0,
+            delivered_at_ms: None,
             digest: String::new(),
             source: source.into(),
             task_run_id: None,

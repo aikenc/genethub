@@ -2492,8 +2492,24 @@ impl SessionManager {
             .meta
             .summary_with_activity(status, live.activity_of(status));
         summary.coordination = self.store.coordination(&summary.workspace_id, &summary.id);
+        let retained_inputs = through_round_id.is_none().then(|| {
+            view.meta
+                .inbox
+                .entries
+                .iter()
+                .map(|entry| genehub_proto::SessionInputReceipt {
+                    message_id: entry.message_id.clone(),
+                    source: entry.source.clone(),
+                    received_at_ms: entry.received_at_ms,
+                    delivered_at_ms: entry.delivered_at_ms,
+                    state: entry.state.clone(),
+                    turn_id: entry.turn_id.clone(),
+                })
+                .collect()
+        });
         Ok(SessionInspection {
             summary,
+            retained_inputs,
             source: view.source,
             narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
             round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
@@ -3483,6 +3499,7 @@ impl SessionManager {
             for entry in &mut next.inbox.entries {
                 if execution.input_ids.contains(&entry.message_id) {
                     entry.turn_id = Some(turn_id.clone());
+                    entry.delivered_at_ms.get_or_insert_with(now_ms);
                 }
             }
             self.store.save_meta(&next)?;
@@ -8408,6 +8425,7 @@ mod tests {
             crate::session::store::InboxEntry {
                 message_id: "handled".into(),
                 received_at_ms: 1,
+                delivered_at_ms: None,
                 digest: "handled-digest".into(),
                 source: "user".into(),
                 task_run_id: None,
@@ -8417,6 +8435,7 @@ mod tests {
             crate::session::store::InboxEntry {
                 message_id: "queued".into(),
                 received_at_ms: 2,
+                delivered_at_ms: None,
                 digest: "queued-digest".into(),
                 source: "user".into(),
                 task_run_id: None,
@@ -11270,6 +11289,7 @@ mod tests {
                 .push(crate::session::store::InboxEntry {
                     message_id: "m_more".into(),
                     received_at_ms: 0,
+                    delivered_at_ms: None,
                     digest: String::new(),
                     source: "user".into(),
                     task_run_id: None,

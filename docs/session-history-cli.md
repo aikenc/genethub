@@ -54,3 +54,20 @@ genet session narrative <session-id> --item <item-id>
 The Skill is a command navigator: discover `genet capabilities` and `genet schema session.inspect` / `session.context`, then inspect, context, narrative/rounds, and only then trunks/blob. Do not treat `GENEHUB_SESSION_ID` as the source session being analysed. When the boundary is historical, pass `--through-round`.
 
 `/compact` is routed to the built-in Agent's compact control command. It obtains the same deterministic context projection, forces the Skill into a private `Session::in_memory` child run with tools disabled, and appends the resulting cited summary as a compaction entry. The child run creates no session file and never appears in GeneHub history. If model analysis is unavailable, the deterministic projection itself is retained as the fallback.
+
+## Retained input delivery receipts
+
+Current `session inspect` additionally returns optional `retainedInputs`: each
+retained message's `messageId`, native `source`, `receivedAtMs`, `state`, optional
+`turnId` and optional `deliveredAtMs`. This contains no message text or admission
+digest. `deliveredAtMs` is the first acknowledged handoff to the Agent, including
+accepted steering during a running turn. Queue admission, a planned handoff and
+refused steering do not supply this timestamp. Retries keep the first handoff.
+
+Receipts are bounded by the normal inbox retention policy. A missing receipt
+cannot prove a message was never received. Older records without a handoff time
+remain unknown; `sent` alone does not establish when the Agent took the input.
+These current-state facts are omitted with `--through-round`, so they do not leak
+future input state into a frozen historical boundary. Delivery proves context
+handoff, not a correct business decision or completed work. Team quality tooling
+uses the same public inspection surface to match all inputs in a batched round.

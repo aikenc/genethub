@@ -178,6 +178,10 @@ pub struct InboxEntry {
     pub message_id: String,
     #[serde(default)]
     pub received_at_ms: i64,
+    /// First acknowledged handoff to the native Agent, never queue admission.
+    /// Older receipts keep this unknown; a retry does not rewrite history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at_ms: Option<i64>,
     pub digest: String,
     pub source: String,
     pub task_run_id: Option<String>,

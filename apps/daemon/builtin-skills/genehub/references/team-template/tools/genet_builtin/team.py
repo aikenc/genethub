@@ -98,6 +98,7 @@ SESSION_ID = re.compile(r"^s_[0-9a-f]+$")
 
 
 from . import tasks as team_tasks
+from . import quality_events
 from .runtime import get_runtime, check_decision
 from .api import TeamConfigurationError
 
@@ -120,12 +121,12 @@ def _resolve_genet_env():
     return env.get("GENEHUB_CLI"), env
 
 
-def genet(*args, ok_codes=(0,)):
+def genet(*args, ok_codes=(0,), timeout=120):
     cli, env = _resolve_genet_env()
     if not cli:
         raise ExpertError("环境里没有 GENEHUB_CLI", "没有执行任何操作", "在 GeneHub 会话或 timer hook 里运行本脚本")
     try:
-        done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=env, timeout=120)
+        done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=env, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ExpertError("genet 调用未完成: %s" % type(error).__name__, "结果未确认，可能已部分完成", "先核对已有会话与回执，再决定是否重试") from error
     lines = [line for line in done.stdout.splitlines() if line.strip()]
@@ -483,6 +484,9 @@ def remote_receive(target, request):
     if withdrawing:
         argv[argv.index("--timeout") + 1] = "15"
         argv.append("--require-dispatch-fence")
+    operation = request.get('taskOperation') or {}
+    if request.get('operation') == 'task-operation' and (operation.get('follows') is not None or operation.get('standing')):
+        argv.append('--require-quality-metadata')
     cause = ""
     try:
         done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=25 if withdrawing else 120)
@@ -706,7 +710,9 @@ def _cmd_receive(args):
                 holder = read_json(lock, {}) if lock else None
                 if holder and holder.get("requestId") == key and holder.get("session") == old["sessionId"]:
                     os.remove(lock)
-                print(json.dumps({"ok": True, "released": True}))
+                    old.setdefault('leaseReleasedAtMs', now_ms())
+                    write_json(receipt_path, old)
+                print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs')}))
                 return
             try:
                 summary = session_summary(old["sessionId"])
@@ -736,7 +742,9 @@ def _cmd_receive(args):
             write_json(receipt_path, old)
             if lock and os.path.exists(lock):
                 os.remove(lock)
-            print(json.dumps({"ok": True, "released": True}))
+                old['leaseReleasedAtMs'] = now_ms()
+            write_json(receipt_path, old)
+            print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs')}))
             return
         if old is not None:
             if old.get("request") != request:
@@ -1592,6 +1600,9 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
                     notice(session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "",
                            ref=item.get("ref"), delivery_id=stable)
                 item["accepted"] = True
+                quality_events.emit(sys.modules[__name__], root, 'input-accepted', session_id + ':' + stable,
+                                    sessionId=session_id, messageId=stable, purpose=item.get('purpose'),
+                                    ref=item.get('ref'), machine=machine, timeBasis='observed-acceptance')
                 after_inputs = (session_summary(session_id, machine).get("inputSummary") or {})
                 if stable in set(after_inputs.get("pendingMessageIds") or []):
                     kept.append(item)
@@ -3944,6 +3955,8 @@ def briefing(root, mine, reason):
     now = now_ms()
     stuck_after = setting(root, "TEAM_STUCK_AFTER", STUCK_AFTER_S)
     lines = ["# 反思简报（脚本生成，没有调用模型）", "", "原因: %s" % reason, "时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"), ""]
+    from . import quality
+    lines += quality.briefing(root, now)
     notes = pending_notes(root)
     lines.append("## 未处理的留言（%d）" % len(notes))
     for note in notes:
@@ -4376,6 +4389,10 @@ def reconcile(root, name, mine):
                             "observedActivityAtMs": summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or 0}
                 record.update(observed)
                 record["observedAtMs"] = now_ms()
+                quality_events.emit(sys.modules[__name__], root, 'session-observed', session_id + ':' + str(record['observedAtMs'] // 60000),
+                                    taskId=record['taskId'], operationId=record.get('operationId'), sessionId=session_id,
+                                    status=status, paused=bool(inputs.get('paused')), waitingForUser=bool(requests),
+                                    pendingMessageIds=inputs.get('pendingMessageIds') or [])
                 record.pop("lastReconcileError", None)
                 record.pop("lastReconcileErrorAtMs", None)
                 update_pending(root, path, record)
@@ -4616,7 +4633,7 @@ def release_remote(root, path, record):
     if dispatch and not record.get("remoteReleased"):
         target = dispatch["target"]
         try:
-            remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
+            released = remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
                                    "role": record["kind"], "operation": "release", "sessionId": record["sessionId"],
                                    "canceled": record.get("stopReason") == "timeout" or bool(record.get("taskCanceled")),
                                    "expectedReply": (record.get("done") or {}).get("reply") if record.get("taskConclusion") or (record.get("done") or {}).get("outcome") == "ok" else None})
@@ -4625,6 +4642,11 @@ def release_remote(root, path, record):
             update_pending(root, path, record)
             return False
         record["remoteReleased"] = True
+        quality_events.emit(sys.modules[__name__], root, 'lease-released', record.get('operationId') or record['sessionId'],
+                            at_ms=released.get('leaseReleasedAtMs'),
+                            taskId=record.get('taskId'), operationId=record.get('operationId'),
+                            sessionId=record['sessionId'], machine=record.get('machine'),
+                            timeBasis='executor-unlink' if released.get('leaseReleasedAtMs') is not None else 'ack-upper-bound')
         update_pending(root, path, record)
     return True
 
@@ -4965,12 +4987,13 @@ def report(root, name, mine, text):
 
 
 def main(argv):
-    from . import feedback
+    from . import feedback, quality
     runtime = get_runtime(find_root())
     parser = argparse.ArgumentParser(prog="tools/run.py")
     sub = parser.add_subparsers(dest="command", required=True)
     team_tasks.parser(sub)
     feedback.register(sub)
+    quality.register(sub)
     send = sub.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
@@ -5107,6 +5130,7 @@ def main(argv):
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
     receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
+    receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):
@@ -5120,14 +5144,14 @@ def main(argv):
         args.words.extend(remaining)
     else:
         args = parser.parse_args(argv)
-    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "feedback": lambda a: feedback.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
+    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "quality": lambda a: quality.command(sys.modules[__name__], a), "feedback": lambda a: feedback.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
                 "employee": cmd_employee, "member": cmd_employee, "worktree": cmd_worktree, "publish": cmd_publish, "board": cmd_board, "models": cmd_models,
                 "directory": cmd_directory, "mount": cmd_mount, "unmount": cmd_unmount, "path": cmd_path, "datas": cmd_datas, "temp": cmd_temp, "reset": cmd_reset, "sync-identity": cmd_sync_identity, "hook": cmd_hook,
                 "note": cmd_note, "notes": cmd_notes, "tell-user": cmd_tell_user, "reflect": cmd_reflect, "snapshot": cmd_snapshot, "drift": cmd_drift}
     handlers.update(business)
     try:
         try:
-            if args.command not in ("receive", "feedback"):
+            if args.command not in ("receive", "feedback", "quality"):
                 check_and_flush_self_inbox_inline(find_root(), args.command)
         except ExpertError:
             raise

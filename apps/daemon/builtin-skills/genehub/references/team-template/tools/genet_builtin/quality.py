@@ -1,0 +1,512 @@
+"""Read-only collection and deterministic quality cards; no scheduling decisions."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import time
+import tempfile
+import sys
+
+from .quality_score import canonical, number, score
+
+HOUR = 3600000
+
+
+def read(path, default=None, maximum=64*1024*1024):
+    path = Path(path)
+    if not path.exists():
+        return default
+    if path.is_symlink() or path.stat().st_size > maximum:
+        raise ValueError('quality input must be a bounded regular file')
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def records(base):
+    paths = sorted(Path(base).glob('*.json'))
+    if len(paths) > 10000 or sum(p.stat().st_size for p in paths) > 64*1024*1024:
+        raise ValueError('quality ledger exceeds bounded capture')
+    return [read(p) for p in paths]
+
+
+def events(root, cutoff):
+    path = Path(root)/'.genethub/team/events/events.jsonl'
+    if not path.is_file():
+        return []
+    if path.is_symlink() or path.stat().st_size > 64*1024*1024:
+        raise ValueError('event history exceeds bounded read')
+    found = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        value = json.loads(line)
+        if value.get('schema') != 'team-process-event/1':
+            raise ValueError('unknown process event schema')
+        if value.get('recordedAtMs', cutoff+1) <= cutoff:
+            found.setdefault(value['eventId'], value)
+    return sorted(found.values(), key=lambda x: (x['atMs'], x['eventId']))
+
+
+def template_digest():
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob('*.py')):
+        digest.update(path.name.encode()+b'\0'+path.read_bytes()+b'\0')
+    return digest.hexdigest()
+
+
+def native_snapshot(team, sid, machine, since, kernel, cache, budget):
+    """Only existing public inspect/rounds/narrative commands; no transcript cache."""
+    def call(*args):
+        if time.monotonic() >= budget:
+            raise TimeoutError('quality capture budget exhausted')
+        return team.genet(*args, *team.machine_args(machine), timeout=min(15, max(1, budget-time.monotonic())))
+    summary = call('session', 'get', sid)['summary']
+    old = read(cache)
+    stable = summary.get('status') in ('idle','failed') and not (summary.get('inputSummary') or {}).get('pendingMessageIds') and not (summary.get('interactionSummary') or {}).get('requests')
+    if stable and old and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('kernel') == kernel and old.get('updatedAtMs') == summary.get('updatedAtMs') and old.get('sinceAtMs', since+1) <= since:
+        return old
+    inspection = call('session', 'inspect', sid)['inspection']
+    rounds, cursor, round_digest = [], None, None
+    for _ in range(100):
+        args = ['session', 'rounds', sid, '--limit', '100']
+        if cursor: args += ['--cursor', cursor]
+        page = call(*args)['page']
+        digest = page['source']['digest']
+        if round_digest is not None and digest != round_digest:
+            raise ValueError('native rounds changed during bounded capture')
+        round_digest = digest
+        batch = page['rounds'];rounds.extend(batch)
+        cursor = page.get('nextCursor')
+        if not cursor or any(x.get('endedAtMs', since+1) < since and x.get('outcome') != 'running' for x in batch):
+            break
+    else:
+        raise ValueError('native rounds pagination exceeded capture budget')
+    rounds.sort(key=lambda x: (x['startedAtMs'], x['roundId']))
+    completed = [x for x in rounds if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
+    anchor = completed[-1]['roundId'] if completed else None
+    turns, links, cursor, digest = [], [], None, None
+    if anchor:
+        for _ in range(100):
+            args = ['session', 'narrative', sid, '--through-round', anchor, '--limit', '100']
+            if cursor:
+                args += ['--cursor', cursor]
+            page = call(*args)['page']
+            source = page['source']
+            if digest is not None and source['digest'] != digest:
+                raise ValueError('native history changed during bounded capture')
+            digest = source['digest']
+            batch = [x['stats'] for x in page['items'] if x.get('type') == 'turnSummary']
+            turns.extend(batch)
+            for item in page['items']:
+                if item.get('type') != 'userMessage': continue
+                header=item.get('text','').split('\n\n',1)[0]
+                if header.startswith('用途: result\n'):
+                    ref=next((line[5:] for line in header.splitlines() if line.startswith('ref: ')),None)
+                    if ref:links.append({'messageId':item['id'],'ref':ref,'sessionId':sid,'purpose':'result','receivedAtMs':item.get('receivedAtMs')})
+            cursor = page.get('nextCursor')
+            if not cursor or any(x.get('finishedAtMs', since+1) < since for x in batch):
+                break
+        else:
+            raise ValueError('native narrative pagination exceeded capture budget')
+    value = {'sessionId': sid, 'workspaceId':summary.get('workspaceId'), 'kernel': kernel, 'sinceAtMs': since,
+             'updatedAtMs': summary.get('updatedAtMs'), 'createdAtMs': summary.get('createdAtMs'),
+             'status': summary.get('status'), 'inputSummary': summary.get('inputSummary', {}),
+             'waitingForUser': bool((summary.get('interactionSummary') or {}).get('requests')),
+             'retainedInputs': inspection.get('retainedInputs'), 'rounds': rounds,
+             'turns': list({x['turnId']: x for x in turns}.values()), 'inputLinks':links,'historyDigest': digest}
+    team.write_json(str(cache), value)
+    return value
+
+
+def union_intervals(intervals):
+    out = []
+    for a,b in sorted((a,b) for a,b in intervals if b > a):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a,b])
+    return [{'startAtMs': a, 'endAtMs': b} for a,b in out]
+
+
+def idle_periods(samples, rounds, children, begin, stop):
+    """Sampled idle episodes split by actual execution or a live dependency."""
+    busy = [(max(begin, x['startedAtMs']), min(stop, x['endedAtMs'] if number(x.get('endedAtMs')) else stop))
+            for x in rounds if number(x.get('startedAtMs')) and x['startedAtMs'] < stop]
+    busy += [(max(begin, x['dispatchAtMs']), min(stop, x['conclusionAtMs'] if number(x.get('conclusionAtMs')) else stop))
+             for x in children if x['dispatchAtMs'] < stop]
+    busy = [(a,b) for a,b in busy if b > a]
+    points = [(x['atMs'], 1, x) for x in samples if begin <= x['atMs'] < stop]
+    points += [(a, 0, None) for a,b in busy]
+    periods, current, previous = [], None, None
+    for at, kind, sample in sorted(points, key=lambda x:(x[0],x[1])):
+        if sample is not None and previous is not None and at-previous > 125000:
+            if current is not None:periods.append(current)
+            current = None  # A gap is not a proven continuation or resolution.
+        idle = sample is not None and sample.get('status')=='idle' and not sample.get('paused') and not sample.get('waitingForUser')
+        idle = idle and not any(a <= at < b for a,b in busy)
+        if idle:
+            if current is None:current={'startAtMs':at,'observedThroughAtMs':at,'resolvedAtMs':None}
+            current['observedThroughAtMs']=at
+        else:
+            if current is not None:periods.append(current);current=None
+            for period in periods:
+                if period['resolvedAtMs'] is None:period['resolvedAtMs']=at
+        if sample is not None:previous=at
+    if current is not None:periods.append(current)
+    return periods
+
+
+def capture(team, root, end, cutoff):
+    state = Path(root)/'.genethub/team'
+    store = state/'quality'
+    start = end-HOUR
+    metric_start = end-24*HOUR
+    before = template_digest()
+    log = events(root, cutoff)
+    tasks = {v['taskId']: v for v in records(state/'tasks')}
+    intents = records(state/'task-dispatch')
+    pending = {v['sessionId']: v for area in ['pending', 'done'] for v in records(state/area)}
+    issues, work, wanted = [], [], {}
+    budget = time.monotonic()+100
+    root_workspaces = set()
+    try:
+        catalog=team.genet('workspace','list',timeout=15)['workspaces']
+        root_workspaces={w['id'] for w in catalog if isinstance(w.get('root'),str) and Path(w['root']).resolve()==Path(root).resolve()}
+        if not root_workspaces:raise ValueError('Team root workspace unavailable')
+    except Exception as error:
+        issues.append({'kind':'goal-workspace-unavailable','error':type(error).__name__})
+    controls = [v for v in log if v['kind']=='control']
+    observed = [v for v in log if v['kind']=='session-observed']
+    by_operation = {}
+    for event in log:
+        by_operation.setdefault(event.get('operationId'), []).append(event)
+    goals, metric_goals, stalls, observed_complete = [], [], [], True
+    for task in tasks.values():
+        owner = task.get('owner') or {}
+        sid = owner.get('sessionId')
+        created = task.get('createdAtMs')
+        finished = (task.get('finished') or {}).get('atMs')
+        if sid and number(created) and created < end:
+            metric_goals.append((task['taskId'],max(metric_start, created), min(end, finished if number(finished) else end)))
+        if not sid or not number(created) or created >= end or number(finished) and finished < start:
+            continue
+        a,b = max(start, created), min(end, finished if number(finished) else end)
+        points = sorted([x for x in observed if x.get('sessionId')==sid and x['atMs'] <= b+60000], key=lambda x:x['atMs'])
+        relevant_points = [x for x in points if x['atMs'] >= a-60000]
+        complete = bool(relevant_points) and relevant_points[0]['atMs'] <= a+60000 and relevant_points[-1]['atMs'] >= b-60000
+        complete = complete and all(y['atMs']-x['atMs'] <= 125000 for x,y in zip(relevant_points,relevant_points[1:]))
+        observed_complete = observed_complete and complete
+        # Integrate observed task control and native wait/pause segments, then
+        # union goals so concurrent goals cannot multiply the denominator.
+        changes = [(created, 'active')]+[(x['atMs'], x['state']) for x in controls if x.get('taskId')==task['taskId']]
+        boundaries = sorted({a,b,*[min(b,max(a,t)) for t,_ in changes],*[min(b,max(a,x['atMs'])) for x in relevant_points]})
+        for left,right in zip(boundaries,boundaries[1:]):
+            status = next((s for t,s in reversed(changes) if t <= left), 'active')
+            native = next((x for x in reversed(points) if x['atMs'] <= left), {})
+            if status=='active' and not native.get('paused') and not native.get('waitingForUser'):
+                goals.append((task['taskId'],left,right))
+        wanted[task['front']] = None
+    for intent in intents:
+        request = intent.get('request') or {}
+        task = tasks.get(request.get('taskId'))
+        if not task:
+            issues.append({'kind':'missing-task', 'operationId':intent.get('operationId')});continue
+        sid = intent.get('sessionId')
+        owner = (task.get('owner') or {}).get('sessionId') == sid and bool(sid)
+        person = next((x for x in task.get('collaborators', []) if x.get('sessionId')==sid), {})
+        conclusion = task.get('finished') if owner else person.get('finished')
+        concluded = (conclusion or {}).get('atMs')
+        rec = pending.get(sid, {})
+        if number(concluded) and concluded < metric_start and (intent.get('resourceReleased') or rec.get('remoteReleased') or not intent.get('resourceBinding')):
+            continue
+        dispatched = intent.get('createdAtMs')
+        if not number(dispatched) or dispatched >= end:
+            continue
+        rows = by_operation.get(intent['operationId'], [])
+        confirmed = next((x['atMs'] for x in rows if x['kind']=='dispatch-confirmed'), None)
+        item = {'id':intent['operationId'], 'taskId':task['taskId'], 'sessionId':sid,
+                'requester':request.get('requester'), 'role':request.get('role'), 'owner':owner,
+                'machine':request.get('machine'), 'dispatchAtMs':dispatched, 'confirmedAtMs':confirmed,
+                'hasReceipt':bool(sid), 'standing':bool(request.get('standing')), 'follows':request.get('follows'),
+                'conclusionAtMs':concluded if number(concluded) and concluded <= cutoff else None,
+                'outcome':(conclusion or {}).get('outcome'),
+                'resourceRequired':bool(intent.get('resourceBinding') or rec.get('remoteDispatch')),
+                'withdrawnAtMs':intent.get('withdrawnAtMs') if intent.get('state')=='withdrawn' else None}
+        release = next((x for x in rows if x['kind']=='resource-released'), None)
+        lease = next((x for x in rows if x['kind']=='lease-released' and x.get('timeBasis')=='executor-unlink'), None)
+        if release: item['releasedAtMs']=release['atMs'];item['releaseTimeBasis']='verified-release'
+        if lease: item['leaseReleasedAtMs']=lease['atMs']
+        if sid: wanted[sid]=request.get('machine')
+        if request.get('requester') and request['requester'] not in wanted: wanted[request['requester']]=None
+        work.append(item)
+    native, platforms, processes = {}, {}, {}
+    for machine in set(wanted.values()):
+        try:
+            ctx=team.genet('context',*team.machine_args(machine),timeout=15)['daemon']
+            platforms[machine]={'version':ctx['version'],'machineId':ctx['machineId']}
+            processes[machine]=team.genet('process','list',*team.machine_args(machine),timeout=15)['processes']
+        except Exception as error:
+            issues.append({'kind':'machine-facts-unavailable','machine':machine,'error':type(error).__name__})
+    for sid,machine in wanted.items():
+        try:
+            if not team.SESSION_ID.fullmatch(sid): raise ValueError('invalid native session identity')
+            native[sid]=native_snapshot(team,sid,machine,metric_start,platforms.get(machine),store/'native'/ (sid+'.json'),budget)
+        except Exception as error:
+            issues.append({'kind':'native-read-unavailable','sessionId':sid,'error':type(error).__name__})
+    # Tasks begun inside roles are work, but cannot by themselves manufacture
+    # a loaded user-goal hour. Use public root/initiator ownership, not wording
+    # or a mandatory new goal form. Unknown native ownership stays unknown.
+    goal_tasks={task['taskId'] for task in tasks.values()
+                if native.get(task.get('front'),{}).get('workspaceId') in root_workspaces}
+    goal_ownership_known=bool(root_workspaces) and all(native.get(task.get('front'),{}).get('workspaceId')
+        for task in tasks.values() if number(task.get('createdAtMs')) and task['createdAtMs'] < end
+        and (not number((task.get('finished') or {}).get('atMs')) or task['finished']['atMs'] >= metric_start))
+    deliveries = [x for x in log if x['kind']=='input-accepted' and x.get('purpose')=='result']
+    deliveries += [link for snapshot in native.values() for link in snapshot.get('inputLinks',[])]
+    deliveries = list({(x['sessionId'],x['messageId']):x for x in deliveries}.values())
+    reworked = {i['follows'] for i in work if i.get('follows')}
+    resources_complete, idle_complete = True, True
+    for item in work:
+        own=native.get(item['sessionId'], {})
+        stop=min(end,item['conclusionAtMs']) if number(item.get('conclusionAtMs')) else end
+        samples=sorted([x for x in observed if x.get('sessionId')==item['sessionId'] and x['atMs'] < stop],key=lambda x:x['atMs'])
+        children=[x for x in work if x['requester']==item['sessionId']]
+        item['idlePeriods']=idle_periods(samples,own.get('rounds',[]),children,max(metric_start,item['dispatchAtMs']),stop)
+        if number(item.get('conclusionAtMs')) and item['conclusionAtMs'] <= end:
+            for period in item['idlePeriods']:
+                if period['resolvedAtMs'] is None:period['resolvedAtMs']=item['conclusionAtMs']
+        if not item['standing'] and item['hasReceipt'] and stop > start and stop-item['dispatchAtMs'] > HOUR:
+            left=max(item['dispatchAtMs'],start-HOUR)
+            recent=[x for x in samples if x['atMs'] >= left-60000]
+            covered=bool(recent) and recent[0]['atMs'] <= left+60000 and recent[-1]['atMs'] >= stop-60000
+            covered=covered and all(b['atMs']-a['atMs'] <= 125000 for a,b in zip(recent,recent[1:]))
+            idle_complete=idle_complete and covered
+        receipts=own.get('retainedInputs')
+        incoming=next((x for x in receipts or [] if x['messageId']==item['id']), {})
+        begun=incoming.get('deliveredAtMs')
+        if not number(begun):
+            begun=next((x['startedAtMs'] for x in own.get('rounds',[]) if x.get('userItemId')==item['id']), None)
+        item['startedAtMs']=begun if number(begun) and begun <= cutoff else None
+        if item['confirmedAtMs'] is None and number(begun) and begun < start:
+            item['confirmedAtMs']=begun  # acknowledged no later than actual activation, before this window
+        matching=[x for x in deliveries if item.get('sessionId') and any(ref.strip().startswith('ghref:item:'+item['sessionId']+':') for ref in (x.get('ref') or '').split(','))]
+        def accepted_at(delivery):
+            return next((x['receivedAtMs'] for x in native.get(delivery['sessionId'],{}).get('retainedInputs') or [] if x['messageId']==delivery['messageId']), delivery.get('receivedAtMs'))
+        proven=[x for x in matching if number(accepted_at(x)) and accepted_at(x)<=cutoff]
+        proven.sort(key=lambda x:(accepted_at(x),x['messageId']))
+        item['deliveryMessageIds']=list({x['messageId'] for x in proven})
+        item['deliveryEvents']=[{'messageId':x['messageId'],'recipient':x['sessionId'],'acceptedAtMs':accepted_at(x)} for x in proven]
+        correct=[x for x in proven if x['sessionId']==item.get('requester')]
+        if proven:item['recipient']=proven[0]['sessionId']
+        if correct:
+            delivered=correct[0];item['recipient']=delivered['sessionId']
+            target=native.get(delivered['sessionId'], {})
+            receipt=next((x for x in target.get('retainedInputs') or [] if x['messageId']==delivered['messageId']), {})
+            item['deliveredAtMs']=receipt.get('receivedAtMs') or delivered.get('receivedAtMs')
+            item['consumedAtMs']=receipt.get('deliveredAtMs')
+            if item['consumedAtMs'] is None:
+                item['consumedAtMs']=next((x['startedAtMs'] for x in target.get('rounds',[]) if x.get('userItemId')==delivered['messageId']),None)
+            for field in ('deliveredAtMs','consumedAtMs'):
+                if number(item.get(field)) and item[field] > cutoff:item[field]=None
+        # Retention is bounded. A missing old receipt/header cannot establish
+        # non-delivery, nor clear that red line as though it were observed.
+        item['deliveryCoverageKnown'] = bool(proven) and len(proven)==len(matching)
+        consumed=item.get('consumedAtMs')
+        item['disposition']='rework' if item['id'] in reworked else ('adopted-inferred' if number(consumed) and consumed+600000 <= cutoff else None)
+        turns=[x for x in own.get('turns',[]) if x.get('finishedAtMs',cutoff+1) <= cutoff]
+        if own and number(item.get('conclusionAtMs')) and own.get('status')=='idle':
+            item['executionMs']=sum(x['durationMs'] for x in turns if number(x.get('durationMs')))
+        held=[x for x in processes.get(item['machine'], []) if x.get('sessionId')==item['sessionId']]
+        if held: item['resourceRequired']=True;item['resourceHeld']=True
+        elif item['machine'] in processes and own.get('status') in ('idle','failed') and number(item.get('conclusionAtMs')):
+            check=store/'resource-checks'/(item['id']+'.json')
+            first=read(check) or {'firstAbsentAtMs':team.now_ms()}
+            team.write_json(str(check),first)
+            lease=item.get('leaseReleasedAtMs')
+            if item.get('releaseTimeBasis') != 'verified-release' and (not item['resourceRequired'] or number(lease)):
+                item['releasedAtMs']=max(lease or 0,first['firstAbsentAtMs'])
+                item['releaseTimeBasis']='observed-absence-upper-bound'
+                if item['releasedAtMs'] > item['conclusionAtMs']+600000 and item['releasedAtMs'] >= start:
+                    resources_complete=False
+        if item['resourceRequired'] and not held and not number(item.get('releasedAtMs')):
+            resources_complete=False
+    # Idle gaps belong to an unfinished Owner with no live children. Minute
+    # observations are required for coverage; an absent sample is not health.
+    for task in tasks.values():
+        sid=(task.get('owner') or {}).get('sessionId')
+        finished=(task.get('finished') or {}).get('atMs')
+        points=sorted([x for x in observed if x.get('sessionId')==sid and x['atMs'] < end and (not number(finished) or x['atMs'] < finished)],key=lambda x:x['atMs'])
+        busy=[(x['startedAtMs'],x['endedAtMs'] if x.get('outcome')!='running' else end)
+              for x in native.get(sid,{}).get('rounds',[])]
+        run=None
+        previous=None
+        for point in points:
+            # Short real rounds between two idle samples break the idle run;
+            # minute sampling must not bridge actual work into a false stall.
+            interrupted = previous is not None and any(a < point['atMs'] and b > previous for a,b in busy)
+            if previous is not None and (point['atMs']-previous > 125000 or interrupted):
+                if run is not None:stalls.append({'taskId':task['taskId'],'startAtMs':run,'endAtMs':previous})
+                run=None
+            previous=point['atMs']
+            children=any(i['requester']==sid and i['dispatchAtMs'] <= point['atMs'] and (not number(i['conclusionAtMs']) or i['conclusionAtMs'] > point['atMs']) for i in work)
+            stalled=point.get('status')=='idle' and not point.get('paused') and not point.get('waitingForUser') and not children
+            if stalled and run is None:run=point['atMs']
+            if not stalled and run is not None:
+                stalls.append({'taskId':task['taskId'],'startAtMs':run,'endAtMs':point['atMs']});run=None
+        if run is not None:stalls.append({'taskId':task['taskId'],'startAtMs':run,'endAtMs':min(end,finished or end,previous or end)})
+    all_inputs,all_turns=[],[]
+    fronts={x.get('front') for x in tasks.values()}
+    for sid,session in native.items():
+        for receipt in session.get('retainedInputs') or []:
+            if receipt['receivedAtMs'] <= cutoff:
+                row=dict(receipt,sessionId=sid)
+                if row.get('deliveredAtMs') is None:
+                    row['deliveredAtMs']=next((x['startedAtMs'] for x in session.get('rounds',[]) if x.get('userItemId')==row['messageId']),None)
+                if row.get('source')=='user':
+                    # Unsolicited Human input cannot be guessed from wording.
+                    # A native source fact plus a task mutation in its round
+                    # establishes a product request; other cases stay unknown.
+                    read_at=row.get('deliveredAtMs')
+                    turn=next((x for x in session.get('turns',[]) if x['turnId']==row.get('turnId')), {})
+                    mutation=any(x.get('front')==sid and number(x.get('createdAtMs')) and number(turn.get('startedAtMs')) and number(turn.get('finishedAtMs')) and turn['startedAtMs'] <= x['createdAtMs'] <= turn['finishedAtMs'] for x in tasks.values())
+                    row['unsolicited']=False if mutation else None
+                all_inputs.append(row)
+        for turn in session.get('turns',[]):
+            all_turns.append(dict(turn,sessionId=sid,coordination=sid in fronts or any(i['sessionId']==sid and i['role'] in ('reflect','team-reflect') for i in work)))
+    failures=list((state/'events/failures').glob('*'))
+    logger_clean=not any(p.name.split('-')[0].isdigit() and start <= int(p.name.split('-')[0]) <= cutoff for p in failures)
+    complete=not issues and logger_clean and before==template_digest()
+    baseline=read(store/'baseline.json',{})
+    adopted=[i for i in work if i.get('disposition')=='adopted-inferred' and number(i.get('executionMs'))]
+    if not baseline and len(adopted)>=20:
+        first=sorted(adopted,key=lambda i:(i['conclusionAtMs'],i['id']))[:20]
+        baseline={'schema':'team-quality-baseline/1','workItemIds':[i['id'] for i in first],
+                  'executionMsPerAdopted':sum(i['executionMs'] for i in first)/20,'frozenAtMs':cutoff}
+        team.write_json(str(store/'baseline.json'),baseline)
+    return {'schema':'team-quality-facts/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
+            'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},
+            'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
+            'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
+            'workItems':work,'goalIntervals':union_intervals([(a,b) for task_id,a,b in goals if task_id in goal_tasks]),'stalls':stalls,
+            'inputs':all_inputs,'turns':all_turns,'wakes':[],'failures':[],'baseline':baseline,
+            'coverage':{'dispatches':complete and all(i['hasReceipt'] is False or number(i.get('confirmedAtMs')) for i in work),
+                        'starts':complete and all(not i['hasReceipt'] or number(i.get('startedAtMs')) for i in work),
+                        'deliveries':complete and all(s.get('retainedInputs') is not None for s in native.values()) and all(i['deliveryCoverageKnown'] for i in work if number(i.get('conclusionAtMs')) and i['conclusionAtMs'] < end),
+                        'observations':complete and observed_complete,'idleObligations':complete and idle_complete,
+                        'goals':complete and observed_complete and goal_ownership_known,
+                        'resources':complete and resources_complete,'turns':complete,'inputs':complete and all(s.get('retainedInputs') is not None and all(x.get('source') in ('user','agent','system','workflow') for x in s['retainedInputs']) for s in native.values())},
+            'versions':{'platformAtCapture':[dict(selector=k,**v) for k,v in sorted(platforms.items(),key=lambda x:x[0] or '')],
+                        'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
+            'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
+
+
+def register(sub):
+    p=sub.add_parser('quality',help='deterministic work-quality facts, cards and history; never controls work')
+    a=p.add_subparsers(dest='quality_action',required=True)
+    a.add_parser('tick')
+    c=a.add_parser('card');c.add_argument('--snapshot');c.add_argument('--save',action='store_true')
+    a.add_parser('history');a.add_parser('describe');a.add_parser('facts')
+
+
+def _command(team,args):
+    root=team.find_root();store=Path(root)/'.genethub/team/quality'
+    action=args.quality_action
+    if action=='describe':
+        from .quality_score import WEIGHTS,INDICATORS
+        print(canonical({'model':'tq/1','weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
+                         'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour and unresolved old instances; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
+    if action=='history':
+        latest={}
+        revisions={}
+        for path in sorted((store/'cards').glob('*.json')):
+            value=read(path);hour=value['window']['endAtMs'];revisions[hour]=revisions.get(hour,0)+1
+            if hour not in latest or value['capturedAtMs'] > latest[hour]['capturedAtMs']:latest[hour]=value
+        print(canonical({'cards':[latest[k] for k in sorted(latest)],'revisionCounts':revisions,'lastError':read(store/'last-error.json')}),end='');return
+    if action=='facts':
+        now=team.now_ms();value=capture(team,root,now,now);value['captureKind']='diagnostic'
+        print(canonical(value),end='');return
+    if action=='tick':
+        gate=team.inbox_lock(root,'quality-capture',purpose='质量事实采集')
+        try:gate.__enter__()
+        except team.ExpertError:
+            print(canonical({'status':'busy','cardProduced':False}),end='');return
+        try:
+            cutoff=team.now_ms();offset=[0,1,0,2][cutoff//300000 % 4];end=(cutoff//HOUR-offset)*HOUR
+            facts=capture(team,root,end,cutoff);facts['captureKind']='native-hour'
+            encoded=canonical(facts);key=str(end)+'-'+hashlib.sha256(encoded.encode()).hexdigest()
+            target=store/'snapshots'/(key+'.json');target.parent.mkdir(parents=True,exist_ok=True)
+            if not target.exists():team.write_json(str(target),facts)
+            card=score(facts)
+            card_path=store/'cards'/(key+'.json');card_path.parent.mkdir(parents=True,exist_ok=True)
+            if not card_path.exists():_write_card(team,root,card_path,card)
+            prior=read(store/'latest.json')
+            previous=read(Path(root)/prior['card']) if prior else None
+            if previous is None or previous['window']['endAtMs'] <= end:
+                team.write_json(str(store/'latest.json'),{'card':str(card_path.relative_to(Path(root))), 'snapshot':str(target.relative_to(Path(root)))})
+            print(canonical({'card':str(card_path),'formal':card['formal'],'score':card['score'],'coverage':card['coverage']}),end='');return
+        finally:gate.__exit__(*sys.exc_info())
+    path=Path(args.snapshot) if args.snapshot else None
+    if path is None:
+        latest=read(store/'latest.json')
+        if not latest:raise ValueError('no captured quality card yet; wait for the built-in capture timer')
+        path=Path(root)/latest['snapshot']
+    result=score(read(path))
+    resolved=path.resolve();base=(store/'snapshots').resolve()
+    key=str(result['window']['endAtMs'])+'-'+result['factsSha256']
+    native=base in resolved.parents and resolved.name==key+'.json'
+    if not native:result['officialCapture']=False
+    if args.save:
+        if base not in resolved.parents:
+            raise ValueError('external snapshot evaluation is read-only; save a native captured snapshot')
+        if not native:raise ValueError('native snapshot identity does not match its facts')
+        target=store/'cards'/(key+'.json')
+        if not target.exists():_write_card(team,root,target,result)
+    print(canonical(result),end='')
+
+
+def _write_card(team, root, path, value):
+    encoded=canonical(value).encode()
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with team.inbox_lock(root,'quality-card-'+path.stem,purpose='质量卡保存'):
+        if path.exists():
+            if path.read_bytes()!=encoded:raise ValueError('immutable quality card conflict')
+            return
+        temporary=None
+        try:
+            with tempfile.NamedTemporaryFile(mode='wb',dir=path.parent,prefix='.quality-',delete=False) as stream:
+                temporary=Path(stream.name);stream.write(encoded);stream.flush();os.fsync(stream.fileno())
+            os.replace(temporary,path)
+        finally:
+            if temporary is not None and temporary.exists():temporary.unlink()
+
+
+def command(team,args):
+    try:
+        return _command(team,args)
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        if args.quality_action=='tick':
+            try:
+                root=team.find_root()
+                team.write_json(str(Path(root)/'.genethub/team/quality/last-error.json'),
+                                {'atMs':team.now_ms(),'error':type(error).__name__,'status':'unknown'})
+            except Exception:pass
+        raise team.ExpertError('质量事实或评分未完成: '+type(error).__name__,
+                               '诊断保持未知，没有改变派单或业务结果',
+                               '核对质量快照、过程事件与采集状态；修复后按原窗口重算') from error
+
+
+def briefing(root,now):
+    try:
+        store=Path(root)/'.genethub/team/quality'
+        latest=read(store/'latest.json')
+        if not latest:return ['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
+        value=read(Path(root)/latest['card'])
+        stale=value['window']['endAtMs'] < now//HOUR*HOUR
+        lines=['','## 团队工作质量（tq/1）',
+               '卡：'+latest['card'], '事实：'+latest['snapshot'],
+               '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
+               '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
+        if stale:lines.append('当前整点小时尚无卡；上卡不能替代本小时。')
+        lines.append('失分与缺口（按卡内顺序）：')
+        lines += ['- '+canonical(x).strip() for x in value['losses'][:16]]
+        lines.append('按实际原因自主选择改进；没有新增流程、岗位或改进格式要求。')
+        return lines
+    except (OSError,ValueError,KeyError,TypeError):
+        return ['','## 团队工作质量','未知：质量卡读取失败；不能按零失分或达标处理。']
