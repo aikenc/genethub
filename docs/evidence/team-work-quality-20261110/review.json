@@ -1,0 +1,73 @@
+{
+ "schema": "genehub.proposal-review.v1",
+ "reviewedAtUtc": "2026-11-10T03:28:36+00:00",
+ "subject": "docs/team-work-quality-evaluation-proposal-20261110.md",
+ "outcome": "proposal-saved-pending-human-review",
+ "checks": [
+  {
+   "check": "every figure in section 3.5 equals the saved prototype output",
+   "passed": true
+  },
+  {
+   "check": "in-document links resolve to existing files",
+   "passed": true
+  },
+  {
+   "check": "quoted platform statements re-read at source (teams.md, rationale.md, engineering-guidance.md, product-authority.md, task-owner proposal, validation plan, dev-3 reliability proposal)",
+   "passed": true
+  },
+  {
+   "check": "XWorld experiment 3 scores, team_score.py behaviour, event counts and ledger incidents re-read at source",
+   "passed": true
+  },
+  {
+   "check": "official template has no process event log; XWorld events are a local patch; tikistar has no events directory",
+   "passed": true
+  },
+  {
+   "check": "no product code, template, team script or team task modified; no agent messaged; no release",
+   "passed": true
+  },
+  {
+   "check": "text literals present in document",
+   "passed": true,
+   "details": [
+    {
+     "claim": "xworld dispatches",
+     "text": "178",
+     "found": true
+    },
+    {
+     "claim": "5a dispatches",
+     "text": "203",
+     "found": true
+    },
+    {
+     "claim": "xworld dangling",
+     "text": "15（8.4%），最老 19.4 小时",
+     "found": true
+    },
+    {
+     "claim": "5a dangling",
+     "text": "3（1.5%），最老 20.5 小时",
+     "found": true
+    }
+   ]
+  }
+ ],
+ "limits": [
+  "proposed records and interfaces in section 5 are not implemented or prototyped",
+  "tikistar figures come from one compact read-only ledger export and were not reconciled with its board",
+  "defect categorisation of XWorld ledgers is a manual grouping with roughly +/-3 entries of error",
+  "delivery -> next dispatch is a proxy and is not used as an adoption figure",
+  "usage coverage (97.1% tokens, 58.4% cost) is a 600-session on-disk sample of XWorld only"
+ ],
+ "remoteReads": [
+  {
+   "machine": "local-mac (Beta)",
+   "action": "one read-only compact export of .genethub/team ledger fields",
+   "writes": 0,
+   "failedAttempts": 2
+  }
+ ]
+}

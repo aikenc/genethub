@@ -1,0 +1,150 @@
+{
+ "schema": "team-work-facts-prototype/1",
+ "window": {
+  "since": "2026-11-03T02:23:50Z",
+  "until": "2026-11-10T02:23:50Z"
+ },
+ "generatedAt": "2026-11-10T03:22:19+00:00",
+ "limits": [
+  "ledger and team-local events only; no native session history, so execution time, tokens and cost are absent",
+  "delivery -> requester's next dispatch is a proxy and does not prove adoption",
+  "redo and attribution figures are text heuristics because no work identity or reason code is recorded",
+  "concurrency covers dispatch -> conclusion intervals, not verified execution; open records are listed as unsettled obligations"
+ ],
+ "teams": [
+  {
+   "root": "tikistar-team (mirror of compact ledger export from local-mac)",
+   "dispatches": 101,
+   "dispatchesWithoutTimestampAllTime": 1,
+   "dispatchConfirmation": {
+    "withSession": 97,
+    "withoutSession": 4,
+    "withoutSessionPct": 4.0,
+    "oldestUnconfirmedAgeMin": 7094.0
+   },
+   "conclusions": {
+    "success": 79,
+    "blocked": 9,
+    "failed": 1,
+    "noExplicitConclusion": 12
+   },
+   "noConclusionBreakdown": {
+    "no-ledger-record": 5,
+    "in-flight": 7
+   },
+   "cycleMin": {
+    "n": 89,
+    "p50": 16.0,
+    "p90": 217.9,
+    "max": 3529.8
+   },
+   "byRole": {
+    "gpp": {
+     "n": 47,
+     "cycleMin": {
+      "n": 47,
+      "p50": 19.1,
+      "p90": 217.9,
+      "max": 3174.3
+     },
+     "blockedOrFailedPct": 6.4
+    },
+    "tool": {
+     "n": 23,
+     "cycleMin": {
+      "n": 23,
+      "p50": 10.6,
+      "p90": 137.3,
+      "max": 3529.8
+     },
+     "blockedOrFailedPct": 17.4
+    },
+    "owner-tooling": {
+     "n": 10,
+     "cycleMin": {
+      "n": 10,
+      "p50": 30.0,
+      "p90": 1213.6,
+      "max": 1213.6
+     },
+     "blockedOrFailedPct": 10.0
+    },
+    "owner-core": {
+     "n": 5,
+     "cycleMin": {
+      "n": 5,
+      "p50": 43.1,
+      "p90": 114.0,
+      "max": 114.0
+     },
+     "blockedOrFailedPct": 0.0
+    },
+    "owner-gameplay": {
+     "n": 4,
+     "cycleMin": {
+      "n": 4,
+      "p50": 19.8,
+      "p90": 119.0,
+      "max": 119.0
+     },
+     "blockedOrFailedPct": 50.0
+    }
+   },
+   "conclusionToDeliveryMin": {
+    "n": 0
+   },
+   "deliveryTimestampRecorded": false,
+   "concludedNotDelivered": null,
+   "deliveredToOtherThanRequester": 0,
+   "deliveryToRequesterNextDispatchMin": {
+    "n": 0
+   },
+   "deliveriesWithNoRequesterDispatchWithin30Min": {
+    "n": 0,
+    "pct": null
+   },
+   "explicitRedoMarkerInDesc": {
+    "n": 1,
+    "pct": 1.0,
+    "samples": [
+     "独立复核唯一采集同步改动的公开玩法与延迟证据"
+    ]
+   },
+   "identicalDispatchWithin10Min": {
+    "n": 0,
+    "samples": []
+   },
+   "nonSuccessKeywordBuckets": {
+    "unclassified": 8,
+    "resource-or-gpu": 2
+   },
+   "concludedWorkInFlight": {
+    "timeWeightedAvg": 1.32,
+    "peak": 6,
+    "zeroPct": 28.0,
+    "note": "dispatch -> explicit conclusion intervals only; still-open work excluded"
+   },
+   "unsettledObligations": {
+    "openOnLedger": 7,
+    "idleWithoutConclusion": 7,
+    "idleOlderThan6h": 6,
+    "oldestIdleAgeHours": 82.9
+   },
+   "eventKinds": {},
+   "eventsAvailable": false,
+   "inputs": {
+    "fromFront": 0,
+    "fromOthers": 0
+   },
+   "tellUser": {
+    "n": 0,
+    "questions": 0
+   },
+   "capacityWakes": {
+    "n": 0,
+    "followedByDispatchWithin10Min": 0,
+    "pct": null
+   }
+  }
+ ]
+}

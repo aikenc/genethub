@@ -1,0 +1,41 @@
+{
+ "schema": "genehub.proposal-review.v1",
+ "reviewedAtUtc": "2026-11-10T03:59:39+00:00",
+ "subjects": [
+  "docs/team-work-quality-evaluation-proposal-20261110.md (v2)",
+  "docs/team-quality-iteration-skill-proposal-20261110.md"
+ ],
+ "outcome": "proposals-saved-pending-human-review",
+ "checks": [
+  {
+   "check": "scores in evaluation proposal 3.5 and 2.2 equal prototype_score.py output",
+   "passed": true
+  },
+  {
+   "check": "all local links in both proposals resolve",
+   "passed": true
+  },
+  {
+   "check": "JSON examples parse (event log example is JSON Lines)",
+   "passed": true
+  },
+  {
+   "check": "v1 statements contradicting the composite score were revised (summary, goals, 5.4, 5.5, 5.6, 6, 7, 9)",
+   "passed": true
+  },
+  {
+   "check": "interfaces cited in the Skill proposal exist: team.py note/drift/reflect, upgrade.md three-way merge, self-devops channel_cli.py, release-beta mounts 10 skills",
+   "passed": true
+  },
+  {
+   "check": "no Skill created, no pipespace change, no product/template/team change, no message to any agent, no release",
+   "passed": true
+  }
+ ],
+ "limits": [
+  "anchors and weights are a draft without A/A calibration",
+  "attribution table is rule-based and not sample-reviewed",
+  "R3 late-delivery counts were recomputed from the live ledger after the window; concluded records are historical but the ledger kept moving",
+  "Skill commands, files and round record are proposed only"
+ ]
+}

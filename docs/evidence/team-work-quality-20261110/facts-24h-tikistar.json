@@ -1,0 +1,117 @@
+{
+ "schema": "team-work-facts-prototype/1",
+ "window": {
+  "since": "2026-11-09T02:23:50Z",
+  "until": "2026-11-10T02:23:50Z"
+ },
+ "generatedAt": "2026-11-10T03:22:19+00:00",
+ "limits": [
+  "ledger and team-local events only; no native session history, so execution time, tokens and cost are absent",
+  "delivery -> requester's next dispatch is a proxy and does not prove adoption",
+  "redo and attribution figures are text heuristics because no work identity or reason code is recorded",
+  "concurrency covers dispatch -> conclusion intervals, not verified execution; open records are listed as unsettled obligations"
+ ],
+ "teams": [
+  {
+   "root": "tikistar-team (mirror of compact ledger export from local-mac)",
+   "dispatches": 15,
+   "dispatchesWithoutTimestampAllTime": 1,
+   "dispatchConfirmation": {
+    "withSession": 15,
+    "withoutSession": 0,
+    "withoutSessionPct": 0.0,
+    "oldestUnconfirmedAgeMin": null
+   },
+   "conclusions": {
+    "success": 10,
+    "blocked": 2,
+    "failed": 1,
+    "noExplicitConclusion": 2
+   },
+   "noConclusionBreakdown": {
+    "in-flight": 2
+   },
+   "cycleMin": {
+    "n": 13,
+    "p50": 3.6,
+    "p90": 30.6,
+    "max": 32.7
+   },
+   "byRole": {
+    "tool": {
+     "n": 7,
+     "cycleMin": {
+      "n": 7,
+      "p50": 2.4,
+      "p90": 30.6,
+      "max": 30.6
+     },
+     "blockedOrFailedPct": 42.9
+    },
+    "gpp": {
+     "n": 6,
+     "cycleMin": {
+      "n": 6,
+      "p50": 12.1,
+      "p90": 32.7,
+      "max": 32.7
+     },
+     "blockedOrFailedPct": 0.0
+    }
+   },
+   "conclusionToDeliveryMin": {
+    "n": 0
+   },
+   "deliveryTimestampRecorded": false,
+   "concludedNotDelivered": null,
+   "deliveredToOtherThanRequester": 0,
+   "deliveryToRequesterNextDispatchMin": {
+    "n": 0
+   },
+   "deliveriesWithNoRequesterDispatchWithin30Min": {
+    "n": 0,
+    "pct": null
+   },
+   "explicitRedoMarkerInDesc": {
+    "n": 0,
+    "pct": 0.0,
+    "samples": []
+   },
+   "identicalDispatchWithin10Min": {
+    "n": 0,
+    "samples": []
+   },
+   "nonSuccessKeywordBuckets": {
+    "resource-or-gpu": 1,
+    "unclassified": 2
+   },
+   "concludedWorkInFlight": {
+    "timeWeightedAvg": 0.96,
+    "peak": 2,
+    "zeroPct": 43.1,
+    "note": "dispatch -> explicit conclusion intervals only; still-open work excluded"
+   },
+   "unsettledObligations": {
+    "openOnLedger": 7,
+    "idleWithoutConclusion": 7,
+    "idleOlderThan6h": 6,
+    "oldestIdleAgeHours": 82.9
+   },
+   "eventKinds": {},
+   "eventsAvailable": false,
+   "inputs": {
+    "fromFront": 0,
+    "fromOthers": 0
+   },
+   "tellUser": {
+    "n": 0,
+    "questions": 0
+   },
+   "capacityWakes": {
+    "n": 0,
+    "followedByDispatchWithin10Min": 0,
+    "pct": null
+   }
+  }
+ ]
+}

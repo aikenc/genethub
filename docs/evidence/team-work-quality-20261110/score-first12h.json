@@ -1,0 +1,262 @@
+{
+ "schema": "team-quality-score-prototype/1",
+ "results": [
+  {
+   "team": "/root/.local/share/GeneHub-beta/spaces/xworld",
+   "model": "tq/1-draft",
+   "redLines": {
+    "R1": {
+     "n": 10,
+     "of": 34,
+     "triggered": true
+    },
+    "R2": {
+     "n": 15,
+     "note": "standing marker not available; long-lived services are included",
+     "triggered": true
+    },
+    "R3": {
+     "n": 2,
+     "lateOver10Min": 2,
+     "notDelivered": 0,
+     "misdelivered": 0,
+     "triggered": true
+    },
+    "R4": {
+     "n": null,
+     "reason": "no stall events in template",
+     "triggered": null
+    },
+    "R5": {
+     "n": null,
+     "reason": "release records not read",
+     "triggered": null
+    }
+   },
+   "triggered": [
+    "R1",
+    "R2",
+    "R3"
+   ],
+   "unknownRedLines": [
+    "R4",
+    "R5"
+   ],
+   "penalty": 150,
+   "indicators": {
+    "firstPassAdoptionPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "reworkPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "dispatchToStartP90Min": {
+     "metric": "M2",
+     "value": null,
+     "score": null
+    },
+    "conclusionToDeliveryP90Min": {
+     "metric": "M2",
+     "value": 2.0,
+     "score": 86.7
+    },
+    "deliveryToConsumeP90Min": {
+     "metric": "M2",
+     "value": 49.5,
+     "score": 47.0
+    },
+    "unsolicitedHumanInputsPerTaskDay": {
+     "metric": "M3",
+     "value": null,
+     "score": null
+    },
+    "costPerAdoptedVsBaseline": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "coordinationSharePct": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "idleWakePct": {
+     "metric": "M5",
+     "value": 63.0,
+     "score": 0.0
+    },
+    "failedTurnPct": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    },
+    "recoveryP90Min": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    }
+   },
+   "metrics": {
+    "M1": null,
+    "M2": 66.8,
+    "M3": null,
+    "M4": null,
+    "M5": 0.0,
+    "M6": null
+   },
+   "coverage": {
+    "weightKnownPct": 30,
+    "redLinesKnown": 3
+   },
+   "baseProvisional": 44.5,
+   "scoreProvisional": 0.0,
+   "possibleRange": [
+    0.0,
+    0.0
+   ],
+   "grade": "不及格",
+   "graded": false,
+   "proxies": [
+    "deliveryToConsumeP90Min = delivery -> requester's next dispatch, not read-in",
+    "idleWakePct = capacity wakes with no dispatch within 10 min, not 'no ledger delta'"
+   ],
+   "window": {
+    "since": "2026-11-09T02:23:50Z",
+    "until": "2026-11-09T14:23:50Z"
+   },
+   "facts": "facts-first12h.json"
+  },
+  {
+   "team": "/root/.local/share/GeneHub-beta/spaces/xworld-exp5a",
+   "model": "tq/1-draft",
+   "redLines": {
+    "R1": {
+     "n": 3,
+     "of": 79,
+     "triggered": true
+    },
+    "R2": {
+     "n": 4,
+     "note": "standing marker not available; long-lived services are included",
+     "triggered": true
+    },
+    "R3": {
+     "n": 0,
+     "lateOver10Min": 0,
+     "notDelivered": 0,
+     "misdelivered": 0,
+     "triggered": false
+    },
+    "R4": {
+     "n": null,
+     "reason": "no stall events in template",
+     "triggered": null
+    },
+    "R5": {
+     "n": null,
+     "reason": "release records not read",
+     "triggered": null
+    }
+   },
+   "triggered": [
+    "R1",
+    "R2"
+   ],
+   "unknownRedLines": [
+    "R4",
+    "R5"
+   ],
+   "penalty": 100,
+   "indicators": {
+    "firstPassAdoptionPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "reworkPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "dispatchToStartP90Min": {
+     "metric": "M2",
+     "value": null,
+     "score": null
+    },
+    "conclusionToDeliveryP90Min": {
+     "metric": "M2",
+     "value": 0.8,
+     "score": 97.0
+    },
+    "deliveryToConsumeP90Min": {
+     "metric": "M2",
+     "value": 9.6,
+     "score": 80.8
+    },
+    "unsolicitedHumanInputsPerTaskDay": {
+     "metric": "M3",
+     "value": null,
+     "score": null
+    },
+    "costPerAdoptedVsBaseline": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "coordinationSharePct": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "idleWakePct": {
+     "metric": "M5",
+     "value": 34.3,
+     "score": 37.7
+    },
+    "failedTurnPct": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    },
+    "recoveryP90Min": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    }
+   },
+   "metrics": {
+    "M1": null,
+    "M2": 88.9,
+    "M3": null,
+    "M4": null,
+    "M5": 37.7,
+    "M6": null
+   },
+   "coverage": {
+    "weightKnownPct": 30,
+    "redLinesKnown": 3
+   },
+   "baseProvisional": 71.8,
+   "scoreProvisional": 0.0,
+   "possibleRange": [
+    0.0,
+    0.0
+   ],
+   "grade": "不及格",
+   "graded": false,
+   "proxies": [
+    "deliveryToConsumeP90Min = delivery -> requester's next dispatch, not read-in",
+    "idleWakePct = capacity wakes with no dispatch within 10 min, not 'no ledger delta'"
+   ],
+   "window": {
+    "since": "2026-11-09T02:23:50Z",
+    "until": "2026-11-09T14:23:50Z"
+   },
+   "facts": "facts-first12h.json"
+  }
+ ]
+}

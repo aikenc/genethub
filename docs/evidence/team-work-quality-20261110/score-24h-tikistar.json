@@ -1,0 +1,128 @@
+{
+ "schema": "team-quality-score-prototype/1",
+ "results": [
+  {
+   "team": "tikistar-team (mirror of compact ledger export from local-mac)",
+   "model": "tq/1-draft",
+   "redLines": {
+    "R1": {
+     "n": 0,
+     "of": 15,
+     "triggered": false
+    },
+    "R2": {
+     "n": 7,
+     "note": "standing marker not available; long-lived services are included",
+     "triggered": true
+    },
+    "R3": {
+     "n": null,
+     "reason": "no delivery timestamps",
+     "triggered": null
+    },
+    "R4": {
+     "n": null,
+     "reason": "no stall events in template",
+     "triggered": null
+    },
+    "R5": {
+     "n": null,
+     "reason": "release records not read",
+     "triggered": null
+    }
+   },
+   "triggered": [
+    "R2"
+   ],
+   "unknownRedLines": [
+    "R3",
+    "R4",
+    "R5"
+   ],
+   "penalty": 50,
+   "indicators": {
+    "firstPassAdoptionPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "reworkPct": {
+     "metric": "M1",
+     "value": null,
+     "score": null
+    },
+    "dispatchToStartP90Min": {
+     "metric": "M2",
+     "value": null,
+     "score": null
+    },
+    "conclusionToDeliveryP90Min": {
+     "metric": "M2",
+     "value": null,
+     "score": null
+    },
+    "deliveryToConsumeP90Min": {
+     "metric": "M2",
+     "value": null,
+     "score": null
+    },
+    "unsolicitedHumanInputsPerTaskDay": {
+     "metric": "M3",
+     "value": null,
+     "score": null
+    },
+    "costPerAdoptedVsBaseline": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "coordinationSharePct": {
+     "metric": "M4",
+     "value": null,
+     "score": null
+    },
+    "idleWakePct": {
+     "metric": "M5",
+     "value": null,
+     "score": null
+    },
+    "failedTurnPct": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    },
+    "recoveryP90Min": {
+     "metric": "M6",
+     "value": null,
+     "score": null
+    }
+   },
+   "metrics": {
+    "M1": null,
+    "M2": null,
+    "M3": null,
+    "M4": null,
+    "M5": null,
+    "M6": null
+   },
+   "coverage": {
+    "weightKnownPct": 0,
+    "redLinesKnown": 2
+   },
+   "baseProvisional": null,
+   "scoreProvisional": null,
+   "possibleRange": [
+    0.0,
+    50
+   ],
+   "grade": null,
+   "graded": false,
+   "proxies": [],
+   "window": {
+    "since": "2026-11-09T02:23:50Z",
+    "until": "2026-11-10T02:23:50Z"
+   },
+   "facts": "facts-24h-tikistar.json"
+  }
+ ]
+}

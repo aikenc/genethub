@@ -1,0 +1,311 @@
+{
+ "schema": "team-work-facts-prototype/1",
+ "window": {
+  "since": "2026-11-09T02:23:50Z",
+  "until": "2026-11-10T02:23:50Z"
+ },
+ "generatedAt": "2026-11-10T03:22:19+00:00",
+ "limits": [
+  "ledger and team-local events only; no native session history, so execution time, tokens and cost are absent",
+  "delivery -> requester's next dispatch is a proxy and does not prove adoption",
+  "redo and attribution figures are text heuristics because no work identity or reason code is recorded",
+  "concurrency covers dispatch -> conclusion intervals, not verified execution; open records are listed as unsettled obligations"
+ ],
+ "teams": [
+  {
+   "root": "/root/.local/share/GeneHub-beta/spaces/xworld",
+   "dispatches": 178,
+   "dispatchesWithoutTimestampAllTime": 0,
+   "dispatchConfirmation": {
+    "withSession": 163,
+    "withoutSession": 15,
+    "withoutSessionPct": 8.4,
+    "oldestUnconfirmedAgeMin": 1164.4
+   },
+   "conclusions": {
+    "success": 143,
+    "blocked": 13,
+    "noExplicitConclusion": 22
+   },
+   "noConclusionBreakdown": {
+    "no-ledger-record": 15,
+    "in-flight": 2,
+    "ended-without-finish:ok": 5
+   },
+   "cycleMin": {
+    "n": 156,
+    "p50": 16.6,
+    "p90": 34.1,
+    "max": 95.6
+   },
+   "byRole": {
+    "qa": {
+     "n": 103,
+     "cycleMin": {
+      "n": 103,
+      "p50": 14.7,
+      "p90": 23.3,
+      "max": 82.5
+     },
+     "blockedOrFailedPct": 9.7
+    },
+    "map-props": {
+     "n": 29,
+     "cycleMin": {
+      "n": 29,
+      "p50": 29.3,
+      "p90": 47.3,
+      "max": 95.6
+     },
+     "blockedOrFailedPct": 0.0
+    },
+    "map-terrain": {
+     "n": 21,
+     "cycleMin": {
+      "n": 21,
+      "p50": 19.2,
+      "p90": 43.7,
+      "max": 58.6
+     },
+     "blockedOrFailedPct": 4.8
+    },
+    "map-integrator": {
+     "n": 3,
+     "cycleMin": {
+      "n": 3,
+      "p50": 7.1,
+      "p90": 38.1,
+      "max": 38.1
+     },
+     "blockedOrFailedPct": 66.7
+    }
+   },
+   "conclusionToDeliveryMin": {
+    "n": 156,
+    "p50": 0.5,
+    "p90": 1.4,
+    "max": 54.2
+   },
+   "deliveryTimestampRecorded": true,
+   "concludedNotDelivered": 0,
+   "deliveredToOtherThanRequester": 0,
+   "deliveryToRequesterNextDispatchMin": {
+    "n": 156,
+    "p50": 4.7,
+    "p90": 26.6,
+    "max": 150.3
+   },
+   "deliveriesWithNoRequesterDispatchWithin30Min": {
+    "n": 14,
+    "pct": 9.0
+   },
+   "explicitRedoMarkerInDesc": {
+    "n": 12,
+    "pct": 6.7,
+    "samples": [
+     "R25 C03-6 竖条归属复检（当前 build 24f86de，离线）",
+     "R28 重跑一键脚本：物化稀疏GLB + 显式CHROME + gate + 六",
+     "R28 重跑一键脚本（稀疏GLB/CHROME/gate/六族）",
+     "R28 重跑一键脚本（稀疏GLB/CHROME/gate/六族）",
+     "R29 重采集：dcd452b（修 mats 未定义），先 console 0 "
+    ]
+   },
+   "identicalDispatchWithin10Min": {
+    "n": 5,
+    "samples": [
+     "R26 A评 seam 5 项（亮点类，需全 9）",
+     "R26 A评 seam 5 项（亮点类，需全 9）",
+     "R28 重跑一键脚本（稀疏GLB/CHROME/gate/六族）",
+     "R28 A评 road",
+     "R28 A评 story_layout"
+    ]
+   },
+   "nonSuccessKeywordBuckets": {
+    "resource-or-gpu": 8,
+    "unclassified": 2,
+    "remote-or-credential": 3
+   },
+   "concludedWorkInFlight": {
+    "timeWeightedAvg": 2.12,
+    "peak": 13,
+    "zeroPct": 25.6,
+    "note": "dispatch -> explicit conclusion intervals only; still-open work excluded"
+   },
+   "unsettledObligations": {
+    "openOnLedger": 17,
+    "idleWithoutConclusion": 17,
+    "idleOlderThan6h": 16,
+    "oldestIdleAgeHours": 67.0
+   },
+   "eventKinds": {
+    "dispatched": 163,
+    "parallelism-wake": 104,
+    "finish": 156,
+    "result-ready": 158,
+    "result-queued": 158,
+    "input": 52
+   },
+   "eventsAvailable": true,
+   "inputs": {
+    "fromFront": 0,
+    "fromOthers": 52
+   },
+   "tellUser": {
+    "n": 0,
+    "questions": 0
+   },
+   "capacityWakes": {
+    "n": 104,
+    "followedByDispatchWithin10Min": 58,
+    "pct": 55.8
+   }
+  },
+  {
+   "root": "/root/.local/share/GeneHub-beta/spaces/xworld-exp5a",
+   "dispatches": 203,
+   "dispatchesWithoutTimestampAllTime": 0,
+   "dispatchConfirmation": {
+    "withSession": 200,
+    "withoutSession": 3,
+    "withoutSessionPct": 1.5,
+    "oldestUnconfirmedAgeMin": 1229.6
+   },
+   "conclusions": {
+    "success": 174,
+    "blocked": 18,
+    "failed": 1,
+    "noExplicitConclusion": 10
+   },
+   "noConclusionBreakdown": {
+    "no-ledger-record": 3,
+    "ended-without-finish:None": 2,
+    "in-flight": 4,
+    "ended-without-finish:ok": 1
+   },
+   "cycleMin": {
+    "n": 193,
+    "p50": 9.2,
+    "p90": 27.7,
+    "max": 69.4
+   },
+   "byRole": {
+    "map-integrator": {
+     "n": 64,
+     "cycleMin": {
+      "n": 64,
+      "p50": 6.4,
+      "p90": 18.7,
+      "max": 52.0
+     },
+     "blockedOrFailedPct": 7.8
+    },
+    "map-props": {
+     "n": 57,
+     "cycleMin": {
+      "n": 57,
+      "p50": 11.2,
+      "p90": 35.8,
+      "max": 38.6
+     },
+     "blockedOrFailedPct": 10.5
+    },
+    "map-terrain": {
+     "n": 50,
+     "cycleMin": {
+      "n": 50,
+      "p50": 9.4,
+      "p90": 33.4,
+      "max": 69.4
+     },
+     "blockedOrFailedPct": 12.0
+    },
+    "qa": {
+     "n": 22,
+     "cycleMin": {
+      "n": 22,
+      "p50": 9.4,
+      "p90": 27.2,
+      "max": 37.9
+     },
+     "blockedOrFailedPct": 9.1
+    }
+   },
+   "conclusionToDeliveryMin": {
+    "n": 193,
+    "p50": 0.4,
+    "p90": 1.0,
+    "max": 33.6
+   },
+   "deliveryTimestampRecorded": true,
+   "concludedNotDelivered": 0,
+   "deliveredToOtherThanRequester": 0,
+   "deliveryToRequesterNextDispatchMin": {
+    "n": 193,
+    "p50": 1.5,
+    "p90": 8.7,
+    "max": 37.2
+   },
+   "deliveriesWithNoRequesterDispatchWithin30Min": {
+    "n": 2,
+    "pct": 1.0
+   },
+   "explicitRedoMarkerInDesc": {
+    "n": 11,
+    "pct": 5.4,
+    "samples": [
+     "17 处需复核逐条定性（rock 饱和/带宽）",
+     "R28 评审简报 v2（对齐 8204208）",
+     "R28 门禁体检 + C02V 钳位复核",
+     "R28 结算 v2（去空占位+PERF kind 修正）",
+     "R29 结算 v2（commit/product-basis 口径）"
+    ]
+   },
+   "identicalDispatchWithin10Min": {
+    "n": 1,
+    "samples": [
+     "R34 RD07 再补 1 处点位"
+    ]
+   },
+   "nonSuccessKeywordBuckets": {
+    "unclassified": 5,
+    "remote-or-credential": 2,
+    "resource-or-gpu": 10,
+    "dependency-or-input": 2
+   },
+   "concludedWorkInFlight": {
+    "timeWeightedAvg": 1.66,
+    "peak": 8,
+    "zeroPct": 8.6,
+    "note": "dispatch -> explicit conclusion intervals only; still-open work excluded"
+   },
+   "unsettledObligations": {
+    "openOnLedger": 8,
+    "idleWithoutConclusion": 8,
+    "idleOlderThan6h": 4,
+    "oldestIdleAgeHours": 66.3
+   },
+   "eventKinds": {
+    "parallelism-wake": 131,
+    "dispatched": 199,
+    "finish": 194,
+    "result-ready": 199,
+    "result-queued": 196,
+    "input": 66
+   },
+   "eventsAvailable": true,
+   "inputs": {
+    "fromFront": 0,
+    "fromOthers": 66
+   },
+   "tellUser": {
+    "n": 0,
+    "questions": 0
+   },
+   "capacityWakes": {
+    "n": 131,
+    "followedByDispatchWithin10Min": 97,
+    "pct": 74.0
+   }
+  }
+ ]
+}
