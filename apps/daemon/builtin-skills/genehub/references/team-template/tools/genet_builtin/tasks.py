@@ -67,6 +67,8 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         old = t.read_dispatch_record(path)
         if old and old.get('request') != request:
             raise t.ExpertError('派单编号已用于不同内容', '没有重派', '用原参数读取原回执')
+        if old and old.get('state') == 'withdrawn':
+            raise t.ExpertError('原派单已持久撤回', '没有重新创建会话', '查询原任务；新业务使用新任务编号')
         if old and old.get('sessionId'):
             sid = old['sessionId']
             if not receipt(t, root, sid):
@@ -185,7 +187,7 @@ def prepare_intent(t, root, record):
 
 def activate(t, root, record, path):
     task = read_task(t, root, record['request']['taskId'])
-    if task.get('state') != 'active':
+    if task.get('state') != 'active' or task.get('finished'):
         raise t.ExpertError('任务控制中或已收尾', '会话已准备但没有激活业务', '按原任务控制回执恢复，不能换编号')
     sid = record['sessionId']
     owner_op = 'taskop.' + identity(task['taskId'] + ':owner')
@@ -642,6 +644,56 @@ def release_local(t, root, record):
             intent['resourceReleased'] = True
             t.write_json(intent_path, intent)
     return True
+
+
+
+def reconcile_withdrawals(t, root):
+    """Fence only uncreated remote preparations after their parent concluded.
+
+    No receipt is not a negative acknowledgement. The executor must first
+    serialize a durable fence with its normal receive/install operations.
+    """
+    concluded = {x.get('taskId') for x in records(t, root, 'tasks')
+                 if x.get('finished') or x.get('state') in ('delivered', 'canceled')}
+    candidates = [x for x in records(t, root, 'task-dispatch')
+                  if x.get('state') == 'creating' and not x.get('sessionId')
+                  and x.get('request', {}).get('taskId') in concluded
+                  and x.get('request', {}).get('machine') and x.get('target')
+                  and not x.get('lock') and not x.get('resourceBinding')
+                  and x.get('withdrawRetryAtMs', 0) <= t.now_ms()]
+    candidates.sort(key=lambda x: x.get('withdrawCheckedAtMs', 0))
+    for snapshot in candidates[:2]:
+        operation = snapshot['operationId']
+        with t.inbox_lock(root, operation, purpose='已结束任务准备撤回'):
+            path = t.state_dir(root, 'task-dispatch', operation + '.json')
+            intent = t.read_dispatch_record(path)
+            if (not intent or intent.get('state') != 'creating' or intent.get('sessionId')
+                    or intent.get('lock') or intent.get('resourceBinding')):
+                continue
+            task = read_task(t, root, intent['request']['taskId'])
+            if not task.get('finished') and task.get('state') not in ('delivered', 'canceled'):
+                continue
+            request, target = intent['request'], intent['target']
+            # Reconstruct the exact original target-side prepare envelope.
+            if not intent.get('prompt') or not intent.get('returnTo'):
+                continue
+            original = dict(id=operation, workspaceId=target['workspaceId'], role=request['role'],
+                            desc=request['desc'], text=intent['prompt'], tier=request.get('tier'),
+                            model=request.get('model'), media=None, prepareOnly=True, returnTo=intent['returnTo'])
+            intent['withdrawCheckedAtMs'] = t.now_ms()
+            intent['withdrawRetryAtMs'] = t.now_ms() + 300_000
+            t.write_json(path, intent)
+            try:
+                result = t.remote_receive(target, dict(id=operation, workspaceId=target['workspaceId'],
+                    role=request['role'], operation='withdraw-prepare', originalRequest=original))
+                intent['withdrawReceipt'] = result
+                if result.get('withdrawn') is True and result.get('id') == operation:
+                    intent.update(state='withdrawn', withdrawnAtMs=t.now_ms())
+                else:
+                    intent['withdrawError'] = 'executor retained an existing receipt or resource'
+            except (t.ExpertError, OSError, subprocess.TimeoutExpired) as error:
+                intent['withdrawError'] = str(error)[:600]
+            t.write_json(path, intent)
 
 
 def reconcile_resources(t, root):

@@ -477,9 +477,15 @@ def remote_receive(target, request):
     argv = [cli, "shell", "--machine", target["machineId"], "--workspace", target["workspaceId"],
             "--timeout", "110", "--max-output", "65536", "--", *target["command"],
             "receive", "-"]
+    # The mandatory flag makes an older receiver reject at argparse, before it
+    # could interpret a new operation as an ordinary prepare request.
+    withdrawing = request.get("operation") == "withdraw-prepare"
+    if withdrawing:
+        argv[argv.index("--timeout") + 1] = "15"
+        argv.append("--require-dispatch-fence")
     cause = ""
     try:
-        done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=120)
+        done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=25 if withdrawing else 120)
         frames = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
         failure = next((f.get("error") for f in frames if isinstance(f.get("error"), dict)), None)
         if failure:
@@ -620,6 +626,42 @@ def _cmd_receive(args):
     with inbox_lock(role_root, "receive"):
         old = read_dispatch_record(receipt_path)
         operation = request.get("operation")
+        if operation == "withdraw-prepare":
+            if not args.require_dispatch_fence:
+                raise ExpertError("撤回需要显式兼容协议", "没有改回执或资源", "使用支持撤回屏障的源端与执行端")
+            original = request.get("originalRequest")
+            if (not isinstance(original, dict) or original.get("id") != key
+                    or original.get("workspaceId") != workspace_id or original.get("role") != role
+                    or original.get("prepareOnly") is not True or original.get("operation")):
+                raise ExpertError("撤回缺少原准备意图", "没有改变派单", "保留原编号和完整准备内容")
+            returning = original.get("returnTo") or {}
+            if owner.get("source") and any(owner.get(k) != returning.get(k) for k in ("machineId", "workspaceId")):
+                raise ExpertError("撤回来源与执行包不同", "没有改变派单", "使用原任务的来源")
+            if old is not None:
+                if old.get("request") != original:
+                    raise ExpertError("撤回内容与原意图不同", "原回执保留", "核对原编号和完整准备内容")
+                withdrawn = old.get("status") == "withdrawn"
+                print(json.dumps({"ok": True, "withdrawn": withdrawn, "id": key,
+                                  "reason": "fenced" if withdrawn else "existing receipt retained"}))
+                return
+            configured = open_env(role_root).get("WORKTREE_DIR")
+            if configured:
+                directory = resolve_expert_dir(root, configured)
+                # A pre-create reservation without a receipt is also uncertainty.
+                # Do not release it or a newer writer in this protocol.
+                holder = read_json(os.path.join(writer_lock(directory), "genet-writer.json"), {}) or {}
+                if holder.get("requestId") == key:
+                    print(json.dumps({"ok": True, "withdrawn": False, "id": key,
+                                      "reason": "unrecorded resource reservation retained"}))
+                    return
+            # Same receive/install locks as prepare: an older in-flight prepare
+            # completes first, or every later prepare observes this durable fence.
+            write_json(receipt_path, {"request": original, "status": "withdrawn", "atMs": now_ms(),
+                                      "fenceProtocol": 1})
+            print(json.dumps({"ok": True, "withdrawn": True, "id": key, "reason": "fenced"}))
+            return
+        if old is not None and old.get("status") == "withdrawn":
+            raise ExpertError("派单准备已持久撤回", "没有创建或激活会话", "查询原任务；新业务必须使用新任务编号", code="dispatchWithdrawn")
         if operation in ("release", "notice", "activate", "bind-directory"):
             if not old or old.get("sessionId") != request.get("sessionId"):
                 raise ExpertError("请求与派单回执不符", "锁保留，没有投递", "核对原派单 id 与 sessionId")
@@ -4854,6 +4896,7 @@ def cmd_hook(_args):
             routines_ok = False
             report(root, name, mine, error.text())
     try:
+        team_tasks.reconcile_withdrawals(sys.modules[__name__], root)
         reconcile(root, name, mine)
         team_tasks.reconcile_resources(sys.modules[__name__], root)
         team_tasks.publish(sys.modules[__name__], root)
@@ -5053,6 +5096,7 @@ def main(argv):
     sub.add_parser("hook")
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
     receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
+    receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):
