@@ -36,8 +36,9 @@ description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力�
 ## 边界
 
 - 团队可以改自己的 Skill、身份与脚本；平台内置 Skill 与 daemon 行为不归团队，重装会覆盖。
-- 用户不满意先 `run.py note --kind unhappy`，流程问题用 `run.py reflect now`；平台缺陷写进团队的
-  `docs/platform-issues.md`，不要绕过平台。
+- 用户不满意先 `run.py note --kind unhappy`，流程问题用 `run.py reflect now`。已采用新样板的团队用
+  `run.py feedback add/ls/verify` 留平台线索并在实际采用后自行复验；详见模板 team-reflect 的
+  `references/platform-feedback.md`。旧 `docs/platform-issues.md` 保留历史，不把平台发布当作团队已修复。
 - Workflow（PM / Executor）是退役中的旧机制，不要用它建团队或派单。
 
 ## Timer执行约定
