@@ -73,7 +73,7 @@ def score(facts):
             if reason:value['reason']=reason
             instances[key].append(value)
 
-    delivery_uncertain, idle_uncertain = False, False
+    delivery_uncertain, idle_uncertain, resource_uncertain = False, False, False
     for item in relevant:
         dispatched = item['dispatchAtMs']
         confirmed = item.get('confirmedAtMs')
@@ -121,6 +121,11 @@ def score(facts):
                 # Legacy IDs without occurrence times cannot place a duplicate
                 # in this hour or prove it remains an outstanding obligation.
                 delivery_uncertain = True
+        if item.get('resourceRequired') and concluded + 600000 < end and item.get('resourceHeld') is not True and not number(item.get('releasedAtMs')):
+            resource_uncertain = True
+        if item.get('resourceRequired') and item.get('releaseTimeBasis') == 'observed-absence-upper-bound' and number(item.get('releasedAtMs')):
+            if concluded + 600000 < min(end,item['releasedAtMs']) and item['releasedAtMs'] >= start:
+                resource_uncertain = True
         if item.get('resourceRequired') and (item.get('resourceHeld') is True or (number(item.get('releasedAtMs')) and item.get('releaseTimeBasis') == 'verified-release')):
             breach('R5', item, concluded + 600000, item.get('releasedAtMs'))
     for stall in facts.get('stalls', []):
@@ -161,6 +166,7 @@ def score(facts):
         known = r6_known if key == 'R6' else coverage.get(required[key]) is True
         if key=='R2' and idle_uncertain:known=False
         if key=='R3' and delivery_uncertain:known=False
+        if key=='R5' and resource_uncertain:known=False
         red[key] = {'triggered': True if instances[key] else (False if known else None),
                     'instances': instances[key], 'coverageKnown': known}
 

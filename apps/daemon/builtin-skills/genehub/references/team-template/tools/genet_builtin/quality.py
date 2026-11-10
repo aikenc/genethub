@@ -214,7 +214,11 @@ def capture(team, root, end, cutoff):
         conclusion = task.get('finished') if owner else person.get('finished')
         concluded = (conclusion or {}).get('atMs')
         rec = pending.get(sid, {})
-        if number(concluded) and concluded < metric_start and (intent.get('resourceReleased') or rec.get('remoteReleased') or not intent.get('resourceBinding')):
+        if rec.get('operationId') != intent['operationId']:rec = {}
+        resource_required=bool(intent.get('resourceBinding') or request.get('machine') or rec.get('remoteDispatch'))
+        legacy_released=resource_required and (not intent.get('resourceBinding') or intent.get('resourceReleased') is True) and (
+            not (request.get('machine') or rec.get('remoteDispatch')) or rec.get('remoteReleased') is True)
+        if number(concluded) and concluded < metric_start and (not resource_required or legacy_released):
             continue
         dispatched = intent.get('createdAtMs')
         if not number(dispatched) or dispatched >= end:
@@ -227,7 +231,7 @@ def capture(team, root, end, cutoff):
                 'hasReceipt':bool(sid), 'standing':bool(request.get('standing')), 'follows':request.get('follows'),
                 'conclusionAtMs':concluded if number(concluded) and concluded <= cutoff else None,
                 'outcome':(conclusion or {}).get('outcome'),
-                'resourceRequired':bool(intent.get('resourceBinding') or rec.get('remoteDispatch')),
+                'resourceRequired':resource_required, 'legacyReleaseStateKnown':legacy_released,
                 'withdrawnAtMs':intent.get('withdrawnAtMs') if intent.get('state')=='withdrawn' else None}
         release = next((x for x in rows if x['kind']=='resource-released'), None)
         lease = next((x for x in rows if x['kind']=='lease-released' and x.get('timeBasis')=='executor-unlink'), None)
@@ -320,12 +324,22 @@ def capture(team, root, end, cutoff):
             first=read(check) or {'firstAbsentAtMs':team.now_ms()}
             team.write_json(str(check),first)
             lease=item.get('leaseReleasedAtMs')
-            if item.get('releaseTimeBasis') != 'verified-release' and (not item['resourceRequired'] or number(lease)):
-                item['releasedAtMs']=max(lease or 0,first['firstAbsentAtMs'])
+            # A legacy durable released flag proves state, never its old time.
+            # Start a separate upper bound only when both that state and actual
+            # process absence have been observed; an earlier absence sample
+            # taken while the lease was unproven cannot backdate this bound.
+            legacy_bound=None
+            if item.get('legacyReleaseStateKnown'):
+                if not number(first.get('legacyReleaseObservedAtMs')):
+                    first['legacyReleaseObservedAtMs']=team.now_ms()
+                    team.write_json(str(check),first)
+                legacy_bound=first['legacyReleaseObservedAtMs']
+            if item.get('releaseTimeBasis') != 'verified-release' and (not item['resourceRequired'] or number(lease) or number(legacy_bound)):
+                item['releasedAtMs']=max(lease or 0,legacy_bound or first['firstAbsentAtMs'])
                 item['releaseTimeBasis']='observed-absence-upper-bound'
-                if item['releasedAtMs'] > item['conclusionAtMs']+600000 and item['releasedAtMs'] >= start:
+                if item['conclusionAtMs']+600000 < min(end,item['releasedAtMs']) and item['releasedAtMs'] >= start:
                     resources_complete=False
-        if item['resourceRequired'] and not held and not number(item.get('releasedAtMs')):
+        if item['resourceRequired'] and number(item.get('conclusionAtMs')) and item['conclusionAtMs']+600000 < end and not held and not number(item.get('releasedAtMs')):
             resources_complete=False
     # Idle gaps belong to an unfinished Owner with no live children. Minute
     # observations are required for coverage; an absent sample is not health.
