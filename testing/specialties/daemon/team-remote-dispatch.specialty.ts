@@ -396,8 +396,9 @@ sys.exit(r.returncode)
     const previousProjection=JSON.parse(readFileSync(projectionPath,"utf8"));
     const incoming={...previousProjection,revision:previousProjection.revision+10,updatedAtMs:Date.now()+86400000};
     delete incoming.receivedAtMs;
-    const receiveProjection=(snapshot:any)=>spawnSync(python,[path.join(targetRoot,"tools/team.py"),"receive",JSON.stringify({id:incoming.source,operation:"coordination",workspaceId:qa.id,role:"qa",snapshot})],{env:o.daemon.env,encoding:"utf8"});
-    t.assertions.assert(receiveProjection(incoming).status===0,"fresh source revision rejected");
+    const receiveProjection=(snapshot:any)=>spawnSync(python,[path.join(targetRoot,"tools/team.py"),"receive",JSON.stringify({id:incoming.source,operation:"coordination",workspaceId:qa.id,role:"qa",snapshot})],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    const freshProjection = receiveProjection(incoming);
+    t.assertions.assert(freshProjection.status===0,"fresh source revision rejected: " + freshProjection.stdout + freshProjection.stderr);
     const acceptedProjection=JSON.parse(readFileSync(projectionPath,"utf8"));
     t.assertions.assert(Math.abs(acceptedProjection.receivedAtMs-Date.now())<5000,"target adopted the future source clock as freshness");
     t.assertions.assert(receiveProjection({...incoming,revision:incoming.revision-1,updatedAtMs:incoming.updatedAtMs+86400000}).status===0&&JSON.parse(readFileSync(projectionPath,"utf8")).revision===incoming.revision,"older revision overwrote a newer projection");
