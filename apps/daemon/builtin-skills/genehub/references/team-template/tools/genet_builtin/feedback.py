@@ -42,7 +42,9 @@ def read(path):
             or not isinstance(value.get('title'), str)
             or value.get('state') not in ('open', 'fixed', 'recurred', 'not-fixed')
             or not isinstance(value.get('occurrences'), list)
-            or not isinstance(value.get('verifications', []), list)):
+            or not isinstance(value.get('verifications', []), list)
+            or not all(isinstance(row, dict) for row in value['occurrences'])
+            or not all(isinstance(row, dict) for row in value.get('verifications', []))):
         raise TeamConfigurationError('invalid feedback record; preserve it for inspection: ' + path.name)
     return value
 
