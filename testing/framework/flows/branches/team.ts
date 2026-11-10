@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SessionSnapshot, WorkspaceInfo } from "@genehub/proto";
 import type { CaseContext } from "../../context.ts";
@@ -24,6 +24,8 @@ export async function openTeam(t: CaseContext, name = "review-team", extraAgents
   // Drive timer actions explicitly; this is an ordinary user-owned hook setting.
   const hook = path.join(source, "skills/genet_builtin/team-front/hooks/timer.genet.json");
   writeFileSync(hook, JSON.stringify({ ...JSON.parse(readFileSync(hook, "utf8")), enabled: false }));
+  const qualityHook=path.join(source,"skills/genet_builtin/team-front/hooks/quality.genet.json");
+  if(existsSync(qualityHook)) writeFileSync(qualityHook,JSON.stringify({...JSON.parse(readFileSync(qualityHook,"utf8")),enabled:false}));
   options.configureSource?.(source);
   mkdirSync(path.join(root, ".genethub"), { recursive: true });
   const env: NodeJS.ProcessEnv = { ...opened.daemon.env, GENEHUB_CLI: opened.daemon.genet, TEAM_AGENT: "ctl-normal" };

@@ -394,11 +394,10 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
         false,
       );
 
-      const sessionsWhileRemoved = await client.call({
+      await expect(client.call({
         type: "session.list",
         payload: { workspaceId, includeArchived: true, lean: true },
-      });
-      expect(sessionsWhileRemoved).toEqual({ type: "sessions", data: [] });
+      })).rejects.toMatchObject({ detail: { code: "notFound" } });
 
       const reopened = await client.call({
         type: "workspace.open",

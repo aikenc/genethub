@@ -241,16 +241,16 @@ defineJourney(
       writeFileSync(queryProxy, `#!/usr/bin/env python3
 import json,os,pathlib,subprocess,sys
 r=subprocess.run([${JSON.stringify(genet)},*sys.argv[1:]],capture_output=True,text=True)
-if sys.argv[1:4] == ['session','inspect',${JSON.stringify(holderSid)}]:
+if sys.argv[1:4] == ['session','get',${JSON.stringify(holderSid)}]:
  if r.returncode: sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
- data=json.loads(r.stdout.strip().splitlines()[-1]);s=data['data']['inspection']['summary']
+ data=json.loads(r.stdout.strip().splitlines()[-1]);s=data['data']['summary']
  pathlib.Path(${JSON.stringify(queryMarker)}).write_text(json.dumps({'id':s['id'],'status':s['status'],'mode':os.environ['QUERY_FAULT']}))
  mode=os.environ['QUERY_FAULT']
  if mode == 'internal': print(json.dumps({'type':'error','error':{'code':'internal','message':'injected read failure'}}));sys.exit(4)
  if mode == 'empty': sys.exit(0)
  if mode == 'malformed': print('{broken');sys.exit(0)
  if mode == 'missing-data': print(json.dumps({'type':'session.inspect'}));sys.exit(0)
- if mode == 'missing-summary': data['data']={'inspection':{}}
+ if mode == 'missing-summary': data['data']={}
  if mode == 'wrong-id': s['id']='s_wrong_holder'
  print(json.dumps(data));sys.exit(0)
 sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
@@ -295,12 +295,16 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
       const reflectSpace = listed.find((entry) => entry.name === "team-reflect" && entry.agentSpace?.parentWorkspaceId === root!.id)!;
       t.assertions.assert((await sessionsOf(reflectSpace.id)).length === 0, "a note created a reflect session");
 
-      // 6. `directory` shows who is who.
+      // 6. `directory` shows current activity; completed sessions stay in history.
       const directory = expert(alice, "directory");
       t.assertions.assert(
-        directory.code === 0 && directory.out.includes("write the quarterly report") && directory.out.includes("alice/leader") && directory.out.includes("alice/root") && directory.out.includes("bob/leader"),
+        directory.code === 0 && directory.out.includes("long writer") && directory.out.includes("alice/leader") && directory.out.includes("alice/root") && directory.out.includes("== bob:"),
         `directory: ${directory.out}`,
       );
+      t.assertions.assert(!directory.out.includes("write the quarterly report"), "directory expanded settled history into current activity");
+      const bobWork = listed.find(space => space.name === "leader" && space.agentSpace?.parentWorkspaceId === bobRoot!.id);
+      t.assertions.assert(bobWork && (await sessionsOf(work!.id)).some(session => session.id === started[0]!.id)
+        && (await sessionsOf(bobWork.id)).some(session => session.id === bobSid), "current-only directory deleted completed native history");
 
       // 7. One business directory, one owner, plus dirty worktree warning (J3).
       writeFileSync(path.join(project, "untracked.txt"), "dirty");

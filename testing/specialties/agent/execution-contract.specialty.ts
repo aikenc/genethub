@@ -130,7 +130,7 @@ contractCase(
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: session.sessionId } });
         const kept = reply?.type === "snapshot" ? reply.data.items.filter((item) => item.type === "assistantMessage"
           && item.text.includes("checkpoint-prefix") && item.text.includes("checkpoint-tail")) : [];
-        t.assertions.assert(kept.length === 2, `recovery ${i + 1} lost or duplicated an execution after an append failure`);
+        t.assertions.assert(kept.length === 2, `recovery ${i + 1} lost or duplicated an execution after an append failure: ${JSON.stringify({status:reply?.type==='snapshot'?reply.data.summary.status:null,inputs:reply?.type==='snapshot'?reply.data.summary.inputSummary:null,answers:reply?.type==='snapshot'?reply.data.items.filter(x=>x.type==='assistantMessage').map(x=>({id:x.id,text:x.text})):[]})}`);
         opened.client.close(); opened.daemon.stop();
       }
     } finally {

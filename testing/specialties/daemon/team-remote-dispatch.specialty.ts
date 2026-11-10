@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, connectProductClient, registerControlledAgent, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
 
@@ -190,12 +190,24 @@ sys.exit(r.returncode)
     writeFileSync(correctionMarker, "inject once");
     const raced = await script(["hook"]);
     t.assertions.assert(raced.code === 0 && existsSync(pendingPath) && existsSync(lock), "reconciliation retired an obsolete reply after a concurrent correction");
+    const releaseStartedAt = Date.now();
     const hook = await script(["hook"]);
     t.assertions.assert(hook.code === 0, "one unreachable target aborted hook: " + hook.stderr);
     t.assertions.assert(existsSync(path.join(sourceRoot, ".genethub/team/done", files[0]!)) && !existsSync(lock), "successful independent task did not close and release target lock");
     const archived = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/done", files[0]!), "utf8"));
     t.assertions.assert(archived.done.reply === (await cliJson(["session", "get", record.sessionId], true)).summary.latestReply.itemId, "reconciliation delivered the earlier reply instead of the latest corrected result");
     t.assertions.assert(JSON.parse(readFileSync(path.join(pendingDir, "000-offline.json"), "utf8")).lastReconcileError, "offline task lost its retry evidence");
+    const targetDispatchDir = path.join(targetRoot,"spaces/qa/.genethub/team/dispatch");
+    const targetReceipt = (id:string) => JSON.parse(readFileSync(path.join(targetDispatchDir,createHash("sha256").update(id).digest("hex")+".json"),"utf8"));
+    const normalRelease = targetReceipt("one-task");
+    t.assertions.assert(Number.isFinite(normalRelease.leaseReleasedAtMs) && normalRelease.leaseReleasedAtMs >= releaseStartedAt && normalRelease.leaseReleasedAtMs <= Date.now(),"actual executor unlink lacks an exact bounded release clock");
+    const replayRelease = (id:string,sid:string) => {
+      const request={id,workspaceId:qa.id,role:"qa",operation:"release",sessionId:sid};
+      const r=spawnSync(python,["tools/team.py","receive",JSON.stringify(request)],{cwd:targetRoot,env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+      t.assertions.assert(r.status===0,"public release replay failed: "+r.stdout+r.stderr);
+      return JSON.parse(r.stdout.trim().split("\n").at(-1)!);
+    };
+    t.assertions.assert(replayRelease("one-task",record.sessionId).leaseReleasedAtMs===normalRelease.leaseReleasedAtMs,"release replay changed an observed unlink clock");
     // A receiver that crashed before recording a session ID must never retry creation.
     const intentDir = path.join(sourceRoot, ".genethub/team/dispatch");
     const intent = readdirSync(intentDir).map(f => JSON.parse(readFileSync(path.join(intentDir, f), "utf8"))).find(v => v.request.id === "one-task");
@@ -232,8 +244,17 @@ sys.exit(r.returncode)
       freshSessions.push(task.sessionId);
       await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).summary; return s.status === "idle" && !!s.latestReply; }, 30000)
         .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).summary)); });
+      // Real OS fault: a prior actor removed this completed task's marker.
+      // Absence proves at most an upper bound, not when this receiver unlinked it.
+      if(n===1) unlinkSync(lock);
       const finished = await script(["hook"]);
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
+      const released=targetReceipt(dispatchId!);
+      if(n===0) t.assertions.assert(Number.isFinite(released.leaseReleasedAtMs),"ordinary fresh release omitted its observed unlink clock");
+      else {
+        t.assertions.assert(released.leaseReleasedAtMs==null,"pre-existing lease absence invented an exact release time");
+        t.assertions.assert(replayRelease(dispatchId!,task.sessionId).leaseReleasedAtMs==null,"release replay manufactured a missing unlink clock");
+      }
     }
     t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 3, "same-worded new task reused an old session");
     const beforeSlowRequest = o.mock.requests.length;
@@ -323,7 +344,7 @@ sys.exit(r.returncode)
     const beginOwner = ["task", "start", "--space", "qa", "--request-id", "remote.owner.task", "--desc", "remote coordinating Owner", "Delegate one read-only source support and explicitly finish"];
     // Drop the successful prepare stdout once. No first business input may
     // precede the source's durable Owner and reverse dependency records.
-    const { unlinkSync } = await import("node:fs"); unlinkSync(dropped);
+    unlinkSync(dropped);
     t.note("TaskOwner remote: preparing with dropped stdout");
     const lostOwner = await callTask(callerSid, sourceRoot, beginOwner);
     t.assertions.assert(lostOwner.code !== 0, "lost prepare was falsely acknowledged as complete");

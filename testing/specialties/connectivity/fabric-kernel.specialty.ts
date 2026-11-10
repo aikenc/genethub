@@ -60,14 +60,18 @@ for(const nodes of [1,2])for(const outage of [false,true])defineSpecialty({
     };
     const exact=results?.length===3&&results.every((r,i)=>r!==null&&exactBody(r,i));
     const body=pool.clients[nodes===1?0:1]!;
-    const freshBody=(await body.call({type:"workspace.list"}))?.type==="workspaces";
+    let freshBodyError:string|undefined;
+    const freshBody=await body.call({type:"workspace.list"}).then(r=>r?.type==="workspaces",(error:unknown)=>{
+      freshBodyError=error instanceof Error?`${error.name}: ${error.message.slice(0,200)}`:"non-Error rejection";return false;
+    });
+    const afterDrainKernel=netem.stats();
     const starts=readFileSync(join(o.workspaceRoot,"kernel-starts"),"utf8").trim().split("\n").sort();
     let recoveryError:string|undefined;
     const recovered=await control.call({type:"workspace.list"}).then(r=>r?.type==="workspaces",(error:unknown)=>{
       recoveryError=error instanceof Error?`${error.name}: ${error.message.slice(0,200)}`:"non-Error rejection";return false;
     });
     const after=samples.filter(s=>s.atMs>12000),sorted=samples.filter(s=>s.ok).map(s=>s.ms).sort((a,b)=>a-b);
-    t.note(JSON.stringify({phase:"result",nodes,outage,exact24MiB:exact,freshBody,starts,kernel,recovered,recoveryError,outputErrors,closes,retained:pool.clients.map((c,i)=>c.logicalConnectionId===owners[i]),errors:samples.filter(s=>!s.ok).length,p95Ms:sorted[Math.max(0,Math.ceil(sorted.length*.95)-1)]??null,successfulAfterRecovery:after.filter(s=>s.ok).length,diagnostics:pool.diagnostics.slice(-10)}));
+    t.note(JSON.stringify({phase:"result",nodes,outage,exact24MiB:exact,freshBody,freshBodyError,starts,kernel,afterDrainKernel,recovered,recoveryError,outputErrors,closes,retained:pool.clients.map((c,i)=>c.logicalConnectionId===owners[i]),errors:samples.filter(s=>!s.ok).length,p95Ms:sorted[Math.max(0,Math.ceil(sorted.length*.95)-1)]??null,successfulAfterRecovery:after.filter(s=>s.ok).length,diagnostics:pool.diagnostics.slice(-10)}));
     t.assertions.assert(kernel.dropped>0&&kernel.retransmits>0,"kernel loss/retransmission was not actually observed");
     t.assertions.assert(exact&&starts.join(",")==="0,1,2","real TCP recovery lost bytes or repeated source processes");
     t.assertions.assert(freshBody,"the body endpoint did not accept a fresh request after restoration");

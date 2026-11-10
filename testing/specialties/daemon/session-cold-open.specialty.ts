@@ -83,6 +83,9 @@ defineSpecialty({
     // Exercise externally written persistent state through the same disk format
     // used by real project copies and later compatible installations.
     const copy = JSON.parse(readFileSync(metaPath(t.env.workspace, target), "utf8"));
+    // A compatible writer binds the copied record to its actual destination
+    // project, just as native writes do; foreign project keys are not aliases.
+    copy.projectKey = JSON.parse(readFileSync(metaPath(otherRoot, other), "utf8")).projectKey;
     copy.title = "newer project copy"; copy.updatedAtMs += 10_000;
     mkdirSync(join(otherRoot, ".genethub", "sessions", target), { recursive: true });
     writeFileSync(metaPath(otherRoot, target), JSON.stringify(copy));
@@ -100,7 +103,15 @@ defineSpecialty({
       catch (error) { refused = error instanceof ProtocolError_; }
       t.assertions.assert(refused, "invalid, deleted or unsupported conversation did not return a public protocol refusal");
     }
-    const catalog = await o.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
-    t.assertions.assert(catalog?.type === "sessions" && catalog.data.some(s => s.id === future && Boolean(s.unsupported)) && !catalog.data.some(s => s.id === deleted), "catalog lost future-format visibility or deletion fence");
+    // Unscoped directory reads serve the current projection. External file
+    // changes converge through discovery; native deletion remains fenced on
+    // every read, including reads before that convergence completes.
+    await t.tools.waitUntil(async()=>{
+      const scoped = await o.client.call({ type: "session.list", payload: { workspaceId: o.workspaceId, includeArchived: true, lean: true } });
+      t.assertions.assert(scoped?.type === "sessions" && !scoped.data.some(s => s.id === deleted), "native deletion fence was lost during scoped refresh");
+      const catalog = await o.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
+      t.assertions.assert(catalog?.type==="sessions" && !catalog.data.some(s=>s.id===deleted),"native deletion fence was lost during catalog convergence");
+      return catalog?.type==="sessions" && catalog.data.some(s=>s.id===future && Boolean(s.unsupported));
+    },15000);
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

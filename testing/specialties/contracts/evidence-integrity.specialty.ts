@@ -56,6 +56,50 @@ defineSpecialty({
 });
 
 defineSpecialty({
+  id: "specialty.contracts.nested-build-cache-is-not-source", title: "Nested Rust build cache changes do not look like source edits",
+  oracle: "Actual nested target writes remain excluded while a neighboring source edit and restoration invalidate the observation",
+  catches: ["a required native build invalidates the gate that built it", "excluding a cache also excludes its crate source"],
+  tags: ["core", "contract", "input-observation"], llm: { default: "none" }, expectedDurationMs: 400, timeoutMs: 5000, surfaces: ["filesystem", "testctl-evidence"],
+}, async t => {
+  const root = join(t.env.root, "nested-cache-repository");
+  const cache = join(root, "apps", "capture", "target", "debug", "deps");
+  const source = join(root, "apps", "capture", "src", "main.rs");
+  mkdirSync(cache, { recursive: true }); mkdirSync(join(root, "apps", "capture", "src"), { recursive: true });
+  writeFileSync(source, "original source");
+  const watchers: ReturnType<typeof watchInputs>[] = [];
+  try {
+    const cacheWatch = watchInputs([root], []); watchers.push(cacheWatch);
+    writeFileSync(join(cache, "compiler-fingerprint"), "new build cache");
+    await new Promise(r => setTimeout(r, 100));
+    const cached = cacheWatch.stop();
+    t.assertions.assert(cached.complete && !cached.changed, "nested Rust build cache invalidated source input");
+    const sourceWatch = watchInputs([root], []); watchers.push(sourceWatch);
+    writeFileSync(source, "changed source"); await new Promise(r => setTimeout(r, 100));
+    writeFileSync(source, "original source"); await new Promise(r => setTimeout(r, 100));
+    const edited = sourceWatch.stop();
+    t.assertions.assert(edited.complete && edited.changed && edited.changedPaths.includes(source), "neighboring source edit-and-restore disappeared with its cache");
+  } finally { watchers.forEach(watcher => watcher.stop()); }
+});
+
+defineSpecialty({
+  id: "specialty.contracts.declared-build-artifact-remains-observed", title: "An explicitly declared artifact stays observable inside a build cache",
+  oracle: "A real write to a declared binary under a nested Rust target directory invalidates input evidence with its concrete path",
+  catches: ["source cache exclusion silently disables artifact drift detection"],
+  tags: ["core", "contract", "input-observation"], llm: { default: "none" }, expectedDurationMs: 200, timeoutMs: 5000, surfaces: ["filesystem", "testctl-evidence"],
+}, async t => {
+  const root = join(t.env.root, "declared-artifact-repository");
+  const directory = join(root, "apps", "capture", "target", "debug");
+  mkdirSync(directory, { recursive: true });
+  const artifact = join(directory, "capture-binary"); writeFileSync(artifact, "original binary");
+  const watcher = watchInputs([root], [artifact]);
+  try {
+    writeFileSync(artifact, "changed binary"); await new Promise(r => setTimeout(r, 100));
+    const result = watcher.stop();
+    t.assertions.assert(result.complete && result.changed && result.changedPaths.includes(artifact), "declared nested artifact drift went unobserved");
+  } finally { watcher.stop(); }
+});
+
+defineSpecialty({
   id: "specialty.contracts.process-output-drained", title: "Process completion includes the final result footer",
   oracle: "A real child fills stdout and stderr before exit; awaiting completion retains both final markers with bounded diagnostic tails",
   catches: ["exit event races buffered TAP footer", "unbounded adapter output"],

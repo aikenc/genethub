@@ -14,7 +14,7 @@ export function watchInputs(roots: string[], artifactFiles: string[], excludedPa
   const isExcluded = (file: string) => excluded.some(directory => file === directory || file.startsWith(`${directory}${path.sep}`));
   const ignored = (root: string, file: string) => {
     const parts = path.relative(root, file).split(path.sep);
-    return isExcluded(file) || parts.includes(".git") || parts.includes("node_modules") || parts[0] === "target";
+    return isExcluded(file) || parts.includes(".git") || parts.includes("node_modules") || parts.includes("target");
   };
   function add(root: string, directory: string, artifactOnly = false) {
     if (isExcluded(directory)) return;

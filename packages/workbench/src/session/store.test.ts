@@ -2508,7 +2508,7 @@ describe("renaming a workspace", () => {
 });
 
 describe("removing a workspace registration", () => {
-  it("drops its local navigation state while preserving historical sessions", async () => {
+  it("drops local navigation without requesting conversation deletion", async () => {
     const first = {
       id: "w1",
       name: "first",
@@ -2525,9 +2525,11 @@ describe("removing a workspace registration", () => {
     };
     const other = { ...SESSION, id: "s2", workspaceId: "w2" };
     const unsubscribe = vi.fn(async () => {});
+    const requests: string[] = [];
     const client = {
       unsubscribe,
       call: async (request: { type: string }) => {
+        requests.push(request.type);
         if (request.type === "workspace.list") {
           return { type: "workspaces", data: [first, second] };
         }
@@ -2557,10 +2559,11 @@ describe("removing a workspace registration", () => {
     await useWorkbench.getState().removeWorkspace("w1");
 
     expect(useWorkbench.getState().workspaces).toEqual([second]);
-    expect(useWorkbench.getState().sessions).toEqual([SESSION, other]);
+    expect(useWorkbench.getState().sessions).toEqual([other]);
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
     expect(unsubscribe).toHaveBeenCalledWith("s1");
+    expect(requests).not.toContain("session.delete");
   });
 });
 

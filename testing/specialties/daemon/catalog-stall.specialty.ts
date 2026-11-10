@@ -32,7 +32,19 @@ defineSpecialty({
     const end = Date.now() + 12000, samples: number[] = [];
     while (Date.now() < end) {
       const at = performance.now();
-      const reply = await o.client.call(request, { timeoutMs: 30000 });
+      const reply = await o.client.call(request, { timeoutMs: 30000 }).catch((error:unknown) => {
+        const lines=observer!.lines(),opens=new Map<string,number>();
+        for(const line of lines){
+          const raw=/"([^"]*)"/.exec(line)?.[1]?.split("/").at(-1);
+          if(!raw)continue;
+          const name=/^s_[0-9a-f]+$/.test(raw)?"<session-directory>":raw;
+          opens.set(name,(opens.get(name)??0)+1);
+        }
+        t.note(JSON.stringify({phase:"foreground-deadline",elapsedMs:Math.round(performance.now()-at),priorSamples:samples.length,
+          delayedOsCalls:lines.filter(line=>line.includes("(DELAYED)")).length,
+          topOpenLeaves:[...opens].sort((a,b)=>b[1]-a[1]).slice(0,12)}));
+        throw error;
+      });
       samples.push(performance.now() - at);
       t.assertions.assert(reply?.type === "sessionPages" && !reply.data[0]?.error && reply.data[0]?.sessions.length === 20
         && new Set(reply.data[0].sessions.map(s => s.id)).size === 20 && reply.data[0].sessions.every(s => ids.has(s.id)), "storage load lost or duplicated page IDs");

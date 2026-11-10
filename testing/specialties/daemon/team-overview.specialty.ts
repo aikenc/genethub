@@ -89,15 +89,20 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     t.assertions.assert(progress.seen.rounds === 1, `Reflection counted as business progress: ${JSON.stringify(progress.seen)}`);
     queries = listQueries();
     const scopes = new Set(spaces.filter((w: any) => w.root === root || w.root.startsWith(join(root, "spaces") + "/")).map((w: any) => w.id));
-    const history = queries.filter(a => !a.includes("--active"));
-    t.assertions.assert(queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 1
-      && history.every(a => scopes.has(a[a.indexOf("--workspace") + 1]) && a.includes("--limit")
+    const incremental = queries.filter(a => a.includes("--since"));
+    const history = queries.filter(a => !a.includes("--active") && !a.includes("--since"));
+    const requestedScopes = (a: string[]) => a.flatMap((flag,index) => flag==="--workspace" ? [a[index+1]] : []);
+    t.assertions.assert(incremental.length<=1 && incremental.every(a => requestedScopes(a).length>0
+      && requestedScopes(a).every(id => scopes.has(id)) && requestedScopes(a).length<=scopes.size),
+      `Incremental snapshot escaped Team scope: ${JSON.stringify(incremental)}`);
+    t.assertions.assert(queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 2
+      && history.every(a => requestedScopes(a).length===1 && scopes.has(a[a.indexOf("--workspace") + 1]) && a.includes("--limit")
         && Number(a[a.indexOf("--limit") + 1]) > 0 && Number(a[a.indexOf("--limit") + 1]) <= 500),
       `Hook used unbounded or unrelated history: ${JSON.stringify(queries)}`);
     t.assertions.assert(o.mock.requests.length === modelRequestsBeforeHook, "Hook unexpectedly started automatic model work");
     writeFileSync(mode, "missing-sessions");
     command("board", "refresh");
     t.assertions.assert(readFileSync(status, "utf8") === before, "Malformed snapshot replaced last good status with partial or empty data");
-    t.note(JSON.stringify({ roles: scopes.size, activeBoardQueries: 1, hookQueries: queries.length, boundedHistoryPages: history.length, businessRounds: progress.seen.rounds, additionalModelWork: 0, malformedPreservedLastGood: true }));
+    t.note(JSON.stringify({ roles: scopes.size, activeBoardQueries: 1, hookQueries: queries.length, incrementalSnapshots:incremental.length, boundedHistoryPages: history.length, businessRounds: progress.seen.rounds, additionalModelWork: 0, malformedPreservedLastGood: true }));
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });
