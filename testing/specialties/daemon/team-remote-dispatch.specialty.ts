@@ -485,6 +485,12 @@ sys.exit(r.returncode)
     const bound = await callTask(remoteOwner, targetRoot, ["task", "bind-directory", remoteTask.taskId, "--directory", remoteDirectory], true);
     t.assertions.assert(bound.code === 0, "remote Owner could not claim an executor-side directory: " + bound.err);
     const boundReply = JSON.parse(JSON.parse(bound.out.trim()).result.trim());
+    const remoteBudgetReply = await callTask(remoteOwner, targetRoot, ["task", "budget", remoteTask.taskId], true);
+    t.assertions.assert(remoteBudgetReply.code === 0, "remote budget query did not negotiate source support: " + remoteBudgetReply.err);
+    const remoteBudget = JSON.parse(JSON.parse(remoteBudgetReply.out.trim()).result.trim());
+    t.assertions.assert(remoteBudget.taskId === remoteTask.taskId && remoteBudget.usage.taskIntentCount >= 1
+      && remoteBudget.userScopeAndDeadlineChanged === false,
+      "remote Task budget query created a separate authority or lost its unchanged User scope");
     const ownerReceiverPath = path.join(targetDispatchDir, createHash("sha256").update(startedWork.id).digest("hex") + ".json");
     const ownerReceiverBytes = readFileSync(ownerReceiverPath);
     const ownerReceiver = JSON.parse(ownerReceiverBytes.toString());
