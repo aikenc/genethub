@@ -269,7 +269,7 @@ sys.exit(r.returncode)
         try {
           const held=await script(["hook"]);
           t.assertions.assert(held.code===0 && existsSync(path.join(pendingDir,taskFile!)) && existsSync(lock) && !targetReceipt(dispatchId!).released,"remote release ignored an owned live process");
-          t.assertions.assert(!releaseEvents().some(e=>e.kind==="resource-released"&&e.sessionId===task.sessionId),"live process was falsely recorded as returned");
+          t.assertions.assert(!releaseEvents().some(e=>["resource-released","resource-release-observed"].includes(e.kind)&&e.sessionId===task.sessionId),"live process was falsely recorded as returned");
         } finally {
           await o.client.call({type:"process.killAll",payload:{sessionId:task.sessionId}});
         }
@@ -291,6 +291,8 @@ sys.exit(r.returncode)
         t.assertions.assert(replayRelease(dispatchId!,task.sessionId).leaseReleasedAtMs==null,"release replay manufactured a missing unlink clock");
         t.assertions.assert(released.resourceReleasedAtMs==null && replayRelease(dispatchId!,task.sessionId).resourceReleasedAtMs==null,"prior marker absence manufactured a complete historical resource proof");
         t.assertions.assert(!releaseEvents().some(e=>e.kind==="resource-released"&&e.sessionId===task.sessionId),"source made up a resource event for an already-absent marker");
+        const bounded=releaseEvents().filter(e=>e.kind==="resource-release-observed"&&e.sessionId===task.sessionId);
+        t.assertions.assert(bounded.length===1 && bounded[0].atMs>=observedAfter && bounded[0].atMs<=Date.now() && bounded[0].timeBasis==="observed-absence-upper-bound", "missing marker release did not preserve a timely, honest observation bound before hourly capture");
       }
     }
     t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 3, "same-worded new task reused an old session");
@@ -586,10 +588,14 @@ sys.exit(r.returncode)
     await idleSession(secondOwner, true);
     const contested = await callTask(secondOwner, targetRoot, ["task", "bind-directory", secondTask.taskId, "--directory", remoteDirectory], true);
     t.assertions.assert(contested.code !== 0 && JSON.parse(readFileSync(boundReply.lock, "utf8")).session === remoteOwner, "independent remote session stole the first Owner's actual directory");
+    const secondReleaseObservedAfter=Date.now();
     const secondDone = await callTask(secondOwner, targetRoot, ["task", "finish", secondTask.taskId, "--outcome", "success", "Read-only independent remote task completed"], true);
     t.assertions.assert(secondDone.code === 0, "second remote Owner did not settle");
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", secondTask.taskId + ".json"), "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(existsSync(boundReply.lock), "unrelated remote task released another Owner's resource");
+    const noLeaseWork=(await qualityFacts()).workItems.find((x:any)=>x.sessionId===secondOwner);
+    const noLeaseBound=releaseEvents().find(e=>e.kind==="resource-release-observed"&&e.sessionId===secondOwner);
+    t.assertions.assert(!!noLeaseBound && noLeaseBound.atMs>=secondReleaseObservedAfter && noLeaseWork?.releasedAtMs===noLeaseBound.atMs && noLeaseWork.releaseTimeBasis==="observed-absence-upper-bound", "hourly collection lost or relabeled the real remote release observation");
     t.note("TaskOwner remote: source ownership saved; asking source support");
     // Changing the install default cannot redirect already accepted work.
     writeFileSync(path.join(targetRoot,".genethub/task-source.json"),JSON.stringify({machineId:"m_missing",workspaceId:"w_missing",role:"qa",command:[python,"/missing/run.py"]}));
