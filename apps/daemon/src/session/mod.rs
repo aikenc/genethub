@@ -10,6 +10,7 @@ pub mod overview;
 pub(crate) mod preview_review;
 pub mod rounds;
 pub mod store;
+pub(crate) mod team_context;
 
 pub use manager::SessionManager;
 pub use rounds::{RoundOutcome, RoundRecord};

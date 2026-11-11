@@ -3397,6 +3397,12 @@ impl SessionManager {
         if let Some(reminder) = self.skill_reminder(live, &agent_text).await {
             agent_text = format!("{agent_text}\n\n{reminder}");
         }
+        let team_workspace = live.meta.lock().await.workspace_id.clone();
+        if let Ok(root) = self.store.workspace_root(&team_workspace) {
+            if let Some(briefing) = super::team_context::briefing(root, session_id).await {
+                agent_text.push_str(&briefing);
+            }
+        }
         // Media attachments keep the provider's native path. Everything else
         // is a stored file: the Agent gets a bounded manifest instead, so a
         // non-media MIME can never reach a provider converter that rejects it.
