@@ -225,7 +225,17 @@ def capture(team, root, end, cutoff):
             continue
         rows = by_operation.get(intent['operationId'], [])
         confirmed = next((x['atMs'] for x in rows if x['kind']=='dispatch-confirmed'), None)
+        activation = intent['operationId']
+        if request.get('machine'):
+            # receive(activate) uses a distinct, stable wire message ID. Bind
+            # it to this operation's durable prepare receipt, never another
+            # input merely because it ran in the same remote session.
+            binding = intent.get('pending') or rec
+            remote = binding.get('remoteDispatch') or {}
+            activation = ('activate.'+hashlib.sha256(remote['id'].encode()).hexdigest()
+                          if binding.get('sessionId') == sid and remote.get('id') == intent['operationId'] else None)
         item = {'id':intent['operationId'], 'taskId':task['taskId'], 'sessionId':sid,
+                'activationMessageId':activation,
                 'requester':request.get('requester'), 'role':request.get('role'), 'owner':owner,
                 'machine':request.get('machine'), 'dispatchAtMs':dispatched, 'confirmedAtMs':confirmed,
                 'hasReceipt':bool(sid), 'standing':bool(request.get('standing')), 'follows':request.get('follows'),
@@ -283,10 +293,14 @@ def capture(team, root, end, cutoff):
             covered=covered and all(b['atMs']-a['atMs'] <= 125000 for a,b in zip(recent,recent[1:]))
             idle_complete=idle_complete and covered
         receipts=own.get('retainedInputs')
-        incoming=next((x for x in receipts or [] if x['messageId']==item['id']), {})
-        begun=incoming.get('deliveredAtMs')
+        activation=item['activationMessageId']
+        incoming=next((x for x in receipts or [] if activation and x['messageId']==activation), {})
+        # A resumed input can have several executions. Its earliest genuine
+        # Round is the start; later delivery/restart metadata cannot move it.
+        begun=min((x['startedAtMs'] for x in own.get('rounds',[])
+                   if activation and x.get('userItemId')==activation and number(x.get('startedAtMs'))), default=None)
         if not number(begun):
-            begun=next((x['startedAtMs'] for x in own.get('rounds',[]) if x.get('userItemId')==item['id']), None)
+            begun=incoming.get('deliveredAtMs')
         item['startedAtMs']=begun if number(begun) and begun <= cutoff else None
         if item['confirmedAtMs'] is None and number(begun) and begun < start:
             item['confirmedAtMs']=begun  # acknowledged no later than actual activation, before this window

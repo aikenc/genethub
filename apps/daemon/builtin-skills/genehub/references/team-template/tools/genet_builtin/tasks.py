@@ -224,7 +224,7 @@ def activate(t, root, record, path):
     t.write_json(path, record)
     quality_events.emit(t, root, 'input-accepted', record['operationId'],
                         taskId=task['taskId'], operationId=record['operationId'],
-                        sessionId=sid, messageId=record['operationId'], purpose='task',
+                        sessionId=sid, messageId=('activate.' + identity(remote['id']) if remote else record['operationId']), purpose='task',
                         machine=record['request'].get('machine'), timeBasis='observed-acceptance')
 
 
