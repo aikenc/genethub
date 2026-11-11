@@ -620,6 +620,8 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"task return restored a fake local QA workspace");
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
+    const decisionMessages=(await inspectSession(remoteOwner,true)).items.filter((i:any)=>i.type==="userMessage" && i.text.includes("REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE"));
+    t.assertions.assert(decisionMessages.length===1 && decisionMessages[0].text.includes("本任务在途") && decisionMessages[0].text.includes("目标5"), "remote Owner lost a decision signal or received duplicate result contexts");
     const finalWork = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
     t.assertions.assert(finalWork?.startedAtMs === nativeStart.startedAtMs
       && finalWork.activationMessageId === nativeStart.userItemId,

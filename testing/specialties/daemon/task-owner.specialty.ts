@@ -104,6 +104,7 @@ defineSpecialty({
     const a = await ok(front, begin), duplicate = await ok(front, begin);
     const b = await ok(front, ["task", "start", "--space", "leader", "--desc", "second independent goal", "--request-id", "front.goal.B", "Complete a separate read-only goal"]);
     const owner = a.owner.sessionId as string, other = b.owner.sessionId as string;
+    t.assertions.assert(a.parallelism?.target===5 && a.parallelism.minimum===2 && a.parallelism.unknown>=1 && a.parallelism.inFlight===0, "new Owner was counted as observed work before its first reconciliation or lacked a decision signal");
     t.assertions.assert(a.taskId === duplicate.taskId && owner === duplicate.owner.sessionId && owner !== other, "task retry replayed creation or the Space prevented independent Owner sessions");
     await idle(owner); await idle(other);
     const wrong = await cli(front, [...begin.slice(0, -1), "different task under the same operation"]);
@@ -123,6 +124,8 @@ defineSpecialty({
       const s = (await r.snapshot(owner)).summary;
       return s.status === "idle" && s.coordination?.pending === 2;
     }, 15000);
+    const decision=await ok(front,["task","status",a.taskId]);
+    t.assertions.assert(decision.parallelism?.inFlight===3 && decision.parallelism.unknown===0 && decision.parallelism.unsettled===3, "task status lost independent Owner/support in-flight facts");
     const ownerSummary = (await r.snapshot(owner)).summary;
     const browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(r.daemon), ownerSummary.workspaceId, owner);
     try {
@@ -170,6 +173,10 @@ defineSpecialty({
     r.ok(["hook"]);
     await t.tools.waitUntil(async () => (await r.snapshot(owner)).summary.coordination?.ready! > 0, 15000);
     t.assertions.assert((await r.snapshot(owner)).summary.inputSummary?.paused, "ordinary fanout results resumed a Human-paused Owner");
+    const pausedDecision=await ok(front,["task","status",a.taskId]);
+    t.assertions.assert(pausedDecision.parallelism?.inFlight===0 && pausedDecision.parallelism.paused===1, "paused Owner or concluded supports inflated the decision-point in-flight count");
+    const wakeText=readFileSync(join(r.root,".genethub/team/inbox",owner+".jsonl"),"utf8");
+    t.assertions.assert(wakeText.includes("本任务在途") && wakeText.includes("目标5") && wakeText.includes("R6"), "queued real result lacked its decision-point context");
     t.note("same Space, two actual Owner sessions; exact Agent-bound dispatch; two required support receipts; native idle plus collaboration view; paused handoff retained");
   } finally { await r.dispose(); }
 });
