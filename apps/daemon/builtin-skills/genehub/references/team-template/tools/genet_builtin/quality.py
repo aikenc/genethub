@@ -465,6 +465,14 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                    and number(record.get('createdAtMs')) and record['createdAtMs'] >= metric_start}
     for sid in reflect_ids:
         wanted.setdefault(sid, pending[sid].get('machine'))
+    # Metric windows filter indicators, not the evidence needed to establish a
+    # still-relevant operation's first activation or a Task tree's cumulative
+    # Agent work. Keep the earliest necessary source-owned history boundary.
+    history_starts = {}
+    for item in work:
+        if item.get('sessionId') and number(item.get('dispatchAtMs')):
+            sid = item['sessionId']
+            history_starts[sid] = min(history_starts.get(sid, metric_start), item['dispatchAtMs'])
     # A conclusion outside the metric horizon drops that cost/adoption sample,
     # not its native membership in a root task still spanning this card. An
     # epoch advance must not turn a readable finished support into unknown R6.
@@ -474,7 +482,10 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
             continue
         people=([task['owner']] if task.get('owner') else [])+task.get('collaborators',[])+task.get('previousOwners',[])
         for person in people:
-            if person.get('sessionId'):wanted.setdefault(person['sessionId'],person.get('machine'))
+            if person.get('sessionId'):
+                sid = person['sessionId']
+                wanted.setdefault(sid, person.get('machine'))
+                history_starts[sid] = min(history_starts.get(sid, metric_start), task['createdAtMs'])
     native, platforms, processes = {}, {}, {}
     for machine in sorted(set(wanted.values()),key=lambda x:x or ""):
         try:
@@ -491,7 +502,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     for sid,machine in order:
         try:
             if not team.SESSION_ID.fullmatch(sid): raise ValueError('invalid native session identity')
-            native[sid]=native_snapshot(team,sid,machine,metric_start,platforms.get(machine),store/'native'/ (sid+'.json'),budget)
+            native[sid]=native_snapshot(team,sid,machine,history_starts.get(sid,metric_start),platforms.get(machine),store/'native'/ (sid+'.json'),budget)
         except Exception as error:
             issues.append({'kind':'native-read-unavailable','sessionId':sid,'error':type(error).__name__})
     # Tasks begun inside roles are work, but cannot by themselves manufacture
@@ -702,7 +713,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                         'observations':complete and observed_complete,'idleObligations':complete and idle_complete,
                         'goals':complete and observed_complete and goal_ownership_known,
                         'resources':complete and resources_complete,'turns':native_complete,'inputs':native_complete and all(s.get('retainedInputs') is not None and all(x.get('source') in ('user','agent','system','workflow') for x in s['retainedInputs']) for s in native.values())},
-            'versions':{'platformAtCapture':[dict(selector=k,**v) for k,v in sorted(platforms.items(),key=lambda x:x[0] or '')],
+            'versions':{'nativeHistoryBasis':'task-obligation-and-metric-horizons/1','platformAtCapture':[dict(selector=k,**v) for k,v in sorted(platforms.items(),key=lambda x:x[0] or '')],
                         'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
             'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
 
