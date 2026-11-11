@@ -63,6 +63,32 @@ defineSpecialty({
   const insufficientParallel = card(serial).value;
   t.assertions.assert(insufficientParallel.redLines.R6.triggered === true && insufficientParallel.penalty === 50 && insufficientParallel.score < 50,
     "twenty queued or short items hid an effective in-flight mean below two");
+  const pausedWork = clone();
+  for (const x of pausedWork.workItems) x.workActivity = {
+    basis: "native-minute-and-rounds/1",
+    active: [{startAtMs:start+120000,endAtMs:start+240000}],
+    excluded: [{startAtMs:start+240000,endAtMs:start+600000}],
+  };
+  const pausedCard=card(pausedWork).value;
+  t.assertions.assert(pausedCard.redLines.R6.triggered===true
+    && Math.abs(pausedCard.effectiveInFlight.knownMean-2/3)<1e-9
+    && Math.abs(pausedCard.effectiveInFlight.possibleMean-2/3)<1e-9,
+    "paused or waiting time manufactured effective parallel work");
+  const pausedOpen=JSON.parse(JSON.stringify(serial));
+  for(let n=0;n<2;n++) pausedOpen.workItems.push({id:"paused.open."+n,hasReceipt:true,
+    dispatchAtMs:start,confirmedAtMs:start,startedAtMs:start,conclusionAtMs:null,
+    workActivity:{basis:"native-minute-and-rounds/1",active:[],excluded:[{startAtMs:start,endAtMs:start+h}]}});
+  t.assertions.assert(card(pausedOpen).value.redLines.R6.triggered===true,
+    "unfinished paused items hid a proven effective parallel deficit");
+  const missingActivity=clone();
+  for(const x of missingActivity.workItems) x.workActivity={basis:"native-minute-and-rounds/1",active:[],excluded:[]};
+  const missingActivityCard=card(missingActivity).value;
+  t.assertions.assert(missingActivityCard.redLines.R6.triggered===null && !missingActivityCard.formal
+    && missingActivityCard.effectiveInFlight.knownMean===0 && missingActivityCard.effectiveInFlight.possibleMean>2,
+    "missing activity samples manufactured active time or a proven deficit");
+  const conflictingActivity=JSON.parse(JSON.stringify(pausedWork));
+  conflictingActivity.workItems[0].workActivity.excluded[0].startAtMs=start+180000;
+  t.assertions.assert(evaluate(conflictingActivity).status!==0,"overlapping active and paused facts were silently scored");
   const unknown = clone(); unknown.coverage.starts=false;
   const incomplete = card(unknown).value;
   t.assertions.assert(incomplete.formal === false && incomplete.score === null && incomplete.redLines.R6.triggered === null,

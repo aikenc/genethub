@@ -77,6 +77,40 @@ defineSpecialty({
     const idleItem=idleFacts.workItems.find((x:any)=>x.id===original);
     t.assertions.assert(Array.isArray(idleItem?.idlePeriods) && idleItem.idlePeriods.some((x:any)=>x.resolvedAtMs===bindRound.startedAtMs)
       && idleItem.idlePeriods.some((x:any)=>x.startAtMs>=afterBind),"sampled idle was joined across a genuine native execution");
+    await r.client.call({type:"session.interrupt",payload:{sessionId:first.collaborator}});
+    await t.tools.waitUntil(async()=>Boolean((await r.snapshot(first.collaborator)).summary.inputSummary?.paused),10000);
+    r.ok(["hook"]);
+    const pauseEvent=readFileSync(eventFile,"utf8").trim().split("\n").map(x=>JSON.parse(x))
+      .find(x=>x.kind==="session-observed" && x.sessionId===first.collaborator && x.paused===true && !x.fixture);
+    t.assertions.assert(Boolean(pauseEvent),"real public interruption did not yield a native pause observation");
+    const pauseReadback=r.command(["quality","facts"]);
+    t.assertions.assert(pauseReadback.code===0,"native paused-work capture failed: "+pauseReadback.err);
+    const pausedItem=JSON.parse(pauseReadback.out).workItems.find((x:any)=>x.id===original);
+    t.assertions.assert(pausedItem?.workActivity?.excluded.some((x:any)=>x.startAtMs<=pauseEvent.atMs && x.endAtMs>pauseEvent.atMs)
+      && pausedItem.workActivity.active.some((x:any)=>x.startAtMs<=bindRound.startedAtMs && x.endAtMs>=bindRound.endedAtMs),
+      "native pause was counted as effective work or actual native execution was lost");
+    // Explicit stale waiting observation: genuine native execution is the
+    // independent stronger evidence, not the diagnostic sample's claim.
+    const savedSamples=readFileSync(eventFile);
+    try {
+      writeFileSync(eventFile,savedSamples.toString().trim().split("\n").map(x=>JSON.parse(x))
+        .filter(x=>x.kind!=="session-observed" || x.sessionId!==first.collaborator).map(x=>JSON.stringify(x)).join("\n")+"\n");
+      appendFileSync(eventFile,JSON.stringify({schema:"team-process-event/1",eventId:"fixture.stale.wait",kind:"session-observed",
+        sessionId:first.collaborator,atMs:bindRound.startedAtMs-1,recordedAtMs:Date.now(),status:"idle",paused:false,
+        waitingForUser:true,fixture:"frozen-observation-input"})+"\n");
+      const stale=r.command(["quality","facts"]);
+      t.assertions.assert(stale.code===0,"stale observation capture failed");
+      const activity=JSON.parse(stale.out).workItems.find((x:any)=>x.id===original).workActivity;
+      t.assertions.assert(activity.active.some((x:any)=>x.startAtMs<=bindRound.startedAtMs && x.endAtMs>=bindRound.endedAtMs)
+        && !activity.excluded.some((x:any)=>x.startAtMs<bindRound.endedAtMs && x.endAtMs>bindRound.startedAtMs),
+        "stale waiting sample erased independently observed native work");
+      const staleRows=readFileSync(eventFile,"utf8").trim().split("\n").map(x=>JSON.parse(x));
+      staleRows.find(x=>x.eventId==="fixture.stale.wait").atMs=idleItem.startedAtMs-126000;
+      writeFileSync(eventFile,staleRows.map(x=>JSON.stringify(x)).join("\n")+"\n");
+      const expired=r.command(["quality","facts"]);
+      t.assertions.assert(expired.code===0 && JSON.parse(expired.out).workItems.find((x:any)=>x.id===original)
+        .workActivity.excluded.length===0,"expired pause observation erased later unobserved time");
+    } finally {writeFileSync(eventFile,savedSamples);}
     await ok(first.collaborator,["task","finish",task.taskId,"--outcome","success","Actual first check has concluded"]);
     // Explicit real filesystem fault, after the first genuine conclusion.
     const saved=eventFile+".preserved";
