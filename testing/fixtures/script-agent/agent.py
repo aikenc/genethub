@@ -363,7 +363,14 @@ class FixtureSession(Session):
                     request["argv"], cwd=request.get("cwd"), env=sdk_process.child_environment(extra),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
-                stdout, stderr = await child.communicate()
+                track_process = CONTROL.get("commandProcess") or request.get("commandProcess")
+                if track_process:
+                    self.ctx.set_pid(child.pid)
+                try:
+                    stdout, stderr = await child.communicate()
+                finally:
+                    if track_process:
+                        self.ctx.set_pid(self.cli.pid)
                 journal("cli-command-returned", code=child.returncode, stdoutBytes=len(stdout), stderrBytes=len(stderr))
                 reply = {"code": child.returncode, "out": stdout.decode("utf-8", "replace")[-32768:],
                          "err": stderr.decode("utf-8", "replace")[-4096:]}

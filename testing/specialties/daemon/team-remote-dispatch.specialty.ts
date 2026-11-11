@@ -436,6 +436,35 @@ sys.exit(r.returncode)
       "native R6 task tree omitted the real remote Owner execution or counted the front Session");
     t.assertions.assert(startedWork?.startedAtMs === nativeStart.startedAtMs,
       "remote task activation lost its independently observed native start: " + JSON.stringify(startedWork));
+    const remoteInspection=(await cliJson(["session","inspect",remoteOwner],true)).inspection;
+    const activationReceipt=remoteInspection.retainedInputs.find((x:any)=>x.messageId===nativeStart.userItemId);
+    t.assertions.assert(startedWork.dispatchTiming?.sessionStart.inputReceivedAtMs===activationReceipt.receivedAtMs
+      && startedWork.dispatchTiming.sessionStart.durationMs===nativeStart.startedAtMs-activationReceipt.receivedAtMs
+      && startedWork.dispatchTiming.sessionStart.clock==="executor"
+      && startedWork.dispatchTiming.platformPreparation.clock==="source"
+      && startedWork.dispatchTiming.additive===false,"remote timing subtracted source/executor clocks or lost native start evidence");
+    // The external Agent reports the actual running command PID through the
+    // ordinary SDK event. Its real child is then visible in native process.list.
+    const jobScript=path.join(targetRoot,"remote-bounded-job.py");
+    writeFileSync(jobScript,`import subprocess,os,sys,json,time\nfrom pathlib import Path\nroot=Path(${JSON.stringify(targetRoot)})\ncli=os.environ['GENEHUB_CLI'];sid=os.environ['GENEHUB_SESSION_ID'];marker='remote-execution-proof.'+sid\np=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)',marker],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\ndef call(action,*args):\n r=subprocess.run([sys.executable,str(root/'tools/team.py'),'task','job',action,${JSON.stringify(remoteTask.taskId)},'--job-id','remote-native-build',*args],capture_output=True,text=True)\n if r.returncode:raise RuntimeError('remote job '+action+' failed: '+r.stderr[-500:])\n outer=json.loads(r.stdout);return json.loads(outer['result'])\ntry:\n matched=[];end=time.monotonic()+5\n while not matched and time.monotonic()<end:\n  r=subprocess.run([cli,'process','list'],capture_output=True,text=True,check=True)\n  matched=[v for v in json.loads(r.stdout)['data']['processes'] if v.get('sessionId')==sid and marker in v.get('command','')]\n  if not matched:time.sleep(.02)\n if not matched:raise RuntimeError('native remote process was not reported')\n first=call('register','--pid',str(matched[0]['pid']),'--kind','install','--max-seconds','30')\n observed=call('status')\n p.wait(timeout=15)\n finished=call('finish','--exit-code','0')\n print(json.dumps({'registered':first,'observed':observed,'finished':finished}))\nfinally:\n p.wait(timeout=15)\n`);
+    const jobRequest="u_remote_contract_background_work";
+    await cliJson(["session","send",remoteOwner,JSON.stringify({argv:[python,jobScript],cwd:targetRoot,requestId:jobRequest,commandProcess:true}),"--message-id",jobRequest,"--no-wait"],true);
+    await idleSession(remoteOwner,true);
+    const jobTimeline=(await inspectSession(remoteOwner,true)).items;
+    const jobReply=jobTimeline.filter((x:any)=>x.type==="assistantMessage").map((x:any)=>{
+      try{return JSON.parse(x.text);}catch{return null;}
+    }).find((x:any)=>x?.requestId===jobRequest);
+    t.assertions.assert(jobReply?.code===0,"real remote background job failed: "+jobReply?.err);
+    const nativeJob=JSON.parse(jobReply.out);
+    t.assertions.assert(nativeJob.registered.jobId===nativeJob.finished.jobId
+      && nativeJob.finished.state==="finished" && nativeJob.observed.observedThroughAtMs>=nativeJob.registered.registeredAtMs,
+      "remote job lost its original native registration or source conclusion");
+    const jobRows=readdirSync(path.join(sourceRoot,".genethub/team/background-jobs")).map(f=>JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/background-jobs",f),"utf8")));
+    t.assertions.assert(jobRows.length===1 && jobRows[0].sessionId===remoteOwner && jobRows[0].machine===machine
+      && !existsSync(path.join(targetRoot,".genethub/team/background-jobs")),"remote job wrote an executor-side task ledger or selected the wrong machine");
+    const jobFacts=await qualityFacts();
+    t.assertions.assert(jobFacts.taskTrees.find((x:any)=>x.taskId===remoteTask.taskId).sessions.find((x:any)=>x.sessionId===remoteOwner).backgroundRuns.length>0,
+      "source capture lost actual remote registered process work");
     const qualityEvents = readFileSync(path.join(sourceRoot, ".genethub/team/events/events.jsonl"), "utf8")
       .trim().split("\n").map(line => JSON.parse(line));
     t.assertions.assert(qualityEvents.some(x => x.kind === "input-accepted" && x.operationId === startedWork.id

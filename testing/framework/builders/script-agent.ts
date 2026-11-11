@@ -129,6 +129,8 @@ export interface ScriptAgentControl {
   /** Space flood events over time instead of one synchronous output burst. */
   floodIntervalMs?: number;
   processTree?: boolean;
+  /** cli-command reports its actual running argv child through the public SDK PID event. */
+  commandProcess?: boolean;
   /** Emit one completed tool item per turn, named by this value. */
   tool?: string;
   /** The profile's fault fires once per state directory, then the Agent behaves normally. */

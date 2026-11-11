@@ -18,23 +18,39 @@ defineSpecialty({
 }, async t => {
   const r = await openTeam(t, "quality-lifecycle", [{ id: "ctl-cli-command", profile: "cli-command" }]);
   try {
+    const decode = (value: string, label: string) => {
+      try { return JSON.parse(value); } catch (error) {
+        throw new Error(label+" returned malformed JSON: "+String(error)+"; lines="+value.split("\n").length+"; firstCodePoints="+JSON.stringify([...value.slice(0,10)].map(x=>x.codePointAt(0))));
+      }
+    };
     const config=path.join(r.root,".genethub/open.env");
     writeFileSync(config, readFileSync(config,"utf8")+"\nTEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=999999\nTEAM_WATCHDOG_AFTER=999999\n");
     const idle = (sid:string) => t.tools.waitUntil(async () => {
       const summary=(await r.snapshot(sid)).summary;
       return summary.status==="idle" && !summary.inputSummary?.pendingMessageIds.length;
     },30000);
+    const captureScript=path.join(r.root,"agent-quality-capture.py");
+    writeFileSync(captureScript,"import subprocess,sys\nwith open(sys.argv[1],'w') as stream:\n r=subprocess.run(sys.argv[2:],stdout=stream)\nraise SystemExit(r.returncode)\n");
+    let requestSequence=0;
     const cli = async (sid:string,args:string[]) => {
-      await r.send(sid,JSON.stringify({argv:["python3",path.join(r.root,"tools/run.py"),...args],cwd:r.root}));
+      const requestId="quality-lifecycle."+(++requestSequence);
+      const output=args[0]==="quality"?path.join(r.root,requestId+".json"):null;
+      const argv=output?["python3",captureScript,output,"python3",path.join(r.root,"tools/run.py"),...args]:["python3",path.join(r.root,"tools/run.py"),...args];
+      await r.send(sid,JSON.stringify({argv,cwd:r.root,requestId}));
       await idle(sid);
-      const last=(await r.snapshot(sid)).items.filter(x=>x.type==="assistantMessage").at(-1);
+      const last=(await r.snapshot(sid)).items.filter(x=>{
+        if(x.type!=="assistantMessage")return false;
+        try{return JSON.parse(x.text).requestId===requestId;}catch{return false;}
+      }).at(-1);
       if(last?.type!=="assistantMessage") throw new Error("real caller returned no command outcome");
-      return JSON.parse(last.text) as {code:number,out:string,err:string};
+      const value=decode(last.text,"Agent command "+args.slice(0,2).join(" ")) as {code:number,out:string,err:string};
+      if(output && existsSync(output))value.out=readFileSync(output,"utf8");
+      return value;
     };
     const ok = async (sid:string,args:string[]) => {
       const value=await cli(sid,args);
       t.assertions.assert(value.code===0,"public task failed: "+value.out+value.err);
-      return JSON.parse(value.out.trim().split("\n").at(-1)!);
+      return decode(value.out.trim().split("\n").at(-1)!,"CLI "+args.slice(0,2).join(" "));
     };
     const front=await r.create("ctl-cli-command");
     const task=await ok(front,["task","start","--space","leader","--desc","bounded observation fixture","--request-id","quality.goal","Coordinate independent bounded checks"]);
@@ -92,7 +108,7 @@ defineSpecialty({
         sessionId:first.collaborator,atMs,recordedAtMs:Date.now(),status:"idle",paused:false,waitingForUser:false,fixture:"frozen-observation-input"})+"\n");
     const idleReadback=r.command(["quality","facts"]);
     t.assertions.assert(idleReadback.code===0,"public collector rejected bounded observation fixture: "+idleReadback.err);
-    const idleFacts=JSON.parse(idleReadback.out);
+    const idleFacts=decode(idleReadback.out,"idleReadback public capture");
     t.assertions.assert(idleFacts.attributionContext?.schema==="team-quality-attribution-context/1" && idleFacts.attributionContext.dispatch==="builtin-task/1", "native capture lacks attribution provenance for automatic dispatch/result/resource obligations");
     t.assertions.assert(idleFacts.coverage.resources===true,
       "work without a conclusion manufactured an unknown overdue resource obligation");
@@ -107,7 +123,7 @@ defineSpecialty({
     t.assertions.assert(Boolean(pauseEvent),"real public interruption did not yield a native pause observation");
     const pauseReadback=r.command(["quality","facts"]);
     t.assertions.assert(pauseReadback.code===0,"native paused-work capture failed: "+pauseReadback.err);
-    const pausedItem=JSON.parse(pauseReadback.out).workItems.find((x:any)=>x.id===original);
+    const pausedItem=decode(pauseReadback.out,"pauseReadback public capture").workItems.find((x:any)=>x.id===original);
     t.assertions.assert(pausedItem?.workActivity?.excluded.some((x:any)=>x.startAtMs<=pauseEvent.atMs && x.endAtMs>pauseEvent.atMs)
       && pausedItem.workActivity.active.some((x:any)=>x.startAtMs<=bindRound.startedAtMs && x.endAtMs>=bindRound.endedAtMs),
       "native pause was counted as effective work or actual native execution was lost");
@@ -122,7 +138,7 @@ defineSpecialty({
         waitingForUser:true,fixture:"frozen-observation-input"})+"\n");
       const stale=r.command(["quality","facts"]);
       t.assertions.assert(stale.code===0,"stale observation capture failed");
-      const activity=JSON.parse(stale.out).workItems.find((x:any)=>x.id===original).workActivity;
+      const activity=decode(stale.out,"stale public capture").workItems.find((x:any)=>x.id===original).workActivity;
       t.assertions.assert(activity.active.some((x:any)=>x.startAtMs<=bindRound.startedAtMs && x.endAtMs>=bindRound.endedAtMs)
         && !activity.excluded.some((x:any)=>x.startAtMs<bindRound.endedAtMs && x.endAtMs>bindRound.startedAtMs),
         "stale waiting sample erased independently observed native work");
@@ -130,7 +146,7 @@ defineSpecialty({
       staleRows.find(x=>x.eventId==="fixture.stale.wait").atMs=idleItem.startedAtMs-126000;
       writeFileSync(eventFile,staleRows.map(x=>JSON.stringify(x)).join("\n")+"\n");
       const expired=r.command(["quality","facts"]);
-      t.assertions.assert(expired.code===0 && JSON.parse(expired.out).workItems.find((x:any)=>x.id===original)
+      t.assertions.assert(expired.code===0 && decode(expired.out,"expired public capture").workItems.find((x:any)=>x.id===original)
         .workActivity.excluded.length===0,"expired pause observation erased later unobserved time");
     } finally {writeFileSync(eventFile,savedSamples);}
     await ok(first.collaborator,["task","finish",task.taskId,"--outcome","success","Actual first check has concluded"]);
@@ -158,7 +174,7 @@ defineSpecialty({
       writeFileSync(eventFile,withoutRelease.map(x=>JSON.stringify(x)).join("\n")+"\n");
       const noResource=r.command(["quality","facts"]);
       t.assertions.assert(noResource.code===0,"historical no-resource capture failed: "+noResource.err);
-      const noResourceFacts=JSON.parse(noResource.out);
+      const noResourceFacts=decode(noResource.out,"noResource public capture");
       const noResourceItem=noResourceFacts.workItems.find((x:any)=>x.sessionId===historicalSupport.collaborator);
       t.assertions.assert(noResourceItem?.resourceRequired===false && noResourceItem.releasedAtMs>finishedAt+600000,
         "fixture did not reach late native absence for non-resource work");
@@ -169,7 +185,7 @@ defineSpecialty({
       writeFileSync(eventFile,withoutRelease.filter(x=>!(x.kind==="resource-released" && x.operationId===original))
         .map(x=>JSON.stringify(x)).join("\n")+"\n");
       const leased=r.command(["quality","facts"]);
-      t.assertions.assert(leased.code===0 && JSON.parse(leased.out).coverage.resources===false,
+      t.assertions.assert(leased.code===0 && decode(leased.out,"leased public capture").coverage.resources===false,
         "a real resource obligation lost uncertainty about its historical release time");
     } finally {
       writeFileSync(historicalTask,savedTask);writeFileSync(historicalPath,savedIntent);writeFileSync(eventFile,savedEvents);
@@ -283,7 +299,7 @@ sys.stdin.read(1)
       "fault did not remove the real native receipt");
     const historical=r.command(["quality","facts"]);
     t.assertions.assert(historical.code===0,"public historical delivery capture failed: "+historical.err);
-    const bounded=JSON.parse(historical.out).workItems.find((x:any)=>x.id===original);
+    const bounded=decode(historical.out,"historical public capture").workItems.find((x:any)=>x.id===original);
     t.assertions.assert(bounded.deliveredAtMs==null && bounded.consumedAtMs==null
       && bounded.deliveryBounds?.some((x:any)=>x.messageId===acceptance.messageId
         && x.recipient===owner && x.acceptedUpperBoundMs===acceptance.atMs),
@@ -294,7 +310,7 @@ sys.stdin.read(1)
         .filter(x=>x.eventId!==acceptance.eventId).map(x=>JSON.stringify(x)).join("\n")+"\n");
       const withoutEvent=r.command(["quality","facts"]);
       t.assertions.assert(withoutEvent.code===0,"header-only capture failed");
-      const unproven=JSON.parse(withoutEvent.out).workItems.find((x:any)=>x.id===original);
+      const unproven=decode(withoutEvent.out,"withoutEvent public capture").workItems.find((x:any)=>x.id===original);
       t.assertions.assert(!unproven.deliveryBounds?.length && unproven.deliveryCoverageKnown===false,
         "history without a matching acceptance event invented a timed delivery bound");
     } finally {writeFileSync(eventFile,savedDeliveryEvents);}
