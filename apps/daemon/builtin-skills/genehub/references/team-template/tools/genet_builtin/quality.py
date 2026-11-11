@@ -585,9 +585,18 @@ def briefing(root,now):
                '卡：'+latest['card'], '事实：'+latest['snapshot'],
                '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
                '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
+        lines.append('有效在途小时均值（已确认下界/可能上界）：'+canonical(value.get('effectiveInFlight')).strip())
+        lines.append('R6：有未完成用户目标期间，小时均值低于2触发；暂停/等用户不计。上下界间的不确定性不能算作达标。')
         if stale:lines.append('当前整点小时尚无卡；上卡不能替代本小时。')
         lines.append('失分与缺口（按卡内顺序）：')
-        lines += ['- '+canonical(x).strip() for x in value['losses'][:16]]
+        for loss in value['losses'][:16]:
+            detail=dict(loss)
+            if detail.get('id')=='R6' and detail.get('loss') is None:
+                # A valid goals/starts capture can still await conclusions or
+                # activity observations. Do not diagnose missing starts from
+                # the score's aggregate uncertainty label; keep the card intact.
+                detail['reason']='目标/开工覆盖、活动观测或后继结论尚不足以判定；核对小时均值上下界与事实快照。'
+            lines.append('- '+canonical(detail).strip())
         lines.append('按实际原因自主选择改进；没有新增流程、岗位或改进格式要求。')
         return lines
     except (OSError,ValueError,KeyError,TypeError):
