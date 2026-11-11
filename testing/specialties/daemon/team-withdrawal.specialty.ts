@@ -100,11 +100,11 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
     const config = join(r.root, ".genethub/open.env"); writeFileSync(config, readFileSync(config, "utf8") + "\nTEAM_AGENT=ctl-cli-command\nTEAM_WAKE_GAP=999999\nTEAM_WAKE_ROUNDS=999999\nTEAM_BOARD_PORT=0\n");
     const front = await r.create("ctl-cli-command");
     const idle = (sid: string) => t.tools.waitUntil(async () => { const s = (await r.snapshot(sid)).summary; return s.status === "idle" && !s.inputSummary?.pendingMessageIds.length; }, 30000);
-    const cli = async (sid: string, args: string[]) => {
+    const cli = async (sid: string, args: string[], expected = 0) => {
       await r.send(sid, JSON.stringify({ argv: [process.env.GENEHUB_PYTHON!, join(r.root, "tools/run.py"), ...args], cwd: r.root })); await idle(sid);
       const reply = (await r.snapshot(sid)).items.filter(x => x.type === "assistantMessage").at(-1);
       if (reply?.type !== "assistantMessage") throw Error("native caller has no actual reply");
-      const result = JSON.parse(reply.text); t.assertions.assert(result.code === 0, result.out + result.err); return lastJson(result.out);
+      const result = JSON.parse(reply.text); t.assertions.assert(expected === 0 ? result.code === 0 : result.code !== 0, result.out + result.err); return expected === 0 ? lastJson(result.out) : result;
     };
     const started = await cli(front, ["task", "start", "--space", "leader", "--desc", "original work", "--request-id", "original.A", "Conclude the original bounded work"]);
     const owner = started.owner.sessionId; await idle(owner);
@@ -114,40 +114,79 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
     // Independent still-active tasks must not consume the bounded withdrawal
     // scan or prevent the concluded original from delivering its result.
     const liveIntentBytes: Array<[string, string]> = [];
+    let survivingTask: any;
     for (let i = 0; i < 2; i++) {
       const active = await cli(front, ["task", "start", "--space", "leader", "--desc", "independent active work", "--request-id", `active.${i}`, "Keep this separate task active"]);
       await idle(active.owner.sessionId);
+      if (i === 0) survivingTask=active;
       const file = r.state("task-dispatch", `taskop.active.${i}.json`);
       write(file, { version: 1, operationId: `taskop.active.${i}`, state: "creating", createdAtMs: Date.now(),
         prompt: "Active work must not be withdrawn", target, returnTo,
         request: { taskId: active.taskId, requester: active.owner.sessionId, role: "qa", desc: "active unknown support", machine } });
       liveIntentBytes.push([file, readFileSync(file, "utf8")]);
     }
+    const priorChild=await cli(survivingTask.owner.sessionId,["task","support",survivingTask.taskId,"--space","qa","--desc","completed before adoption","--request-id","pre-epoch.support","Complete a bounded actual support before the root goal ends"]);
+    await idle(priorChild.collaborator);
+    await cli(priorChild.collaborator,["task","finish",survivingTask.taskId,"--outcome","success","Actual support finished; its root goal remains active"]);
     // Real incident fixture only: durable source intent survived a receiver preflight refusal.
     // No fake Session, callback, creation success or completion is written.
     const intentPath = r.state("task-dispatch", operation + ".json");
-    write(intentPath, { version: 1, operationId: operation, state: "creating", createAttempted: true, recoverable: true,
-      createdAtMs: Date.now(), prompt: "Do not start after parent conclusion", target, returnTo,
+    write(intentPath, { version: 1, operationId: operation, state: "creating", createAttempted: true, recoverable: false,
+      createdAtMs: Date.now()-11*60000, prompt: "Do not start after parent conclusion", target, returnTo,
       request: { taskId: started.taskId, requester: owner, role: "qa", desc: "old rejected support", machine, directory: null, tier: null, model: null } });
-    await cli(owner, ["task", "finish", started.taskId, "--outcome", "success", "Original work complete"]);
     // The real Hub runs on this Node loop; keep it serving while the native
     // Team timer waits for its actual remote shell ticket and receipt.
-    const tick = await new Promise<{ code: number | null; out: string; err: string }>((resolve, reject) => {
+    const tickOnce = () => new Promise<{ code: number | null; out: string; err: string }>((resolve, reject) => {
       const child = spawn(process.env.GENEHUB_PYTHON!, [join(r.root, "tools/run.py"), "tick"],
         { cwd: r.root, env: r.env, stdio: ["ignore", "pipe", "pipe"] });
       let out = "", err = "";
       child.stdout.on("data", b => out += b); child.stderr.on("data", b => err += b);
       child.on("error", reject); child.on("close", code => resolve({ code, out, err }));
     });
+    let tick = await tickOnce(); t.assertions.assert(tick.code === 0, tick.out+tick.err);
+    const alerts = JSON.parse(r.ok(["quality", "alerts"]));
+    const incident = alerts.redLines.find((x: any) => x.rule === "R1" && x.workItemId === operation);
+    t.assertions.assert(incident, "actual overdue restored intent did not produce a native incident");
+    writeFileSync(join(r.root, "repair.md"), "Repair still pending; native receiver fence not yet observed");
+    writeFileSync(join(r.root, "adoption.md"), "Unverified update must not clear a live obligation");
+    const resolveArgs = ["quality", "resolve", incident.id, "--repair-evidence", "repair.md", "--adoption-evidence", "adoption.md"];
+    await cli(owner, resolveArgs, 1);
+    t.assertions.assert(!JSON.parse(readFileSync(r.state("quality", "redline-state.json"), "utf8")).measurementEpochs?.length,
+      "an unresolved obligation started a new measurement window");
+    await cli(owner, ["task", "finish", started.taskId, "--outcome", "success", "Must not hide the unconfirmed preparation"], 1);
+    await cli(owner, ["task", "finish", started.taskId, "--outcome", "failed", "Unconfirmed preparation prevented acceptance; original work retained"]);
+    tick = await tickOnce();
     t.assertions.assert(tick.code === 0, tick.out + tick.err);
     const intent = JSON.parse(readFileSync(intentPath, "utf8"));
     t.assertions.assert(intent.state === "withdrawn" && intent.withdrawReceipt.withdrawn && !intent.sessionId, JSON.stringify(intent));
     t.assertions.assert(existsSync(r.state("done", owner + ".json")), "original Owner result not settled after confirmed fence");
     t.assertions.assert(liveIntentBytes.every(([file, bytes]) => readFileSync(file, "utf8") === bytes), "active task preparation was touched during another task's withdrawal");
     const task = JSON.parse(readFileSync(r.state("tasks", started.taskId + ".json"), "utf8"));
-    t.assertions.assert(task.state === "delivered" && task.owner.sessionId === owner, "original task was replaced or left active");
+    t.assertions.assert(task.state === "delivered" && task.finished.outcome === "failed" && task.owner.sessionId === owner, "original honest conclusion was replaced or left active");
     const original = { id: operation, workspaceId: qa.id, role: "qa", desc: "old rejected support", text: "Do not start after parent conclusion", tier: null, model: null, media: null, prepareOnly: true, returnTo };
     const late = r.command(["receive", JSON.stringify(original)]);
     t.assertions.assert(late.code !== 0 && lastJson(late.out).error?.state === "没有创建或激活会话", "late original request restarted after conclusion");
+    writeFileSync(join(r.root, "repair.md"), "Actual public timer obtained receiver withdrawal: "+JSON.stringify(intent.withdrawReceipt));
+    writeFileSync(join(r.root, "adoption.md"), "Native parent delivered; late prepare remains fenced; original operation "+operation);
+    await cli(owner, ["quality", "resolve", incident.id, "--repair-evidence", "../outside.md", "--adoption-evidence", "adoption.md"], 1);
+    const beforeResolve = Date.now();
+    const closed = await cli(owner, resolveArgs);
+    t.assertions.assert(closed.status === "closed" && closed.closedAtMs >= beforeResolve && closed.resolution.nativeFactsSha256,
+      "verified native repair/adoption did not close with current evidence");
+    const statePath = r.state("quality", "redline-state.json"), closedState = JSON.parse(readFileSync(statePath, "utf8"));
+    t.assertions.assert(closedState.measurementEpochs?.length === 1 && closedState.measurementEpochs[0].atMs === closed.closedAtMs,
+      "new measurement epoch did not start at the actual last verified closure");
+    const facts=await cli(owner,["quality","facts"]);
+    const tree=facts.taskTrees.find((x: any)=>x.taskId===survivingTask.taskId);
+    t.assertions.assert(facts.measurementWindow.startAtMs===closed.closedAtMs
+      && tree?.sessions.some((x: any)=>x.sessionId===priorChild.collaborator && x.readable===true),
+      "moving the metric cutoff omitted a readable completed member of a still-active native task tree");
+    await cli(owner, resolveArgs);
+    t.assertions.assert(JSON.parse(readFileSync(statePath, "utf8")).measurementEpochs.length === 1,
+      "idempotent resolution reset the measurement window again");
+    tick = await tickOnce();t.assertions.assert(tick.code === 0, tick.out+tick.err);
+    const after = JSON.parse(r.ok(["quality", "alerts"]));
+    t.assertions.assert(!after.redLines.some((x: any) => x.id === incident.id), "old resolved occurrence reopened without a new native breach");
+    t.note("Original restoration/fence boundaries plus actual Agent-bound resolve rejects open/outside evidence; verified receiver adoption starts one epoch without rewriting history. Not a live experimental Team intervention.");
   } finally { await dispose(); relay.stop(); await hub.stop(); }
 });
