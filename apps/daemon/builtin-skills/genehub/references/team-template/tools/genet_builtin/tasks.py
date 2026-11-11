@@ -734,30 +734,40 @@ def release_local(t, root, record):
 
 
 def reconcile_withdrawals(t, root):
-    """Fence only uncreated remote preparations after their parent concluded.
+    """Settle uncreated remote preparations, without replaying business.
 
     No receipt is not a negative acknowledgement. The executor must first
     serialize a durable fence with its normal receive/install operations.
+    Active tasks retain their goal: overdue unknown attempts may only obtain
+    a negative acknowledgement, never create/activate or release existing work.
     """
-    concluded = {x.get('taskId') for x in records(t, root, 'tasks')
-                 if x.get('finished') or x.get('state') in ('delivered', 'canceled')}
+    tasks = records(t, root, 'tasks')
+    concluded = {x.get('taskId') for x in tasks if x.get('finished') or x.get('state') in ('delivered', 'canceled')}
+    active = {x.get('taskId') for x in tasks if x.get('state') == 'active' and not x.get('finished')
+              and not (x.get('control') and not x['control'].get('complete'))}
     candidates = [x for x in records(t, root, 'task-dispatch')
                   if x.get('state') == 'creating' and not x.get('sessionId')
-                  and x.get('request', {}).get('taskId') in concluded
+                  and (x.get('request', {}).get('taskId') in concluded or
+                       (x.get('request', {}).get('taskId') in active and x.get('recoverable')
+                        and x.get('createAttempted') and x.get('createdAtMs', t.now_ms()) + 600_000 <= t.now_ms()))
                   and x.get('request', {}).get('machine') and x.get('target')
                   and not x.get('lock') and not x.get('resourceBinding')
                   and x.get('withdrawRetryAtMs', 0) <= t.now_ms()]
     candidates.sort(key=lambda x: x.get('withdrawCheckedAtMs', 0))
     for snapshot in candidates[:2]:
         operation = snapshot['operationId']
-        with t.inbox_lock(root, operation, purpose='已结束任务准备撤回'):
+        with t.inbox_lock(root, operation, purpose='远端准备结果对账'):
             path = t.state_dir(root, 'task-dispatch', operation + '.json')
             intent = t.read_dispatch_record(path)
             if (not intent or intent.get('state') != 'creating' or intent.get('sessionId')
                     or intent.get('lock') or intent.get('resourceBinding')):
                 continue
             task = read_task(t, root, intent['request']['taskId'])
-            if not task.get('finished') and task.get('state') not in ('delivered', 'canceled'):
+            settling = not task.get('finished') and task.get('state') not in ('delivered', 'canceled')
+            if settling and (task.get('state') != 'active' or
+                             (task.get('control') and not task['control'].get('complete')) or
+                             not intent.get('recoverable') or not intent.get('createAttempted') or
+                             intent.get('createdAtMs', t.now_ms()) + 600_000 > t.now_ms()):
                 continue
             request, target = intent['request'], intent['target']
             # Reconstruct the exact original target-side prepare envelope.
@@ -771,14 +781,40 @@ def reconcile_withdrawals(t, root):
             t.write_json(path, intent)
             try:
                 result = t.remote_receive(target, dict(id=operation, workspaceId=target['workspaceId'],
-                    role=request['role'], operation='withdraw-prepare', originalRequest=original))
+                    role=request['role'], operation='settle-prepare' if settling else 'withdraw-prepare', originalRequest=original))
                 intent['withdrawReceipt'] = result
                 if result.get('withdrawn') is True and result.get('id') == operation:
                     intent.update(state='withdrawn', withdrawnAtMs=t.now_ms())
+                    if settling and result.get('settlement') == 'not-created':
+                        intent['prepareSettlement'] = 'not-created'
                 else:
                     intent['withdrawError'] = 'executor retained an existing receipt or resource'
             except (t.ExpertError, OSError, subprocess.TimeoutExpired) as error:
                 intent['withdrawError'] = str(error)[:600]
+            t.write_json(path, intent)
+    # Durable negative result precedes notification. Retry uses the same native
+    # input identity and body; a paused requester remains paused.
+    notices = [x for x in records(t, root, 'task-dispatch')
+               if x.get('state') == 'withdrawn' and x.get('prepareSettlement') == 'not-created'
+               and not x.get('settlementNoticeQueuedAtMs') and x.get('settlementNoticeRetryAtMs', 0) <= t.now_ms()]
+    notices.sort(key=lambda x: x.get('settlementNoticeRetryAtMs', 0))
+    for snapshot in notices[:2]:
+        operation = snapshot['operationId']
+        with t.inbox_lock(root, operation, purpose='准备失败结果送达'):
+            path = t.state_dir(root, 'task-dispatch', operation + '.json')
+            intent = t.read_dispatch_record(path)
+            if (not intent or intent.get('state') != 'withdrawn' or intent.get('prepareSettlement') != 'not-created'
+                    or intent.get('settlementNoticeQueuedAtMs')):
+                continue
+            intent['settlementNoticeRetryAtMs'] = t.now_ms() + 300_000
+            t.write_json(path, intent)
+            try:
+                t.deliver_or_notice(root, intent['request']['requester'], 'result', 'team-reconcile',
+                    '派单 %s 的执行端已确认没有创建会话，并持久拒绝迟到的原准备请求。本次业务未执行；原任务与已有成果保留。' % operation,
+                    operation, 'not-created')
+                intent['settlementNoticeQueuedAtMs'] = t.now_ms()
+            except (t.ExpertError, OSError, subprocess.TimeoutExpired) as error:
+                intent['settlementNoticeError'] = str(error)[:600]
             t.write_json(path, intent)
 
 

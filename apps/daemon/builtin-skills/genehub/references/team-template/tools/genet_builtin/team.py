@@ -480,10 +480,11 @@ def remote_receive(target, request):
             "receive", "-"]
     # The mandatory flag makes an older receiver reject at argparse, before it
     # could interpret a new operation as an ordinary prepare request.
-    withdrawing = request.get("operation") == "withdraw-prepare"
+    settling = request.get("operation") == "settle-prepare"
+    withdrawing = request.get("operation") == "withdraw-prepare" or settling
     if withdrawing:
         argv[argv.index("--timeout") + 1] = "15"
-        argv.append("--require-dispatch-fence")
+        argv.append("--require-prepare-settlement" if settling else "--require-dispatch-fence")
     operation = request.get('taskOperation') or {}
     if request.get('operation') == 'task-operation' and (operation.get('follows') is not None or operation.get('standing')):
         argv.append('--require-quality-metadata')
@@ -630,8 +631,9 @@ def _cmd_receive(args):
     with inbox_lock(role_root, "receive"):
         old = read_dispatch_record(receipt_path)
         operation = request.get("operation")
-        if operation == "withdraw-prepare":
-            if not args.require_dispatch_fence:
+        if operation in ("withdraw-prepare", "settle-prepare"):
+            settling = operation == "settle-prepare"
+            if not (args.require_prepare_settlement if settling else args.require_dispatch_fence):
                 raise ExpertError("撤回需要显式兼容协议", "没有改回执或资源", "使用支持撤回屏障的源端与执行端")
             original = request.get("originalRequest")
             if (not isinstance(original, dict) or original.get("id") != key
@@ -646,8 +648,29 @@ def _cmd_receive(args):
                     raise ExpertError("撤回内容与原意图不同", "原回执保留", "核对原编号和完整准备内容")
                 withdrawn = old.get("status") == "withdrawn"
                 print(json.dumps({"ok": True, "withdrawn": withdrawn, "id": key,
+                                  "settlement": old.get("settlement"),
                                   "reason": "fenced" if withdrawn else "existing receipt retained"}))
                 return
+            if settling:
+                # The receiver normally writes its receipt before native create.
+                # A missing receipt alone is still insufficient after disk loss:
+                # retain any native reservation under this exact creation ID.
+                creation = "create." + hashlib.sha256(("receive." + hashlib.sha256(key.encode()).hexdigest()).encode()).hexdigest()
+                sessions = os.path.join(role_root, ".genethub", "sessions")
+                if os.path.isdir(sessions):
+                    with os.scandir(sessions) as entries:
+                        for index, entry in enumerate(entries):
+                            if index >= 4096:
+                                raise ExpertError("原生创建记录超过单次核对上限", "原意图保留，没有创建或撤回", "核对原操作的创建记录")
+                            if not entry.is_dir():
+                                continue
+                            native = read_dispatch_record(os.path.join(entry.path, "creation.json"))
+                            if native is not None and not isinstance(native.get("operation"), str):
+                                raise ExpertError("原生创建记录缺少操作标识", "原意图保留，没有创建或撤回", "核对原创建记录")
+                            if native and native.get("operation") == creation:
+                                print(json.dumps({"ok": True, "withdrawn": False, "id": key,
+                                                  "reason": "native creation reservation retained"}))
+                                return
             configured = open_env(role_root).get("WORKTREE_DIR")
             if configured:
                 directory = resolve_expert_dir(root, configured)
@@ -660,9 +683,12 @@ def _cmd_receive(args):
                     return
             # Same receive/install locks as prepare: an older in-flight prepare
             # completes first, or every later prepare observes this durable fence.
-            write_json(receipt_path, {"request": original, "status": "withdrawn", "atMs": now_ms(),
-                                      "fenceProtocol": 1})
-            print(json.dumps({"ok": True, "withdrawn": True, "id": key, "reason": "fenced"}))
+            fence = {"request": original, "status": "withdrawn", "atMs": now_ms(), "fenceProtocol": 1}
+            if settling:
+                fence["settlement"] = "not-created"
+            write_json(receipt_path, fence)
+            print(json.dumps({"ok": True, "withdrawn": True, "id": key, "reason": "fenced",
+                              "settlement": fence.get("settlement")}))
             return
         if old is not None and old.get("status") == "withdrawn":
             raise ExpertError("派单准备已持久撤回", "没有创建或激活会话", "查询原任务；新业务必须使用新任务编号", code="dispatchWithdrawn")
@@ -5143,6 +5169,7 @@ def main(argv):
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
     receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
+    receive.add_argument("--require-prepare-settlement", action="store_true", help="require exact no-create acknowledgement; old receivers must reject before mutation")
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
