@@ -410,6 +410,7 @@ sys.exit(r.returncode)
       return JSON.parse(result.stdout);
     };
     const preparedFacts = await qualityFacts();
+    t.assertions.assert(preparedFacts.scoringModel==="tq/2" && Array.isArray(preparedFacts.taskTrees), "native facts omitted versioned task-tree execution inputs");
     t.assertions.assert(preparedFacts.workItems.length === 1 && preparedFacts.workItems[0].startedAtMs === null,
       "uncertain preparation was counted as native execution");
     const ownerReply = await callTask(callerSid, sourceRoot, beginOwner);
@@ -426,7 +427,13 @@ sys.exit(r.returncode)
     const nativeStart = (await cliJson(["session", "rounds", remoteOwner, "--limit", "100"], true)).page.rounds
       .sort((a: any, b: any) => a.startedAtMs - b.startedAtMs)[0];
     t.assertions.assert(nativeStart?.userItemId?.startsWith("activate."), "real remote activation input unavailable");
-    const startedWork = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
+    const startedFacts=await qualityFacts();
+    const startedWork = startedFacts.workItems.find((x: any) => x.sessionId === remoteOwner);
+    const startedTree=startedFacts.taskTrees.find((x:any)=>x.taskId===remoteTask.taskId);
+    const treeOwner=startedTree?.sessions.find((x:any)=>x.sessionId===remoteOwner);
+    t.assertions.assert(!!treeOwner && treeOwner.readable && treeOwner.runs.some((x:any)=>x.startAtMs===nativeStart.startedAtMs)
+      && !startedTree.sessions.some((x:any)=>x.sessionId===callerSid),
+      "native R6 task tree omitted the real remote Owner execution or counted the front Session");
     t.assertions.assert(startedWork?.startedAtMs === nativeStart.startedAtMs,
       "remote task activation lost its independently observed native start: " + JSON.stringify(startedWork));
     const qualityEvents = readFileSync(path.join(sourceRoot, ".genethub/team/events/events.jsonl"), "utf8")
@@ -622,7 +629,13 @@ sys.exit(r.returncode)
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
     const decisionMessages=(await inspectSession(remoteOwner,true)).items.filter((i:any)=>i.type==="userMessage" && i.text.includes("REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE"));
     t.assertions.assert(decisionMessages.length===1 && decisionMessages[0].text.includes("本任务在途") && decisionMessages[0].text.includes("目标5"), "remote Owner lost a decision signal or received duplicate result contexts");
-    const finalWork = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
+    const finalFacts=await qualityFacts();
+    const finalWork = finalFacts.workItems.find((x: any) => x.sessionId === remoteOwner);
+    const finalTree=finalFacts.taskTrees.find((x:any)=>x.taskId===remoteTask.taskId);
+    t.assertions.assert(finalTree?.sessions.some((x:any)=>x.sessionId===remoteOwner)
+      && finalTree.sessions.some((x:any)=>x.sessionId===support && x.readable && x.runs.length>0)
+      && new Set(finalTree.sessions.map((x:any)=>x.sessionId)).size===finalTree.sessions.length,
+      "R6 task tree lost actual multi-machine support work or counted one Session twice");
     t.assertions.assert(finalWork?.startedAtMs === nativeStart.startedAtMs
       && finalWork.activationMessageId === nativeStart.userItemId,
       "later work, reconciliation or receipt replay moved the original remote activation");

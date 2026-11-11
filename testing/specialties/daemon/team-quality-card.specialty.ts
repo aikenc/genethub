@@ -205,6 +205,48 @@ defineSpecialty({
   legacyItem.releasedAtMs=undefined;legacyItem.releaseTimeBasis=undefined;
   t.assertions.assert(card(legacyRelease).value.redLines.R5.triggered===null,
     "an overdue resource with no held/released observation became a formal clear");
+  // Frozen R6 task-hour oracles; tree sessions have no eventual conclusions.
+  const r6Minute=60000;
+  const r6Runs=(...pairs:number[][])=>pairs.map(([a,b])=>({startAtMs:start+a*r6Minute,endAtMs:start+b*r6Minute}));
+  const r6Session=(sessionId:string, intervals:any[], readable=true)=>({sessionId,runs:intervals,readable});
+  const r6Tree=(taskId:string,minutes:number,sessions:any[],excluded:any[]=[])=>({taskId,openedAtMs:start,endedAtMs:start+minutes*r6Minute,sessions,excluded});
+  const r6TaskCard=(trees:any[])=>{const v:any=clone();v.scoringModel="tq/2";v.taskTrees=trees;v.taskTreesSourceComplete=true;return card(v).value;};
+  const r6Short=r6TaskCard([r6Tree("r6Short",10,[r6Session("o",r6Runs([0,10]))])]);
+  t.assertions.assert(r6Short.model==="tq/2" && r6Short.redLines.R6.applicable===false && r6Short.redLines.R6.triggered===false,
+    "ten-minute task was judged or the card hid its scoring model");
+  const r6Serial=r6TaskCard([r6Tree("r6Serial",50,[r6Session("o",r6Runs([0,50]))])]);
+  t.assertions.assert(r6Serial.redLines.R6.triggered===true && r6Serial.taskParallelism[0].low===1,
+    "fifty-minute serial work escaped task-based R6");
+  const r6Parallel=r6TaskCard([r6Tree("r6Parallel",50,[r6Session("o",r6Runs([0,5],[45,50])),r6Session("a",r6Runs([5,45])),r6Session("b",r6Runs([5,40])),r6Session("c",r6Runs([10,45]))])]);
+  t.assertions.assert(r6Parallel.redLines.R6.triggered===false && Math.abs(r6Parallel.taskParallelism[0].low-2.4)<1e-9,
+    "native in-flight work waited for a future conclusion or Agent time was miscounted");
+  const r6Paused=r6TaskCard([r6Tree("r6Paused",60,[r6Session("o",r6Runs([0,10],[50,60]))],r6Runs([10,50]))]);
+  t.assertions.assert(r6Paused.redLines.R6.applicable===false && r6Paused.taskParallelism[0].totalEffectiveMs===20*r6Minute,
+    "forty-minute pause inflated effective task duration");
+  const r6Unread=r6TaskCard([r6Tree("r6Unread",40,[r6Session("o",r6Runs([0,40])),r6Session("remote",[],false)])]);
+  t.assertions.assert(r6Unread.redLines.R6.triggered===null && r6Unread.taskParallelism[0].low===1 && r6Unread.taskParallelism[0].high===2,
+    "unread remote Session was silently treated as idle or productive");
+  const r6Boundary:any=r6Tree("prior-half-hour",15,[r6Session("o",r6Runs([-15,15]))]);r6Boundary.openedAtMs=start-15*r6Minute;
+  const r6AtBoundary=r6TaskCard([r6Boundary]);
+  t.assertions.assert(r6AtBoundary.redLines.R6.triggered===true && r6AtBoundary.taskParallelism[0].hourEffectiveMs===15*r6Minute,
+    "R6 confused cumulative thirty minutes with thirty minutes inside this hour");
+  r6Boundary.endedAtMs=start+15*r6Minute-1;
+  t.assertions.assert(r6TaskCard([r6Boundary]).redLines.R6.applicable===false,
+    "less than fifteen minutes in this hour was judged");
+  const r6Overlaps=r6TaskCard([r6Tree("overlap",50,[r6Session("o",r6Runs([0,50],[0,50],[10,30]))])]);
+  t.assertions.assert(r6Overlaps.taskParallelism[0].low===1 && r6Overlaps.redLines.R6.triggered===true,
+    "overlapping executions or parallel tools in one Session manufactured two Agents");
+  const r6Proven=r6TaskCard([r6Tree("r6Proven",40,[r6Session("o",r6Runs([0,40])),r6Session("a",r6Runs([0,40])),r6Session("missing",[],false)])]);
+  t.assertions.assert(r6Proven.redLines.R6.triggered===false,
+    "an unread Session erased two already proven Agent hours");
+  const r6Impossible=r6TaskCard([r6Tree("r6Impossible",50,[r6Session("o",r6Runs([0,10])),r6Session("missing",[],false)])]);
+  t.assertions.assert(r6Impossible.redLines.R6.triggered===true,
+    "an unread Session hid a proven upper bound below two");
+  const laterSession:any=r6Session("future-remote",[],false);laterSession.openedAtMs=start+h+1;
+  const pastSerial=r6TaskCard([r6Tree("no-future-members",50,[r6Session("o",r6Runs([0,50])),laterSession])]);
+  t.assertions.assert(pastSerial.redLines.R6.triggered===true && pastSerial.taskParallelism[0].high===1
+    && pastSerial.taskParallelism[0].missingSessionIds.length===0,
+    "a future Session introduced phantom uncertainty into a prior hour");
   const importedNative=clone();importedNative.captureKind="native-hour";
   t.assertions.assert(card(importedNative).value.officialCapture===false,
     "an external snapshot self-declared official native provenance");
