@@ -12,7 +12,7 @@
 | 构建回执 | SHA256 `639df2e22501319dc2d1b12c888107d6d2bf50cf768db6be5686b9d826286bad` |
 | 实际平台 | 源机、Mac均 `0.0.1-dev.8`；原设备身份和指纹保留 |
 | 签名组件 | SHA256 `01e9b16729735886c342378220d5c5a97625450b10405a81801df1a9e9128fe1`，31,784,492字节；两端ABI相同 |
-| Mac传输 | `tr_df4a90b8d71a427b89b095a0463aadda` completed，完整哈希一致；既有稳定签名宿主未替换，未kickstart |
+| Mac传输 | `tr_df4a90b8d71a427b89b095a0463aadda` completed，完整哈希一致；既有宿主未替换，未kickstart。11-11后续核对更正：宿主为 ad-hoc / cdhash-only 签名，未证明稳定证书签名；原“稳定签名宿主”表述不准确，不能用来证明以后替换宿主的授权继承 |
 | 运行验证 | 官方identity、脱离启动会话的liveness、Fabric v4与普通会话/页面/跨项目smoke通过；Mac原生context和6个公共包文件哈希通过 |
 | 发布定向测试 | `261111-0815-quality-targeted-publish-5d2b`：10/10通过，`scope=feedback`、qualified、inputDrift=false；不是完整dev资格 |
 | 必要范围 | 评分数学、真实生命周期、输入读入、远程派单/归还；目录后台刷新/冷读/错误保留；回答尾部持久化与停止身份保护；异ABI拒绝 |
