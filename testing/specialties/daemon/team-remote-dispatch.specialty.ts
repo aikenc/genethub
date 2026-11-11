@@ -542,6 +542,43 @@ sys.exit(r.returncode)
     }, 15000);
     const failureNotes = (await inspectSession(callerSid)).items.filter((i: any) => i.type === "userMessage" && i.text.includes(refusedIntent.operationId) && i.text.includes("没有创建"));
     t.assertions.assert(failureNotes.length === 1, "failed preparation was not reported exactly once to its original requester");
+    // A newly refused attempt gets the same real receiver proof before the
+    // ten-minute unresolved-dispatch boundary. Restored age is fixture data,
+    // not a mocked clock; fresh calls and an existing writer stay protected.
+    writeFileSync(roleEnv, `WORKTREE_DIR=${remoteDirectory}\n`);
+    let timelyRefusal: Awaited<ReturnType<typeof callTask>>;
+    try {
+      timelyRefusal = await callTask(callerSid, sourceRoot,
+        beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.timely-refusal" : v));
+    } finally {
+      if (previousRoleEnv) writeFileSync(roleEnv, previousRoleEnv); else unlinkSync(roleEnv);
+    }
+    t.assertions.assert(timelyRefusal.code !== 0 && timelyRefusal.err.includes("写锁"),
+      "timeliness fixture did not reach the real competing writer refusal");
+    const timelyPath = readdirSync(intentsRoot).map(f => path.join(intentsRoot, f)).find(f => {
+      const row = JSON.parse(readFileSync(f, "utf8"));
+      return row.state === "creating" && !row.sessionId;
+    })!;
+    t.assertions.assert(Boolean(timelyPath), "new refused preparation lost its original intent");
+    const timelyIntent = JSON.parse(readFileSync(timelyPath, "utf8"));
+    const timelyReceiver = path.join(targetDispatchDir, createHash("sha256").update(timelyIntent.operationId).digest("hex") + ".json");
+    const timelyCount = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length;
+    const freshHook = await script(["hook"]);
+    t.assertions.assert(freshHook.code === 0 && JSON.parse(readFileSync(timelyPath, "utf8")).state === "creating"
+      && !existsSync(timelyReceiver) && readFileSync(boundReply.lock).equals(originalLease),
+      "fresh preparation was fenced before its bounded call could finish");
+    timelyIntent.createdAtMs = Date.now() - 180000;
+    writeFileSync(timelyPath, JSON.stringify(timelyIntent));
+    const timelyHook = await script(["hook"]);
+    const timelyDone = JSON.parse(readFileSync(timelyPath, "utf8"));
+    t.assertions.assert(timelyHook.code === 0 && timelyDone.state === "withdrawn"
+      && timelyDone.withdrawnAtMs - timelyIntent.createdAtMs < 600000,
+      "uncreated preparation waited until the unresolved-dispatch deadline before reconciliation");
+    const timelyFence = targetReceipt(timelyIntent.operationId);
+    t.assertions.assert(timelyFence.status === "withdrawn" && timelyFence.settlement === "not-created"
+      && readFileSync(boundReply.lock).equals(originalLease)
+      && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === timelyCount,
+      "timely negative acknowledgement created work or changed the independent writer");
     const secondOwnerReply = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.independent" : v));
     t.assertions.assert(secondOwnerReply.code === 0, "the remote Space was still treated as an exclusive workstation: " + secondOwnerReply.err);
     const secondTask = JSON.parse(secondOwnerReply.out.trim().split("\n").at(-1)!);
