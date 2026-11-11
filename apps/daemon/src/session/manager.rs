@@ -491,6 +491,8 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// Fences admission for loaded and cold Sessions throughout daemon teardown.
+    shutting_down: AtomicBool,
     /// Serializes disk rehydration without holding the map's write lock.
     live_load: Mutex<()>,
     creation_gate: Mutex<()>,
@@ -536,6 +538,7 @@ impl SessionManager {
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
             live_load: Mutex::new(()),
             creation_gate: Mutex::new(()),
             processes: crate::processes::Processes::new(),
@@ -5275,6 +5278,7 @@ impl SessionManager {
     /// Fence delivery before the daemon concurrently stops Registry processes.
     /// Their terminal events are shutdown, not a new Human pause or crash.
     pub(crate) async fn prepare_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         for live in self.sessions.read().await.values() {
             live.closing.store(true, Ordering::SeqCst);
         }
@@ -5283,7 +5287,17 @@ impl SessionManager {
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
-        let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
+        self.prepare_shutdown().await;
+        // Keep the original writers addressable until the manager is dropped.
+        // Draining this map while RPC ingress is still alive lets a reader
+        // rehydrate a second Live whose writes race the retiring original.
+        let sessions: Vec<(String, Arc<Live>)> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, live)| (id.clone(), live.clone()))
+            .collect();
         // The host has its own exit budget. Bound the whole drain instead of
         // letting one wedged Agent multiply its per-step timeouts.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

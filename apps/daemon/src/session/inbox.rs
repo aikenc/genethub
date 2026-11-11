@@ -127,6 +127,10 @@ impl SessionManager {
         source: &str,
         origin: Option<InputOrigin>,
     ) -> Result<()> {
+        anyhow::ensure!(
+            !self.shutting_down.load(Ordering::SeqCst),
+            "the daemon is shutting down; retry the same input after reconnecting"
+        );
         if message_id.is_empty()
             || message_id.len() > 128
             || !message_id
@@ -156,7 +160,7 @@ impl SessionManager {
         let workspace_id = live.meta.lock().await.workspace_id.clone();
         self.refuse_if_terminated(&workspace_id).await?;
         let _admission = live.inbox_lock.lock().await;
-        if live.closing.load(Ordering::SeqCst) {
+        if self.shutting_down.load(Ordering::SeqCst) || live.closing.load(Ordering::SeqCst) {
             bail!("the session is closing");
         }
         if let Some(existing) = live
