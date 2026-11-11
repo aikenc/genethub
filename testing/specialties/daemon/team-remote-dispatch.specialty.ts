@@ -348,6 +348,14 @@ sys.exit(r.returncode)
     t.note("TaskOwner remote: preparing with dropped stdout");
     const lostOwner = await callTask(callerSid, sourceRoot, beginOwner);
     t.assertions.assert(lostOwner.code !== 0, "lost prepare was falsely acknowledged as complete");
+    const qualityFacts = async () => {
+      const result = await script(["quality", "facts"]);
+      t.assertions.assert(result.code === 0, "public quality capture failed: " + result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    const preparedFacts = await qualityFacts();
+    t.assertions.assert(preparedFacts.workItems.length === 1 && preparedFacts.workItems[0].startedAtMs === null,
+      "uncertain preparation was counted as native execution");
     const ownerReply = await callTask(callerSid, sourceRoot, beginOwner);
     t.assertions.assert(ownerReply.code === 0, "same-operation remote prepare could not recover: " + ownerReply.err);
     const remoteTask = JSON.parse(ownerReply.out.trim().split("\n").at(-1)!);
@@ -359,6 +367,28 @@ sys.exit(r.returncode)
     },30000);
     const sourceTaskFile = path.join(sourceRoot, ".genethub/team/tasks", remoteTask.taskId + ".json");
     t.assertions.assert(JSON.parse(readFileSync(sourceTaskFile, "utf8")).owner.sessionId === remoteOwner, "remote input started without durable source ownership");
+    const nativeStart = (await cliJson(["session", "rounds", remoteOwner, "--limit", "100"], true)).page.rounds
+      .sort((a: any, b: any) => a.startedAtMs - b.startedAtMs)[0];
+    t.assertions.assert(nativeStart?.userItemId?.startsWith("activate."), "real remote activation input unavailable");
+    const startedWork = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
+    t.assertions.assert(startedWork?.startedAtMs === nativeStart.startedAtMs,
+      "remote task activation lost its independently observed native start: " + JSON.stringify(startedWork));
+    const qualityEvents = readFileSync(path.join(sourceRoot, ".genethub/team/events/events.jsonl"), "utf8")
+      .trim().split("\n").map(line => JSON.parse(line));
+    t.assertions.assert(qualityEvents.some(x => x.kind === "input-accepted" && x.operationId === startedWork.id
+      && x.messageId === nativeStart.userItemId), "remote acceptance event names a message that never ran");
+    const dispatchFile = path.join(sourceRoot, ".genethub/team/task-dispatch", startedWork.id + ".json");
+    const dispatchBytes = readFileSync(dispatchFile);
+    // Explicit corrupt-ledger fixture: actual native executions remain intact,
+    // but without an exact operation binding none may be attributed to it.
+    try {
+      const invalidBinding = JSON.parse(dispatchBytes.toString());
+      invalidBinding.pending.remoteDispatch.id = "unrelated-operation";
+      writeFileSync(dispatchFile, JSON.stringify(invalidBinding));
+      const unbound = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
+      t.assertions.assert(unbound?.startedAtMs === null && unbound.activationMessageId === null,
+        "an unrelated native Round was used to fill an unbound remote start");
+    } finally { writeFileSync(dispatchFile, dispatchBytes); }
     const remoteDirectory = path.join(targetRoot, "remote-owner-workstation"); mkdirSync(remoteDirectory);
     const bound = await callTask(remoteOwner, targetRoot, ["task", "bind-directory", remoteTask.taskId, "--directory", remoteDirectory], true);
     t.assertions.assert(bound.code === 0, "remote Owner could not claim an executor-side directory: " + bound.err);
@@ -398,6 +428,10 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"task return restored a fake local QA workspace");
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
+    const finalWork = (await qualityFacts()).workItems.find((x: any) => x.sessionId === remoteOwner);
+    t.assertions.assert(finalWork?.startedAtMs === nativeStart.startedAtMs
+      && finalWork.activationMessageId === nativeStart.userItemId,
+      "later work, reconciliation or receipt replay moved the original remote activation");
     // Restored previous-owner references can outgrow the small exchange head
     // without increasing the number of currently running workers.
     const evidenceRefs = Array.from({length: 300}, (_, n) => "s_" + n.toString(16).padStart(32, "0"));
