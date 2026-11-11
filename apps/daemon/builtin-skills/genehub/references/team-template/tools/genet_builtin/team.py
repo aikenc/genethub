@@ -4500,7 +4500,10 @@ def reconcile(root, name, mine):
                                 pass
                         if not parent_busy:
                             finish()
-                elif record.get("kind") in ("reflect", "team-reflect") or age > giveup_after:
+                # An unfinished Task remains an obligation while its native
+                # session is paused or failed. Keep observing it until explicit
+                # continuation or conclusion; age alone cannot settle it.
+                elif not has_children and (record.get("kind") in ("reflect", "team-reflect") or age > giveup_after):
                     finish()
                 continue
             # The explicit task conclusion is a result even if an earlier
