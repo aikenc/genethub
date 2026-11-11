@@ -12,6 +12,7 @@ description: 承接团队 Task Owner、专业协作与验收任务；自己实�
 - 未认领项目写目录时先准备独立工位并 `task bind-directory <taskId> --directory <绝对目录>`，然后在其中工作。只协调可不绑定项目，报告放本任务的独立输出位置。
 - 长短任务的并行默认见 team-core `references/task-owner.md`：预计超过30分钟且可拆时并行目标5、最少2；短任务直接完成。需要协作时 `task support <taskId> --space <岗位> --desc "<支持目标>" --request-id <稳定支持编号> "<边界、输入、产物与验收>"`；编码协作者指定独立 `--directory`，远端用固定岗位绑定。
 - 可以一次派多项支持，然后立即结束本轮；不 sleep、不轮询、不靠常驻 Agent 空转等待。timer 按本任务关系收齐结果并唤醒。
+- 跨回合的后台构建、测试或安装可用 `task job register/status/finish` 登记有界原生进程，避免只看到会话 idle；PID 从原生 `genet process list` 取，期限和真实退出分别核对，详见 team-core `references/quality.md`。登记不启动或停止作业，不替代业务验收。
 - idle 只表示当前没有执行，等待支持、用户暂停和未知创建结果都不等于可复用。追加要求回到原会话，支持结果按原任务与本次派单归属，不能按岗位简称挑最近会话。
 - 收到结果后核对真实提交、产物和验证，整合自己的任务工位。共享主分支或发布资源只在实际操作时串行，不与协作者共用可写 checkout。
 - 收尾前 `task finish <taskId> --outcome success "<提交/产物/验收证据>"`，再给公开最终结论。失败或阻塞使用 failed/blocked，不能把接收或中间回复当成交付。

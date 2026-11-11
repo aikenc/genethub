@@ -490,6 +490,8 @@ def remote_receive(target, request):
     operation = request.get('taskOperation') or {}
     if request.get('operation') == 'task-operation' and (operation.get('follows') is not None or operation.get('standing')):
         argv.append('--require-quality-metadata')
+    if request.get('operation') == 'task-operation' and operation.get('task_action') == 'job':
+        argv.append('--require-background-jobs')
     cause = ""
     try:
         done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=25 if withdrawing else 120)
@@ -501,7 +503,7 @@ def remote_receive(target, request):
                          if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
         required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
-                                          "--require-quality-metadata") if flag in argv), None)
+                                          "--require-quality-metadata", "--require-background-jobs") if flag in argv), None)
         if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
             diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
                                  if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
@@ -5012,6 +5014,12 @@ def cmd_hook(_args):
             routines_ok = False
             report(root, name, mine, error.text())
     try:
+        from . import background_jobs
+        try:
+            background_jobs.observe(sys.modules[__name__], root)
+        except Exception:
+            # Optional measurement is not a new scheduling dependency.
+            pass
         team_tasks.reconcile_withdrawals(sys.modules[__name__], root)
         reconcile(root, name, mine)
         team_tasks.reconcile_resources(sys.modules[__name__], root)
@@ -5216,6 +5224,7 @@ def main(argv):
     receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
     receive.add_argument("--require-prepare-settlement", action="store_true", help="require exact no-create acknowledgement; old receivers must reject before mutation")
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
+    receive.add_argument('--require-background-jobs', action='store_true', help='require bounded native background-work registration; old receivers reject before interpreting the operation')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):

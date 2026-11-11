@@ -345,11 +345,18 @@ def command(t, args, root=None, sender=None):
     path = task_path(t, root, args.task_id)
     if action == 'status':
         print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId'])), ensure_ascii=False)); return
-    if action in ('support', 'finish', 'bind-directory') and sid != (task.get('owner') or {}).get('sessionId'):
+    if action in ('support', 'finish', 'bind-directory', 'job') and sid != (task.get('owner') or {}).get('sessionId'):
         # A collaborator can finish its own bounded work, but cannot finish another owner's task.
         mine = next((x for x in task.get('collaborators', []) if x['sessionId'] == sid), None)
-        if action not in ('finish', 'support', 'bind-directory') or mine is None:
+        if action not in ('finish', 'support', 'bind-directory', 'job') or mine is None:
             raise t.ExpertError('当前会话不是此操作的任务负责人', '没有改变归属', '核对任务的 Owner；接手必须显式进行')
+    if action == 'job':
+        from . import background_jobs
+        try:
+            return background_jobs.command(t, root, task, sid, args)
+        except (OSError, ValueError, KeyError) as error:
+            raise t.ExpertError('后台工作观测未完成: '+str(error), '未启动或终止任何进程，原登记保留',
+                                '核对本会话原生进程、任务与作业编号后沿原登记继续') from error
     if action in ('pause', 'resume', 'cancel', 'handover'):
         return control(t, root, task, args, sid)
     if action == 'support':
@@ -1146,3 +1153,13 @@ def parser(sub):
         p = actions.add_parser(action); p.add_argument('task_id'); p.add_argument('--request-id', required=True); p.add_argument('--expected-revision', required=True, type=int)
         p.add_argument('--session'); p.add_argument('--machine'); p.add_argument('words', nargs='*')
     p = actions.add_parser('bind-directory'); p.add_argument('task_id'); p.add_argument('--directory', required=True)
+    jobs = actions.add_parser('job', help='optional bounded native background-work observations; never starts or stops a process')
+    commands = jobs.add_subparsers(dest='job_action', required=True)
+    for name in ('register', 'status', 'finish'):
+        p = commands.add_parser(name); p.add_argument('task_id'); p.add_argument('--job-id', required=True)
+        if name == 'register':
+            p.add_argument('--pid', required=True, type=int)
+            p.add_argument('--kind', required=True, choices=('build', 'test', 'install', 'work'))
+            p.add_argument('--max-seconds', required=True, type=int)
+        if name == 'finish':
+            p.add_argument('--exit-code', required=True, type=int)

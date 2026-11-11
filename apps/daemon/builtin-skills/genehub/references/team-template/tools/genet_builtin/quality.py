@@ -229,7 +229,7 @@ def wake_observations(native, machines, log, start, end, complete, failure_times
 
 
 
-def task_trees(tasks, goal_tasks, controls, native, end, intents=()):
+def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
     """Root Owner plus every support, using task controls and native rounds.
 
     A task pause controls the goal wall; pausing one support only removes that
@@ -264,7 +264,9 @@ def task_trees(tasks, goal_tasks, controls, native, end, intents=()):
                         runs.append((max(a,opened),min(b,stopped)))
             joined=(own or {}).get('createdAtMs')
             if not number(joined):joined=starts.get(sid)
-            person=dict(sessionId=sid,readable=own is not None,runs=union_intervals(runs))
+            from .background_jobs import intervals as job_intervals
+            person=dict(sessionId=sid,readable=own is not None,runs=union_intervals(runs),
+                        backgroundRuns=job_intervals(log,sid,task_id,stopped))
             if number(joined):person['openedAtMs']=joined
             sessions.append(person)
         result.append(dict(taskId=task_id,openedAtMs=opened,endedAtMs=stopped,
@@ -444,6 +446,8 @@ def capture(team, root, end, cutoff):
         if not number(begun):
             begun=incoming.get('deliveredAtMs')
         item['startedAtMs']=begun if number(begun) and begun <= cutoff else None
+        from .execution_facts import dispatch_timing
+        item['dispatchTiming'] = dispatch_timing(item,incoming,by_operation.get(item['id'],[]))
         if number(item['startedAtMs']):
             item['workActivity']=work_activity(samples,own.get('rounds',[]),max(start,begun),stop)
         if item['confirmedAtMs'] is None and number(begun) and begun < start:
@@ -570,7 +574,11 @@ def capture(team, root, end, cutoff):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents),
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
+            'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
+                              'backgroundBasis':'registered-native-process-runtime/1',
+                              'backgroundRunsAppliedToScore':False,
+                              'note':'Measurement foundation; final versioned scoring model will consume timing segments and background runs'},
             'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
             'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
@@ -596,12 +604,17 @@ def register(sub):
     a=p.add_subparsers(dest='quality_action',required=True)
     a.add_parser('tick')
     c=a.add_parser('card');c.add_argument('--snapshot');c.add_argument('--save',action='store_true')
+    c=a.add_parser('execution',help='read-only versioned dispatch/background-work projection; never saves a quality card')
+    c.add_argument('--snapshot',required=True)
     a.add_parser('history');a.add_parser('describe');a.add_parser('facts')
 
 
 def _command(team,args):
     root=team.find_root();store=Path(root)/'.genethub/team/quality'
     action=args.quality_action
+    if action=='execution':
+        from .execution_facts import view
+        print(canonical(view(read(Path(args.snapshot)))),end='');return
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
         print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':{'basis':'task-agent-hours/1','minimumTotalEffectiveMs':1800000,'minimumHourEffectiveMs':900000,'required':2},'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
