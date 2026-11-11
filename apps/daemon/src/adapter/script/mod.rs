@@ -359,6 +359,10 @@ impl AgentSession for ScriptSession {
         self.link.pid()
     }
 
+    async fn runtime_pids(&self) -> Vec<u32> {
+        self.link.runtime_pids()
+    }
+
     async fn fork(&self, checkpoint: &str) -> Result<PersistHandle> {
         let reply = self
             .host

@@ -122,7 +122,7 @@ seeds GeneHub's own log into the first prompt instead.
 | `provider.request` | `{id, op: list\|get, provider?}`; ask the daemon about the model providers a person configured (see below) |
 | `session.event` | `{sessionId, event: SessionEvent}` |
 | `session.persist` | `{sessionId, value}` — returned later as `config.resume` |
-| `session.pid` | `{sessionId, pid \| null}` — the CLI's native pid |
+| `session.pid` | `{sessionId, pid \| null, runtimePids?: number[]}` — CLI root and optional exact managed runtime PIDs |
 
 `Capabilities`, `Catalog`, `SessionEvent` are exactly the types in
 `packages/proto` (`bindings/index.ts`). The daemon deserializes every event;
@@ -286,3 +286,14 @@ Codex enables its real Default-mode `request_user_input` capability and its
 experimental app-server interface; the platform guidance names the native tool
 and CLI fallback. A real-model canary separately verifies natural-language
 discovery. Forced mock function calls establish mechanism only.
+
+Managed runtime declarations are bounded to 64 positive native PIDs. The SDK's
+`ctx.set_pid(pid, runtime_pids=[...])` reports only CLI infrastructure, never model
+tools or background jobs. The daemon independently checks current native root
+ancestry and records PID/command/age identity. Only those exact processes are
+excluded from background inventory; their work descendants remain visible, and
+cleanup ownership is unchanged. Missing or invalid metadata keeps conservative
+legacy inventory. Discovery failures grant no exclusions. Codex declares startup
+launcher/backend processes before the first model turn, then its direct, same
+installation code-mode worker; it does not classify arbitrary task commands by
+name. Native executable discovery is currently provided on Linux and macOS.

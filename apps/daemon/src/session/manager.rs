@@ -3830,6 +3830,9 @@ impl SessionManager {
         if let Some(pid) = session.pid().await {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
+            self.processes
+                .set_runtime_pids(&session_id, session.runtime_pids().await)
+                .await;
             let mut meta = live.meta.lock().await;
             if meta.agent_pid != Some(pid) {
                 meta.agent_pid = Some(pid);
@@ -7168,6 +7171,10 @@ async fn pump_events(
                     Some(agent) => agent.pid().await,
                     None => None,
                 };
+                let runtime_pids = match live.agent().await {
+                    Some(agent) => agent.runtime_pids().await,
+                    None => Vec::new(),
+                };
                 let mut meta = live.meta.lock().await;
                 if let Some(handle) = handle {
                     meta.persist = Some(handle);
@@ -7188,11 +7195,12 @@ async fn pump_events(
                     }
                     Err(error) => tracing::error!(%error, "encoding execution checkpoint"),
                 }
+                let session_id = meta.id.clone();
+                drop(meta);
                 if let Some(pid) = changed_pid {
-                    let session_id = meta.id.clone();
-                    drop(meta);
                     processes.watch(&session_id, pid).await;
                 }
+                processes.set_runtime_pids(&session_id, runtime_pids).await;
                 continue;
             }
         };

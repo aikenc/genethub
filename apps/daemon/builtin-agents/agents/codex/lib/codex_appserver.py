@@ -21,9 +21,59 @@ import collections
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from genehub_agent import process
+
+def native_runtime_tree(root: int) -> Optional[Dict[int, tuple]]:
+    """Native PID ancestry and executable identities, without command arguments.
+
+    Unknown platforms/reads produce no declaration. This is provider runtime
+    discovery, not a general command-name filter in resource or kill policy.
+    """
+    if sys.platform not in ("linux", "darwin"):
+        return None
+    try:
+        result = subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True,
+                                env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"}, timeout=2)
+        if result.returncode or len(result.stdout) > 8*1024*1024:
+            return None
+        parents = {}
+        children: Dict[int, List[int]] = {}
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            pid, parent = map(int, fields)
+            parents[pid] = parent
+            children.setdefault(parent, []).append(pid)
+        todo = [root];owned = set()
+        while todo:
+            pid = todo.pop()
+            if pid in owned:
+                continue
+            owned.add(pid)
+            if len(owned) > 4096:
+                return None
+            todo.extend(children.get(pid, []))
+        def executable(pid: int) -> Optional[str]:
+            if sys.platform == "linux":
+                try:
+                    return str(Path("/proc", str(pid), "exe").resolve(strict=True))
+                except OSError:
+                    return None
+            import ctypes
+            library = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buffer = ctypes.create_string_buffer(4096)
+            length = library.proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint(len(buffer)))
+            return os.path.realpath(os.fsdecode(buffer.value)) if length > 0 else None
+        return {pid: (parents.get(pid), image) for pid in owned
+                if (image := executable(pid)) is not None}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
 
 CLIENT_NAME = "codex_app_server_daemon"
 CLIENT_TITLE = "GeneHub"
@@ -231,10 +281,35 @@ class AppServer:
         self._tasks: List[asyncio.Task] = []
         self._closed = False
         self._stderr_done = asyncio.Event()
+        self._runtime_images: Dict[int, str] = {}
 
     @property
     def pid(self) -> Optional[int]:
         return self.process.pid if self.process is not None else None
+
+    async def runtime_pids(self, initial: bool = False) -> List[int]:
+        if self.pid is None:
+            return []
+        rows = await asyncio.to_thread(native_runtime_tree, self.pid)
+        if rows is None:
+            return []
+        if initial:
+            # thread/start/resume completed before a model turn can start.
+            # Launcher/backend children at this boundary are CLI runtime.
+            self._runtime_images = {pid: image for pid, (_, image) in rows.items()}
+        managed = {pid: image for pid, image in self._runtime_images.items()
+                   if pid in rows and rows[pid][1] == image}
+        for pid, (parent, image) in rows.items():
+            # The lazy code-mode host is an exact direct child of a known CLI
+            # runtime and the executable from that same vendor installation.
+            # A task subprocess/grandchild with a similar name is still work.
+            parent_image = managed.get(parent)
+            if (parent_image and Path(image).name == "codex-code-mode-host"
+                    and Path(image).parent == Path(parent_image).parent):
+                managed[pid] = image
+        self._runtime_images = managed
+        pids = sorted(pid for pid in managed if pid != self.pid)
+        return pids if len(pids) <= 64 else []
 
     @property
     def alive(self) -> bool:

@@ -221,6 +221,12 @@ pub trait AgentSession: Send + Sync {
         None
     }
 
+    /// Managed CLI runtime PIDs, never task/background-work processes.
+    /// Exact native identities are checked by the process inventory.
+    async fn runtime_pids(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
     /// Creates a genuinely independent Agent context through a completed turn.
     /// The checkpoint is opaque to the session kernel and came from this same
     /// adapter when that turn completed.

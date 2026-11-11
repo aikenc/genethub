@@ -121,6 +121,7 @@ pub struct SessionLink {
     pub events: broadcast::Sender<SessionEvent>,
     persist: std::sync::Mutex<Option<Value>>,
     pid: std::sync::Mutex<Option<u32>>,
+    runtime_pids: std::sync::Mutex<Vec<u32>>,
     active_turn: std::sync::Mutex<Option<String>>,
     /// Set once the script accepted `session.start`. Only such sessions are
     /// started again after a restart; one still opening is started by its
@@ -135,6 +136,10 @@ impl SessionLink {
 
     pub fn pid(&self) -> Option<u32> {
         *self.pid.lock().expect("never poisoned")
+    }
+
+    pub fn runtime_pids(&self) -> Vec<u32> {
+        self.runtime_pids.lock().expect("never poisoned").clone()
     }
 
     pub fn begin_turn(&self, turn_id: &str) {
@@ -1324,6 +1329,7 @@ impl AgentHost {
                 config.resume.as_ref().map(|handle| handle.value.clone()),
             ),
             pid: std::sync::Mutex::new(None),
+            runtime_pids: std::sync::Mutex::new(Vec::new()),
             active_turn: std::sync::Mutex::new(None),
             started: AtomicBool::new(false),
         });
@@ -1535,6 +1541,21 @@ impl AgentHost {
                     .get("pid")
                     .and_then(Value::as_u64)
                     .map(|pid| pid as u32);
+                let declared = params.get("runtimePids").and_then(Value::as_array);
+                let pids = declared
+                    .filter(|rows| rows.len() <= 64)
+                    .and_then(|rows| {
+                        rows.iter()
+                            .map(|value| {
+                                value
+                                    .as_u64()
+                                    .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)
+                                    .map(|pid| pid as u32)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                *link.runtime_pids.lock().expect("never poisoned") = pids;
             }
             other => {
                 self.logs.push(format!("[daemon] 未知通知 {other}，已忽略"));

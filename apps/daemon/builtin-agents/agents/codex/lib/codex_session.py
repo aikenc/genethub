@@ -229,7 +229,7 @@ class CodexSession(Session):
             raise RuntimeError(f"{error}{server.tail()}")
         self.stale_reason = None
         self.ctx.set_persist({"threadId": self.thread_id})
-        self.ctx.set_pid(server.pid)
+        self.ctx.set_pid(server.pid, runtime_pids=await server.runtime_pids(initial=True))
 
     async def _reopen(self, server: AppServer, thread_id: str) -> None:
         """Archived threads are unarchived once and tried again."""
@@ -277,6 +277,13 @@ class CodexSession(Session):
                 self.ctx.emit(event)
             return
         self.translator.translate(method, params, self.thread_id)
+        if method == "turn/completed" and self.server is not None:
+            asyncio.ensure_future(self._refresh_runtime(self.server))
+
+    async def _refresh_runtime(self, server: AppServer) -> None:
+        pids = await server.runtime_pids()
+        if self.server is server and server.alive and not self._closed:
+            self.ctx.set_pid(server.pid, runtime_pids=pids)
 
     def _on_request(self, upstream_id: Any, method: str, params: Any) -> None:
         surface = True

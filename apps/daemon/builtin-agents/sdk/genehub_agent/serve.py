@@ -489,10 +489,18 @@ class SessionContext:
         self.config.resume = value
         self.agent._channel.notify("session.persist", {"sessionId": self.session_id, "value": value})
 
-    def set_pid(self, pid: Optional[int]) -> None:
-        """The native process this session's CLI runs as, so the daemon can
-        find what it left running."""
-        self.agent._channel.notify("session.pid", {"sessionId": self.session_id, "pid": pid})
+    def set_pid(self, pid: Optional[int], runtime_pids: Optional[List[int]] = None) -> None:
+        """Declare the CLI root and its managed runtime processes.
+
+        Only exact runtime PIDs are excluded from background inventory; their
+        task-work descendants remain owned and visible. Never declare a tool
+        or background job as runtime. The daemon verifies native ancestry and
+        PID identity. Omitting the list restores conservative legacy behavior.
+        """
+        pids = runtime_pids or []
+        if len(pids) > 64 or any(type(value) is not int or value <= 0 or value > 0xffffffff for value in pids):
+            raise ValueError("runtime_pids must contain at most 64 positive native PIDs")
+        self.agent._channel.notify("session.pid", {"sessionId": self.session_id, "pid": pid, "runtimePids": pids})
 
 
 # --------------------------------------------------------------------------

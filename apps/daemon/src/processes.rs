@@ -77,9 +77,25 @@ const CLOCK_SLACK: u64 = 5;
 /// Deliberately thin: it holds the two numbers needed to ask the operating
 /// system a question, and nothing that could disagree with the operating
 /// system's answer.
+#[derive(Clone)]
+struct RuntimeIdentity {
+    pid: u32,
+    command: String,
+    running_for_seconds: u64,
+}
+
+#[derive(Clone)]
+struct RuntimeDeclaration {
+    root: u32,
+    requested: Vec<u32>,
+    observed_at: std::time::Instant,
+    identities: Vec<RuntimeIdentity>,
+}
+
 #[derive(Default)]
 pub struct Processes {
     agents: RwLock<HashMap<String, Agent>>,
+    runtime: RwLock<HashMap<String, RuntimeDeclaration>>,
     inventory_reads: crate::blocking::InFlightReads<(), Vec<BackgroundProcess>>,
     /// Concurrent observers share one inventory, without retaining it after
     /// they leave. Full preview discovery is distinct from a restricted view.
@@ -129,6 +145,7 @@ impl Processes {
     /// is the group it leads. Reading it back from the operating system would
     /// be the same number and one more thing that can fail.
     pub async fn watch(&self, session_id: &str, pid: u32) {
+        self.runtime.write().await.remove(session_id);
         tracing::debug!(session = %session_id, pid, "watching an agent for what it leaves running");
         self.agents.write().await.insert(
             session_id.to_string(),
@@ -148,6 +165,66 @@ impl Processes {
     /// report.
     pub async fn forget(&self, session_id: &str) {
         self.agents.write().await.remove(session_id);
+        self.runtime.write().await.remove(session_id);
+    }
+
+    /// Declarations come from this Session's adapter, but never confer process
+    /// ownership. A fresh census must first prove each PID descends from its
+    /// current native root. Cleanup still uses the full owned tree.
+    pub async fn set_runtime_pids(&self, session_id: &str, mut requested: Vec<u32>) {
+        requested.sort_unstable();
+        requested.dedup();
+        if requested.is_empty() || requested.len() > 64 {
+            self.runtime.write().await.remove(session_id);
+            return;
+        }
+        let Some(agent) = self.agents.read().await.get(session_id).copied() else {
+            return;
+        };
+        if self
+            .runtime
+            .read()
+            .await
+            .get(session_id)
+            .is_some_and(|old| old.root == agent.pid && old.requested == requested)
+        {
+            return;
+        }
+        let Some(rows) = census().await else {
+            return;
+        };
+        let mut descendants = HashSet::from([agent.pid]);
+        loop {
+            let before = descendants.len();
+            for row in &rows {
+                if descendants.contains(&row.parent) {
+                    descendants.insert(row.pid);
+                }
+            }
+            if before == descendants.len() {
+                break;
+            }
+        }
+        let identities = claimed_by(&rows, agent, agent.watched_at.elapsed().as_secs())
+            .into_iter()
+            .filter(|row| {
+                descendants.contains(&row.pid) && requested.binary_search(&row.pid).is_ok()
+            })
+            .map(|row| RuntimeIdentity {
+                pid: row.pid,
+                command: row.command.clone(),
+                running_for_seconds: row.running_for_seconds,
+            })
+            .collect();
+        self.runtime.write().await.insert(
+            session_id.to_string(),
+            RuntimeDeclaration {
+                root: agent.pid,
+                requested,
+                observed_at: std::time::Instant::now(),
+                identities,
+            },
+        );
     }
 
     pub(crate) async fn prepare_cleanup(&self, session_id: &str) -> CleanupReceipt {
@@ -247,9 +324,25 @@ impl Processes {
         let Some(census) = census().await else {
             return Vec::new();
         };
+        let runtime = self.runtime.read().await.clone();
         let mut found = Vec::new();
         for (session_id, agent) in agents {
             for row in claimed_by(&census, agent, agent.watched_at.elapsed().as_secs()) {
+                let managed = runtime
+                    .get(&session_id)
+                    .filter(|r| r.root == agent.pid)
+                    .is_some_and(|declaration| {
+                        declaration.identities.iter().any(|identity| {
+                            identity.pid == row.pid
+                                && identity.command == row.command
+                                && row.running_for_seconds + CLOCK_SLACK
+                                    >= identity.running_for_seconds
+                                        + declaration.observed_at.elapsed().as_secs()
+                        })
+                    });
+                if managed {
+                    continue;
+                } // Exclude exact runtimes, never their work descendants.
                 found.push(BackgroundProcess {
                     workspace_id: None,
                     service: None,
