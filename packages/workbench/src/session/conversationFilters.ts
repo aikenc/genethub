@@ -11,6 +11,21 @@ export const defaultConversationFilter: ConversationFilter = {
   state: "all",
   archived: false,
 };
+
+/** A system-started session is internal even when its Space is a project root. */
+export function isSystemStarted(session: SessionSummary): boolean {
+  return Boolean(session.labels?.includes(SYSTEM_STARTED_LABEL));
+}
+
+/** The default session view shows human front conversations only: a project
+ * root Space, and not a session another session started. */
+export function isDefaultConversationSession(
+  session: SessionSummary,
+  workspaces: WorkspaceInfo[],
+): boolean {
+  const workspace = workspaces.find((candidate) => candidate.id === session.workspaceId);
+  return workspace !== undefined && !workspace.agentSpace?.parentWorkspaceId && !isSystemStarted(session);
+}
 export function matchesConversation(
   session: SessionSummary,
   workspaces: WorkspaceInfo[],

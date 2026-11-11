@@ -5,6 +5,7 @@ import { AgentAvatar } from "../workspace/AgentAvatar";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { useWorkbench } from "./store";
 import { markContentRead } from "./localConversation";
+import { sessionPinned, setSessionPinned, useSessionPreferences } from "./session-preferences";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { LabelEditor } from "../shell/ConversationRows";
 import { SessionStatusIcon } from "../shell/SessionStatusIcon";
@@ -15,6 +16,9 @@ export function SessionHeading({ session, workspace, onOpenExpert, onReportSessi
   session: SessionSummary; workspace?: WorkspaceInfo; onOpenExpert(id: string): void; onReportSession?(id: string): void; machineName?: string;
 }) {
   const workspaces = useWorkbench((s) => s.workspaces);
+  const machine = useWorkbench(s => s.client?.identity?.machineId ?? "");
+  useSessionPreferences();
+  const pinned = sessionPinned(machine, session.id);
   const summaries = useWorkbench(s => s.sessions), agents = useWorkbench(s => s.agents);
   const [labels, setLabels] = useState(false), [processes, setProcesses] = useState(false), [deleting, setDeleting] = useState(false);
   const readOnly = Boolean(session.historyOnly || session.unsupported);
@@ -60,6 +64,7 @@ export function SessionHeading({ session, workspace, onOpenExpert, onReportSessi
         onClick={() => { setError(""); setMenuOpen(open => !open); }}><MoreHorizontal size={20} /></button>
       {menuOpen && <div role="menu" aria-label="会话菜单" className="absolute right-0 top-full z-50 max-h-[70dvh] w-64 overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-lg">
         <p className="border-b border-line px-3 py-2 text-xs leading-5 text-muted">{breadcrumb} · {machineName}<br />{sessionAgent?.label ?? session.agentId} · {session.modelId ?? "默认模型"}<br />{sessionAttention(session, summaries).label || "空闲"}</p>
+        <button role="menuitem" className="min-h-11 w-full rounded px-3 text-left text-sm hover:bg-raised" onClick={() => { setSessionPinned(machine, session.id, !pinned); setMenuOpen(false); }}>{pinned ? "取消置顶" : "置顶会话"}</button>
         {!readOnly && <>
           <button role="menuitem" disabled={busy} className="min-h-11 w-full rounded px-3 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); setTitle(session.title ?? ""); setEditing(true); }}>重命名</button>
           <button role="menuitem" disabled={busy} className="min-h-11 w-full rounded px-3 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); setLabels(true); }}>标签</button>

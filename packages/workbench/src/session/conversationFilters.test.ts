@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   SYSTEM_STARTED_LABEL,
   defaultConversationFilter,
+  isDefaultConversationSession,
   matchesConversation,
 } from "./conversationFilters";
 
@@ -36,5 +37,24 @@ describe("matchesConversation", () => {
 
   it("still separates archived from live sessions", () => {
     expect(shown(session({ archived: true }))).toBe(false);
+  });
+});
+
+describe("default session view inclusion", () => {
+  it("includes a human session in a project root", () => {
+    expect(isDefaultConversationSession(session({}), workspaces)).toBe(true);
+  });
+
+  it("excludes a system-started session even when it lives in a project root", () => {
+    expect(isDefaultConversationSession(session({ labels: [SYSTEM_STARTED_LABEL] }), workspaces)).toBe(false);
+  });
+
+  it("excludes any session in a child Space", () => {
+    expect(isDefaultConversationSession(session({ workspaceId: "child" }), workspaces)).toBe(false);
+    expect(isDefaultConversationSession(session({ workspaceId: "child", labels: [SYSTEM_STARTED_LABEL] }), workspaces)).toBe(false);
+  });
+
+  it("excludes a session whose workspace is not in the catalogue", () => {
+    expect(isDefaultConversationSession(session({ workspaceId: "missing" }), workspaces)).toBe(false);
   });
 });

@@ -7,8 +7,10 @@ import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { markContentRead } from "../session/localConversation";
 import { sessionAttention } from "../session/attention";
-import { Hand, Loader2 } from "lucide-react";
+import { Hand, Loader2, Pin } from "lucide-react";
 import { useWorkbench } from "../session/store";
+import { sessionPinned, setSessionPinned, useSessionPreferences } from "../session/session-preferences";
+import { orderSessions, splitPinnedSessions } from "../session/session-order";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
@@ -318,164 +320,60 @@ export function WorkspaceRow({
 }
 
 /**
- * The other question: what is running, across every project.
- *
- * Each row says which project it belongs to, because without the tree around it
- * a title on its own does not say where the work is happening.
+ * The session view: one row per session, ordered only by that session's own
+ * latest activity. Projects and teams are row metadata; they never form a
+ * grouping or sorting unit here. A pinned row is only lifted into its own
+ * block above that order.
  */
 export function RecentSessions({
   density = "auto", sessions, workspaces, activeSessionId, pick = false,
-  groupedProjectIds = new Set<string>(), listLabel = "最近会话", paged = false, ...actions
+  listLabel = "最近会话", paged = false, machine, onLoadMore, ...actions
 }: {
   density?: "auto" | "comfortable" | "compact";
   sessions: ListedSession[];
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
   pick?: boolean;
-  /** Explicit local display choice; neither names nor Space roles select groups. */
-  groupedProjectIds?: ReadonlySet<string>;
   listLabel?: string;
   paged?: boolean;
+  /** Present only in the session view; pickers stay pure recency. */
+  machine?: string;
+  onLoadMore?(): void;
 } & RowActions) {
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
-  const [spaceFilters, setSpaceFilters] = useState<Record<string, string>>({});
+  useSessionPreferences();
+  const [pinnedClosed, setPinnedClosed] = useState(false);
   const tree = buildAgentSpaceTree(workspaces);
   const byId = new Map(workspaces.map(w => [w.id, w]));
-  const sortedSessions = [...sessions].sort((a, b) =>
-    (b.messagePreview?.atMs ?? b.updatedAtMs) - (a.messagePreview?.atMs ?? a.updatedAtMs));
-  const items: Array<{ key: string; root?: WorkspaceInfo; sessions: ListedSession[] }> = [];
-  const groups = new Map<string, typeof items[number]>();
-  for (const session of sortedSessions) {
-    const rootId = tree.projectRootById[session.workspaceId];
-    const root = rootId ? byId.get(rootId) : undefined;
-    if (!pick && root && groupedProjectIds.has(root.id)) {
-      let group = groups.get(root.id);
-      if (!group) {
-        group = { key: `project:${root.id}`, root, sessions: [] };
-        groups.set(root.id, group); items.push(group);
-      }
-      group.sessions.push(session);
-    } else items.push({ key: `session:${session.id}`, sessions: [session] });
-  }
+  const sortedSessions = orderSessions(sessions);
+  const { pinned: pinnedSessions, normal: normalSessions } = splitPinnedSessions(
+    sortedSessions,
+    session => Boolean(machine && sessionPinned(machine, session.id)),
+  );
   const renderRow = (session: ListedSession) => {
     const project = byId.get(session.workspaceId);
     const parentProject = project?.agentSpace?.parentWorkspaceId
       ? byId.get(project.agentSpace.parentWorkspaceId) : undefined;
     return <SessionRow key={session.id} session={session} pick={pick}
       active={session.id === activeSessionId} project={project} parentProject={parentProject}
-      breadcrumb={tree.breadcrumbById[session.workspaceId]} {...actions} />;
-  };
-  if (paged) return <PagedSessionGroups workspaces={workspaces} sessions={sortedSessions} renderRow={renderRow} groupedProjectIds={groupedProjectIds} collapsed={collapsedGroups} expandedRoots={expandedChildren} onExpandRoot={(id, expanded) => setExpandedChildren(old => ({ ...old, [id]: expanded }))} onToggle={id => {
-    const closing = !collapsedGroups[id];
-    setCollapsedGroups(old => ({ ...old, [id]: !old[id] }));
-    if (closing) {
-      setExpandedChildren(old => ({ ...old, [id]: false }));
-      const wb = useWorkbench.getState();
-      for (const child of wb.sessionExpandedSpaces) if (tree.projectRootById[child] === id) wb.expandSessionSpace(child, false);
-    }
-  }} />;
-  const counts = (rows: ListedSession[]) => {
-    const running = rows.filter(s => s.status === "running").length;
-    const waiting = rows.filter(s => s.status === "waiting").length;
-    const failed = rows.filter(s => s.status === "failed").length;
-    return <span className="flex shrink-0 flex-wrap items-center gap-2 text-[10px] font-normal">
-      {running > 0 && <span className="text-ok">{running} 运行</span>}
-      {waiting > 0 && <span className="text-accent">{waiting} 等待</span>}
-      {failed > 0 && <span className="text-danger">{failed} 失败</span>}
-    </span>;
+      breadcrumb={tree.breadcrumbById[session.workspaceId]}
+      machine={machine} pinned={Boolean(machine && sessionPinned(machine, session.id))} {...actions} />;
   };
   return <ul data-density={density}
     className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
     role={pick ? "listbox" : undefined} aria-label={listLabel}>
-    {items.map(item => {
-      if (!item.root) return renderRow(item.sessions[0]!);
-      const root = item.root;
-      const collapsed = Boolean(collapsedGroups[root.id]);
-      const children = item.sessions.filter(s => s.workspaceId !== root.id);
-      const own = item.sessions.filter(s => s.workspaceId === root.id);
-      const childSpaces = workspaces.filter(w => w.id !== root.id && tree.projectRootById[w.id] === root.id);
-      const filter = spaceFilters[root.id] ?? "";
-      const childRows = children.filter(s => !filter || s.workspaceId === filter);
-      const expanded = Boolean(expandedChildren[root.id]);
-      const activeChild = children.find(s => s.id === activeSessionId);
-      return <li key={item.key} aria-label={`项目分组 ${root.name}`}
-        className="project-session-group my-2 rounded-xl border border-line bg-surface/60 p-1.5">
-        <button type="button" aria-label={`${collapsed ? "展开" : "折叠"}项目分组 ${root.name}`}
-          aria-expanded={!collapsed} onClick={() => setCollapsedGroups(old => ({ ...old, [root.id]: !old[root.id] }))}
-          className="flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded px-2 text-left text-xs font-semibold hover:text-accent">
-          <span aria-hidden className="text-[10px] text-muted">{collapsed ? "▸" : "▾"}</span>
-          <AgentAvatar id={root.id} name={root.name} size="small" />
-          <span className="min-w-0 flex-1 truncate">{root.name}</span>
-          <span className="shrink-0 text-[10px] font-normal text-faint">{item.sessions.length} 条</span>
-        </button>
-        {collapsed ? <div className="px-2 pb-1">{counts(item.sessions)}</div> : <>
-          {own.length > 0 && <><p className="px-2 pt-1 text-[10px] text-muted">本项目会话</p><ul className="space-y-1">{own.map(renderRow)}</ul></>}
-          {children.length > 0 && <>
-            <button type="button" aria-label={`子 Space 会话 ${root.name}`} aria-expanded={expanded}
-              onClick={() => setExpandedChildren(old => ({ ...old, [root.id]: !old[root.id] }))}
-              className="mt-1 flex min-h-11 w-full flex-wrap items-center gap-2 border-t border-line px-2 text-left text-[11px] text-muted hover:text-fg">
-              <span aria-hidden>{expanded ? "▾" : "▸"}</span><span className="flex-1">子 Space 会话 ({children.length})</span>{counts(children)}
-            </button>
-            {!expanded && activeChild && <p className="truncate px-2 pb-1 text-[10px] text-accent">正在查看 {byId.get(activeChild.workspaceId)?.name ?? "子 Space"} 的会话</p>}
-            {expanded && <div>
-              <label className="flex min-h-11 items-center gap-2 px-2 text-[10px] text-muted">Space
-                <select aria-label={`筛选 ${root.name} 的子 Space`} value={filter}
-                  onChange={event => setSpaceFilters(old => ({ ...old, [root.id]: event.target.value }))}
-                  className="min-h-9 min-w-0 flex-1 rounded border border-line bg-surface px-2 text-xs text-fg">
-                  <option value="">全部子 Spaces</option>
-                  {childSpaces.map(w => <option key={w.id} value={w.id}>{tree.breadcrumbById[w.id]}</option>)}
-                </select>
-              </label>
-              <ul className="space-y-1">{childRows.map(renderRow)}</ul>
-              {!childRows.length && <p className="px-3 py-3 text-xs text-muted">没有匹配的会话</p>}
-            </div>}
-          </>}
-        </>}
-      </li>;
-    })}
-  </ul>;
-}
-
-/** Root summaries load by default; each actual child Space owns its expansion. */
-function PagedSessionGroups({ workspaces, sessions, renderRow, groupedProjectIds, collapsed, expandedRoots, onExpandRoot, onToggle }: {
-  workspaces: WorkspaceInfo[]; sessions: ListedSession[]; renderRow(row: ListedSession): ReactNode;
-  groupedProjectIds: ReadonlySet<string>; collapsed: Record<string, boolean>; onToggle(id: string): void;
-  expandedRoots: Record<string, boolean>; onExpandRoot(id: string, expanded: boolean): void;
-}) {
-  const wb = useWorkbench();
-  const tree = buildAgentSpaceTree(workspaces);
-  const scope = (workspace: WorkspaceInfo) => {
-    const page = wb.sessionPages[workspace.id];
-    const rows = sessions.filter(row => row.workspaceId === workspace.id && (!page?.loaded || page.ids.includes(row.id))).sort((a,b) => b.updatedAtMs - a.updatedAtMs || b.id.localeCompare(a.id)).slice(0, page?.limit ?? 10);
-    return <>
-      <ul className="space-y-1">{rows.map(renderRow)}</ul>
-      {page?.error ? <p role="status" className="px-3 py-2 text-xs text-muted">此 Space 读取失败。<button className="ml-2 text-accent" onClick={() => wb.expandSessionSpace(workspace.id, true)}>重试</button></p>
-        : !page?.loaded ? <p role="status" className="px-3 py-2 text-xs text-muted">正在加载会话…</p>
-        : !rows.length ? <p className="px-3 py-2 text-xs text-muted">暂无会话</p> : null}
-      {page?.cursor && <button type="button" className="min-h-11 px-3 text-xs text-accent" aria-label={`加载 ${workspace.name} 的更早会话`} disabled={page.loading} onClick={() => void wb.loadMoreSessions(workspace.id)}>{page.loading ? "正在加载…" : "更早会话"}</button>}
-    </>;
-  };
-  return <ul aria-label="最近会话" className="entity-list conversation-list w-full min-w-0 space-y-2">
-    {tree.roots.map(({ workspace }) => {
-      const children = workspaces.filter(child => child.id !== workspace.id && tree.projectRootById[child.id] === workspace.id);
-      const grouped = groupedProjectIds.has(workspace.id);
-      return <li key={workspace.id} aria-label={`项目分组 ${workspace.name}`} className={grouped ? "project-session-group rounded-xl border border-line bg-surface/60 p-1.5" : "space-y-1"}>
-        {grouped && <button type="button" aria-label={`${collapsed[workspace.id] ? "展开" : "折叠"}项目分组 ${workspace.name}`} aria-expanded={!collapsed[workspace.id]} onClick={() => onToggle(workspace.id)} className="flex min-h-11 w-full items-center gap-2 px-2 text-sm font-semibold"><span aria-hidden>{collapsed[workspace.id] ? "▸" : "▾"}</span><AgentAvatar id={workspace.id} name={workspace.name} size="small" /><span>{workspace.name}</span><span className="ml-auto text-[10px] font-normal text-muted">已加载 {wb.sessionPages[workspace.id]?.ids.length ?? 0} 条</span></button>}
-        {(!grouped || !collapsed[workspace.id]) && <>{scope(workspace)}
-        {children.length > 0 && <details className="mt-1 border-t border-line px-1" open={Boolean(expandedRoots[workspace.id])} onToggle={event => {
-          if (event.target !== event.currentTarget) return;
-          const expanded = event.currentTarget.open;
-          if (expanded !== Boolean(expandedRoots[workspace.id])) onExpandRoot(workspace.id, expanded);
-          if (!expanded) for (const child of children) if (useWorkbench.getState().sessionExpandedSpaces.includes(child.id)) wb.expandSessionSpace(child.id, false);
-        }}><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted">子 Space ({children.length})</summary>
-          {children.map(child => <details key={child.id} className="ml-2 border-t border-line" open={wb.sessionExpandedSpaces.includes(child.id)} onToggle={event => {
-            const expanded = event.currentTarget.open;
-            if (expanded !== useWorkbench.getState().sessionExpandedSpaces.includes(child.id)) wb.expandSessionSpace(child.id, expanded);
-          }}><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted">{tree.breadcrumbById[child.id]}</summary>{wb.sessionExpandedSpaces.includes(child.id) && scope(child)}</details>)}
-        </details>}</>}
-      </li>;
-    })}
+    {pinnedSessions.length > 0 && <li className="pinned-sessions my-1 overflow-hidden rounded-lg border border-line/40 bg-raised/40">
+      <button type="button" aria-label={`${pinnedClosed ? "展开" : "折叠"}置顶会话`} aria-expanded={!pinnedClosed}
+        onClick={() => setPinnedClosed(value => !value)}
+        className="flex min-h-9 w-full items-center gap-1.5 px-2 text-left text-[11px] text-muted transition-colors hover:bg-raised/60">
+        <span aria-hidden className="text-[10px]">{pinnedClosed ? "▸" : "▾"}</span>
+        <Pin size={12} aria-hidden className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1">置顶</span>
+        <span className="shrink-0 text-faint">{pinnedSessions.length}</span>
+      </button>
+      {!pinnedClosed && <ul className="space-y-0.5 p-1 pt-0">{pinnedSessions.map(renderRow)}</ul>}
+    </li>}
+    {normalSessions.map(renderRow)}
+    {paged && onLoadMore && <li><button type="button" className="min-h-11 w-full px-3 text-xs text-accent" onClick={onLoadMore}>加载更早会话</button></li>}
   </ul>;
 }
 
@@ -486,6 +384,8 @@ function SessionRow({
   parentProject,
   breadcrumb,
   pick = false,
+  machine,
+  pinned = false,
   onPickSession,
   onRename,
   onDelete,
@@ -498,6 +398,9 @@ function SessionRow({
   parentProject?: WorkspaceInfo;
   breadcrumb?: string;
   pick?: boolean;
+  /** Session-view pinning; pickers omit it. */
+  machine?: string;
+  pinned?: boolean;
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
@@ -544,12 +447,12 @@ function SessionRow({
             aria-selected={pick ? active : undefined}
             disabled={selection ? selection.disabled : Boolean(unsupported)}
             title={unsupported ? whyUnsupported(unsupported) : undefined}
-            className={`entity-main conversation-main block min-h-16 w-full min-w-0 rounded-lg px-3 py-3 text-left text-sm ${
+            className={`entity-main conversation-main block min-h-16 w-full min-w-0 rounded-lg px-3 py-3 text-left text-sm transition-colors ${
               unsupported
                 ? "cursor-not-allowed text-faint"
                 : active
                   ? "bg-raised text-fg"
-                  : "text-muted hover:bg-sidebar-hover hover:text-fg"
+                  : `text-muted hover:bg-sidebar-hover hover:text-fg ${pinned ? "bg-raised/30" : ""}`
             }`}
             onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
           >
@@ -558,6 +461,7 @@ function SessionRow({
               <span className="gh-conversation-title entity-title flex min-w-0 items-center gap-1.5 font-medium leading-5 text-fg">
                 {session.unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 shrink-0 rounded-full bg-accent" />}
                 <span className="truncate" title={displayTitle}>{displayTitle}</span>
+                {pinned && <Pin size={11} aria-label="已置顶" className="shrink-0 text-accent" />}
               </span>
               <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${projectPath}`}>
                 <AgentAvatar id={session.workspaceId} name={project?.name ?? "项目"} size="small" />
@@ -594,6 +498,11 @@ function SessionRow({
           confirming={menu === "confirming"}
           readOnly={historyOnly}
           archived={session.archived}
+          pinned={pinned}
+          onTogglePin={machine ? () => {
+            setSessionPinned(machine, session.id, !pinned);
+            setMenu("shut");
+          } : undefined}
           onArchive={() => {
             setMenu("shut");
             void useWorkbench
@@ -657,6 +566,8 @@ function Menu({
   onAskDelete,
   onDelete,
   onDismiss,
+  pinned,
+  onTogglePin,
 }: {
   onMarkRead?(): void;
   archived: boolean;
@@ -669,6 +580,8 @@ function Menu({
   onAskDelete(): void;
   onDelete(): void;
   onDismiss(): void;
+  pinned: boolean;
+  onTogglePin?(): void;
 }) {
   return (
     <>
@@ -716,6 +629,7 @@ function Menu({
                 {archived ? "恢复会话" : "归档会话"}
               </button>
             )}
+            {onTogglePin && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs" onClick={onTogglePin}>{pinned ? "取消置顶" : "置顶会话"}</button>}
             {onMarkRead && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onMarkRead}>标为已读</button>}
             {!readOnly ? (
               <button

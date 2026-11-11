@@ -399,6 +399,8 @@ interface WorkbenchState {
   setSessionGlobalView(complete: boolean, owner?: string): void;
   expandSessionSpace(workspaceId: string, expanded: boolean): void;
   loadMoreSessions(workspaceId: string): Promise<void>;
+  /** One more page for every project root that still has an older cursor. */
+  loadMoreSessionList(): Promise<void>;
 
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
@@ -1102,6 +1104,17 @@ return create<WorkbenchState>((set, get) => ({
     const client = get().client;
     if (!client) return;
     await readSessionPages(client, set, false, workspaceId).catch(unattended(client, get, set));
+  },
+
+  async loadMoreSessionList() {
+    const client = get().client;
+    if (!client) return;
+    const roots = buildAgentSpaceTree(get().workspaces).roots.map(node => node.workspace.id);
+    for (const id of roots) {
+      if (get().client !== client) return;
+      if (!get().sessionPages[id]?.cursor) continue;
+      await readSessionPages(client, set, false, id).catch(unattended(client, get, set));
+    }
   },
 
   async refreshSessions() {

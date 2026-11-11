@@ -6,7 +6,7 @@ import type { Host, Endpoint, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { useAgentActivities } from "../workspace/useAgentActivity";
 import { attentionFilters, hasCurrentWork, matchesAttention, pendingSessions, type AttentionFilter } from "../session/attention";
-import { matchesConversation, defaultConversationFilter, type ConversationFilter } from "../session/conversationFilters";
+import { matchesConversation, defaultConversationFilter, isSystemStarted, type ConversationFilter } from "../session/conversationFilters";
 import { buildAgentSpaceTree, isDescendant } from "../workspace/agent-space-tree";
 import { localValue, saveLocalValue, hasUnreadReply, useConversationLocalChanges } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
@@ -44,27 +44,12 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
   const selectedWorkspace = wb.workspaces.find((w) => w.id === agentId);
   const isChildWorkspace = Boolean(selectedWorkspace?.agentSpace?.parentWorkspaceId);
   const [choosingAgent, setChoosingAgent] = useState(false);
-  const [groupingOpen, setGroupingOpen] = useState(false);
-  const [grouping, setGrouping] = useState<{ grouped: string[]; flat: string[] }>(() => {
-    const saved = localValue<unknown>(`conversation-groups:${machine}`);
-    const roots = (value: unknown): string[] => Array.isArray(value)
-      ? value.filter((root): root is string => typeof root === "string") : [];
-    // The previous UI auto-saved [] even when nobody chose a layout. It cannot
-    // express an explicit flat override, so keep its positive choices only.
-    if (Array.isArray(saved)) return { grouped: roots(saved), flat: [] };
-    const value = saved && typeof saved === "object" ? saved as Record<string, unknown> : {};
-    return { grouped: roots(value.grouped), flat: roots(value.flat) };
-  });
-  useEffect(() => { if (machine) saveLocalValue(`conversation-groups:${machine}`, grouping); }, [machine, grouping]);
   const tree = buildAgentSpaceTree(wb.workspaces);
-  const groupedProjectIds = new Set(tree.roots.filter(({ workspace, children }) =>
-    !grouping.flat.includes(workspace.root) && (children.length > 0 || grouping.grouped.includes(workspace.root)))
-    .map(node => node.workspace.id));
-  const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("all");
+  const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>(defaultConversationFilter.ownership);
   const [state, setState] = useState<AttentionFilter>("all");
   const [advanced, setAdvanced] = useState(false);
   const [managing, setManaging] = useState(false);
-  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived, grouping]);
+  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived]);
   const [selectionState, setSelectionState] = useState({ scope: "", ids: new Set<string>() });
   const selected = selectionState.scope === selectionScope ? selectionState.ids : new Set<string>();
   const setSelected = (next: Set<string> | ((previous: Set<string>) => Set<string>)) => {
@@ -82,7 +67,8 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
   // A changed query is a new selection scope: hidden rows cannot stay selected.
   useEffect(() => { setConfirmArchive(false); }, [selectionScope]);
   const paged = Boolean(wb.client?.identity?.features?.includes("session.page.v1"));
-  const completeView = Boolean(query.trim() || agentId || state !== "all" || wb.includeArchived || ownership !== "all");
+  const completeView = Boolean(query.trim() || agentId || state !== "all" || wb.includeArchived
+    || ownership !== defaultConversationFilter.ownership);
   useCompleteSessionList(completeView);
   const sources = wb.sessions.filter(
     (s) =>
@@ -91,12 +77,17 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
       isDescendant(wb.workspaces, s.workspaceId, agentId),
   );
   const candidates = state === "pending" ? pendingSessions(sources, wb.sessions) : sources;
+  const defaultScope = !isChildWorkspace && state === "all" && ownership === defaultConversationFilter.ownership;
   const rows = candidates.filter((s) => {
     const ws = wb.workspaces.find(w => w.id === s.workspaceId);
     const currentView = state === "pending" || state === "running" || state === "blocked";
     if (!matchesConversation(s, wb.workspaces, { ...defaultConversationFilter,
       ownership: isChildWorkspace || state === "pending" ? "all" : ownership,
       archived: currentView && hasCurrentWork(s, wb.sessions) ? Boolean(s.archived) : wb.includeArchived })) return false;
+    // The default session view is human front conversations only. A session
+    // another session started is internal even when it lives in a root Space;
+    // the pending filter and project views still reach it.
+    if (defaultScope && isSystemStarted(s)) return false;
     if (!`${s.title} ${s.description ?? ""} ${s.labels?.join(" ") ?? ""} ${tree.breadcrumbById[s.workspaceId] ?? ws?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
     return matchesAttention(s, state, hasUnreadReply(machine, s), wb.sessions);
   }).map((s) => ({ ...s, unread: hasUnreadReply(machine, s) }));
@@ -140,13 +131,10 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
       <fieldset disabled={busy} className="min-w-0 space-y-2 disabled:opacity-60">
         <ListToolbar label="会话导航工具栏" searchLabel="搜索会话" searchOpen={searchOpen} onSearch={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}>
           <button type="button" aria-label="选择项目范围" onClick={() => setChoosingAgent(true)} className="min-h-11 min-w-0 flex-1 truncate rounded-lg px-2 text-left text-sm font-semibold text-fg hover:bg-raised">{selectedWorkspace?.name ?? "全部会话"}</button>
-          <button type="button" aria-label="会话分组" aria-expanded={groupingOpen}
-            onClick={() => setGroupingOpen(true)}
-            className={`min-h-9 shrink-0 rounded-lg border px-2 text-xs font-medium ${groupedProjectIds.size ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-surface text-muted hover:bg-raised"}`}>分组</button>
           <button type="button" aria-label="新建会话" className={listPrimaryAction} onClick={() => { wb.newSession(agentId || null, null); onNavigate(); }}><Plus size={18} />新建</button>
         </ListToolbar>
         <FilterBar<AttentionFilter> label="会话状态工具栏" options={attentionFilters} value={state} onChange={setState} actions={<>
-          <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "all" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
+          <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== defaultConversationFilter.ownership ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
           <button ref={listMenuTrigger} type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </>} />
         {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
@@ -169,7 +157,8 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
     {paged && completeView && !wb.sessionsComplete && <p role="status" className="px-3 py-2 text-xs text-muted">{wb.sessionsError ? "完整会话范围读取失败，请重试。" : "正在读取完整会话范围…"}<button className="ml-2 text-accent" onClick={() => void wb.refreshSessions()}>重试</button></p>}
     <ListScroll label="会话滚动区域">
       <RecentSessions sessions={rows} workspaces={wb.workspaces} activeSessionId={wb.activeSessionId}
-        groupedProjectIds={query.trim() ? new Set<string>() : groupedProjectIds} paged={paged && !completeView}
+        machine={machine} paged={paged && !completeView}
+        onLoadMore={() => void wb.loadMoreSessionList()}
         selection={managing ? { ids: selection, toggle, disabled: busy } : undefined}
         onPickSession={(id) => { void wb.selectSession(id); onNavigate(); }}
         onRename={(id, title) => void wb.renameSession(id, title)} onDelete={(id) => void wb.deleteSession(id)} />
@@ -186,28 +175,12 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
       </div>
 
     </footer>}
-    {groupingOpen && <WorkspaceDetailsDialog title="会话分组" onClose={() => setGroupingOpen(false)}>
-      <p className="mb-2 text-xs leading-5 text-muted">含子 Space 的项目默认分组，其他会话平铺。可按需调整，仅改变本浏览器上的展示。</p>
-      <div className="space-y-1">{tree.roots.map(({ workspace }) => <label key={workspace.id} className="flex min-h-11 items-center gap-3 rounded px-2 text-sm hover:bg-raised">
-        <input type="checkbox" aria-label={`按项目分组 ${workspace.name}`} checked={groupedProjectIds.has(workspace.id)}
-          onChange={event => {
-            const checked = event.target.checked;
-            setGrouping(old => ({
-              grouped: checked ? [...new Set([...old.grouped, workspace.root])] : old.grouped.filter(root => root !== workspace.root),
-              flat: checked ? old.flat.filter(root => root !== workspace.root) : [...new Set([...old.flat, workspace.root])],
-            }));
-          }}
-          className="h-4 w-4 shrink-0 accent-[rgb(var(--accent))]" />
-        <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-      </label>)}</div>
-      <button type="button" className="mt-3 min-h-11 w-full rounded-lg bg-accent text-sm text-white" onClick={() => setGroupingOpen(false)}>完成</button>
-    </WorkspaceDetailsDialog>}
         {choosingAgent && <ExpertPickerDialog title="按项目筛选" selectedId={agentId} allowNone onClose={() => setChoosingAgent(false)} onPick={id => { setAgentId(id); setChoosingAgent(false); }} />}
         {advanced && <WorkspaceDetailsDialog title="筛选会话" onClose={() => setAdvanced(false)}><div className="grid gap-3">
           <div className="flex items-center gap-2 text-xs text-muted">项目<button type="button" aria-label="按项目筛选" className={`${input} min-w-0 flex-1 truncate text-left`} onClick={() => setChoosingAgent(true)}>{wb.workspaces.find(w => w.id === agentId)?.name ?? "所有项目"}</button></div>
           {!isChildWorkspace && <label className="flex items-center gap-2 text-xs text-muted">范围<select aria-label="会话范围" value={ownership} onChange={(e) => setOwnership(e.target.value as ConversationFilter["ownership"])} className={`${input} flex-1`}><option value="primary">主要会话（含等待与失败）</option><option value="children">子项目会话</option><option value="all">全部会话</option></select></label>}
           {isChildWorkspace && <p className="text-xs text-muted">当前已选定子 Space，直接展示该 Space 下的会话。</p>}
-          <button className="min-h-9 text-xs text-accent" onClick={() => { setAgentId(""); setOwnership("all"); setState("all"); setQuery(""); }}>清除筛选</button>
+          <button className="min-h-9 text-xs text-accent" onClick={() => { setAgentId(""); setOwnership(defaultConversationFilter.ownership); setState("all"); setQuery(""); }}>清除筛选</button>
           <button className="min-h-11 rounded-lg bg-accent text-white" onClick={() => setAdvanced(false)}>查看结果</button>
         </div></WorkspaceDetailsDialog>}
       {confirmArchive && <WorkspaceDetailsDialog title={wb.includeArchived ? "恢复会话" : "归档会话"} onClose={() => setConfirmArchive(false)}><div className="text-sm"><p>{wb.includeArchived ? "恢复" : "归档"}选中的 {selection.size} 个会话？会话历史保留，变更会保存到设备。</p><div className="mt-1 flex justify-end gap-2"><button className="min-h-9 px-2" onClick={() => setConfirmArchive(false)}>取消</button><button className="min-h-9 px-2 text-accent" onClick={() => void archive()}>确认{wb.includeArchived ? "恢复" : "归档"}</button></div></div></WorkspaceDetailsDialog>}
