@@ -120,6 +120,8 @@ export interface ScriptAgentControl {
   expectedResume?: string;
   /** Hold the external invalidation until the case releases its disk fault. */
   holdPersist?: boolean;
+  /** Keep the real external Agent's shutdown reply pending for a bounded interval. */
+  shutdownDelayMs?: number;
   questionCount?: number;
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; llmRounds: number; tokenUsageStatus: "reported" | "partial" | "unavailable" };
   delayMs?: number;

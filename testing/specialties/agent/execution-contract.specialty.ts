@@ -7,6 +7,7 @@ import {
   daemonEndpoint,
   parseJson,
   runGenet,
+  runGenetAsync,
   type CaseContext,
 } from "../../framework/public.ts";
 
@@ -47,6 +48,50 @@ async function snapshot(session: Session) {
 }
 
 const completed = (session: Session) => session.events.filter((event) => event.type === "turnCompleted").length;
+
+contractCase(
+  "shutdown-fences-input-admission",
+  "a real daemon draining its external Agent refuses new input instead of rehydrating a second writer; restart preserves prior receipts and accepts the same previously refused input exactly once",
+  ["shutdown drains the Session map before admission stops", "a second Live accepts input while the original writer retires", "restart loses accepted inputs or replays a refused message"],
+  { profile: "normal", chunks: 1, shutdownDelayMs: 3000 },
+  async (t, session) => {
+    const original = "shutdown-original";
+    const late = "shutdown-late";
+    const meta = path.join(session.workspaceRoot, ".genethub", "sessions", session.sessionId, "meta.json");
+    const receipts = () => (JSON.parse(readFileSync(meta, "utf8")).inbox.entries as Array<{ messageId: string; receivedAtMs: number }>);
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "Keep this accepted history.", null, original);
+    await session.waitForTerminal();
+    await t.tools.waitUntil(async () => await session.daemonStatus() === "idle", 10_000);
+    const before = receipts().find(entry => entry.messageId === original);
+    t.assertions.assert(before !== undefined, "original input has no durable receipt");
+    const shutdowns = session.journal().filter(entry => entry.event === "shutdown").length;
+    const stopping = runGenetAsync(session.daemon.genet, ["daemon", "stop"], session.daemon.env);
+    let accepted = false;
+    try {
+      await t.tools.waitUntil(() => session.journal().filter(entry => entry.event === "shutdown").length > shutdowns, 10_000);
+      try {
+        await t.flows.main.sendPrompt(session.client, session.sessionId, "Continue after maintenance.", null, late);
+        accepted = true;
+      } catch { /* A draining daemon must refuse admission or close the transport. */ }
+    } finally {
+      const stopped = await stopping;
+      t.assertions.assert(stopped.code === 0, "graceful stop did not finish");
+    }
+    t.assertions.assert(!accepted, "draining daemon acknowledged a new input after retiring its Session map");
+    t.assertions.assert(!receipts().some(entry => entry.messageId === late), "refused input acquired a durable receipt");
+    t.assertions.assert(receipts().find(entry => entry.messageId === original)?.receivedAtMs === before!.receivedAtMs,
+      "shutdown changed the original admission receipt");
+    const previous = session.resyncs();
+    const started = await runGenetAsync(session.daemon.genet, ["daemon", "start"], session.daemon.env);
+    t.assertions.assert(started.code === 0, "restart failed");
+    await t.tools.waitUntil(() => session.client.connectionState === "ready" && session.resyncs() > previous, 30_000);
+    const answers = session.journal().filter(entry => entry.event === "answered").length;
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "Continue after maintenance.", null, late);
+    await t.tools.waitUntil(() => session.journal().filter(entry => entry.event === "answered").length > answers, 15_000);
+    t.assertions.assert(receipts().filter(entry => entry.messageId === late).length === 1, "post-restart admission duplicated the stable input");
+    t.assertions.assert(JSON.stringify((await snapshot(session)).items).includes("Keep this accepted history."), "restart lost original history");
+  },
+);
 
 contractCase(
   "terminal-persist-invalidation-survives-restart",

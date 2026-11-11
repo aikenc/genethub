@@ -731,6 +731,7 @@ class FixtureAgent(Agent):
 
     async def shutdown(self, ctx: Any) -> None:
         journal("shutdown")
+        await asyncio.sleep(min(5000, max(0, CONTROL.get("shutdownDelayMs", 0))) / 1000)
 
 
 serve(FixtureAgent())
