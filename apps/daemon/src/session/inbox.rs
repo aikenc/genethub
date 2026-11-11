@@ -878,9 +878,17 @@ pub(super) async fn settle_inputs(
                 entry.state = "handled".into();
             }
         }
-    } else {
+    } else if let SessionEvent::TurnFailed { error, .. } = event {
         next.inbox.paused = true;
-        next.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
+        // A failed Agent may emit no timeline items. Keep its already
+        // user-facing cause in the durable summary for later inspection.
+        let reason: String = error.message.trim().chars().take(1800).collect();
+        let recovery = "本轮失败，已接收消息保留；发送新消息后核对并继续。";
+        next.inbox.error = Some(if reason.is_empty() {
+            recovery.into()
+        } else {
+            format!("{reason}\n{recovery}")
+        });
     }
     live.store.save_meta(&next)?;
     *meta = next;
