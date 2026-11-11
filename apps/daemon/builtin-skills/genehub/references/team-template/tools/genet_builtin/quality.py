@@ -301,9 +301,21 @@ def capture(team, root, end, cutoff):
     goal_ownership_known=bool(root_workspaces) and all(native.get(task.get('front'),{}).get('workspaceId')
         for task in tasks.values() if number(task.get('createdAtMs')) and task['createdAtMs'] < end
         and (not number((task.get('finished') or {}).get('atMs')) or task['finished']['atMs'] >= metric_start))
-    deliveries = [x for x in log if x['kind']=='input-accepted' and x.get('purpose')=='result']
-    deliveries += [link for snapshot in native.values() for link in snapshot.get('inputLinks',[])]
-    deliveries = list({(x['sessionId'],x['messageId']):x for x in deliveries}.values())
+    delivery_map = {(x['sessionId'],x['messageId']):dict(x) for x in log
+                    if x['kind']=='input-accepted' and x.get('purpose')=='result'}
+    for snapshot in native.values():
+        for link in snapshot.get('inputLinks',[]):
+            key=(link['sessionId'],link['messageId'])
+            event=delivery_map.get(key,{})
+            merged=dict(event,**link)
+            # The genuine native header corroborates the earlier successful
+            # send observation. It proves an upper bound, never an exact ACK
+            # or read time. Neither source alone establishes this bound.
+            if (event.get('timeBasis')=='observed-acceptance' and number(event.get('atMs'))
+                    and event.get('ref')==link.get('ref')):
+                merged['acceptedUpperBoundMs']=event['atMs']
+            delivery_map[key]=merged
+    deliveries = list(delivery_map.values())
     reworked = {i['follows'] for i in work if i.get('follows')}
     resources_complete, idle_complete = True, True
     for item in work:
@@ -342,7 +354,11 @@ def capture(team, root, end, cutoff):
             return next((x['receivedAtMs'] for x in native.get(delivery['sessionId'],{}).get('retainedInputs') or [] if x['messageId']==delivery['messageId']), delivery.get('receivedAtMs'))
         proven=[x for x in matching if number(accepted_at(x)) and accepted_at(x)<=cutoff]
         proven.sort(key=lambda x:(accepted_at(x),x['messageId']))
-        item['deliveryMessageIds']=list({x['messageId'] for x in proven})
+        bounded=[x for x in matching if not number(accepted_at(x))
+                 and number(x.get('acceptedUpperBoundMs')) and x['acceptedUpperBoundMs']<=cutoff]
+        item['deliveryBounds']=[{'messageId':x['messageId'],'recipient':x['sessionId'],
+                                'acceptedUpperBoundMs':x['acceptedUpperBoundMs']} for x in bounded]
+        item['deliveryMessageIds']=sorted({x['messageId'] for x in proven+bounded})
         item['deliveryEvents']=[{'messageId':x['messageId'],'recipient':x['sessionId'],'acceptedAtMs':accepted_at(x)} for x in proven]
         correct=[x for x in proven if x['sessionId']==item.get('requester')]
         if proven:item['recipient']=proven[0]['sessionId']
@@ -358,7 +374,12 @@ def capture(team, root, end, cutoff):
                 if number(item.get(field)) and item[field] > cutoff:item[field]=None
         # Retention is bounded. A missing old receipt/header cannot establish
         # non-delivery, nor clear that red line as though it were observed.
-        item['deliveryCoverageKnown'] = bool(proven) and len(proven)==len(matching)
+        item['deliveryCoverageKnown'] = bool(proven or bounded) and len(proven)+len(bounded)==len(matching)
+        if any(x['sessionId']==item.get('requester') for x in bounded):
+            # A later exact receipt cannot establish the first delivery/read
+            # when an earlier possible correct delivery lost its timestamp.
+            item['recipient']=item['requester']
+            item['deliveredAtMs']=None;item['consumedAtMs']=None
         consumed=item.get('consumedAtMs')
         item['disposition']='rework' if item['id'] in reworked else ('adopted-inferred' if number(consumed) and consumed+600000 <= cutoff else None)
         turns=[x for x in own.get('turns',[]) if x.get('finishedAtMs',cutoff+1) <= cutoff]

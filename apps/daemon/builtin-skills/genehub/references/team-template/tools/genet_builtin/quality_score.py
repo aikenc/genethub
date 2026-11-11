@@ -113,13 +113,20 @@ def score(facts):
         if not number(concluded) or concluded >= end:
             continue
         delivered = item.get('deliveredAtMs')
-        if coverage.get('deliveries') is True or item.get('deliveryCoverageKnown') is True:
+        bounds=item.get('deliveryBounds',[])
+        correct_bounds=[x['acceptedUpperBoundMs'] for x in bounds if x['recipient']==item.get('requester')]
+        # Bounds overlapping this hour cannot prove historical lateness or
+        # absence of duplicate/misroute occurrences. Before-hour bounds can
+        # discharge old obligations without manufacturing exact M2 samples.
+        if any(x['acceptedUpperBoundMs']>=start for x in bounds):delivery_uncertain=True
+        if (coverage.get('deliveries') is True or item.get('deliveryCoverageKnown') is True) and not correct_bounds:
             breach('R3', item, concluded + 600000, delivered)
         if isinstance(item.get('deliveryEvents'), list):
             deliveries = sorted({(x['recipient'],x['messageId']):x for x in item['deliveryEvents']
                                  if number(x.get('acceptedAtMs')) and x['acceptedAtMs'] < end}.values(),
                                 key=lambda x:(x['acceptedAtMs'],x['messageId']))
             correct = [x['acceptedAtMs'] for x in deliveries if x['recipient']==item.get('requester')]
+            correct += [at for at in correct_bounds if at<start]
             for delivery in deliveries:
                 if delivery['recipient'] == item.get('requester'):continue
                 at=delivery['acceptedAtMs']
@@ -127,8 +134,9 @@ def score(facts):
                 # A misroute after success is an occurrence in its own hour.
                 resolved = at if any(t <= at for t in correct) else min(correct,default=None)
                 breach('R3',item,at-1,resolved,'wrong-recipient')
-            for delivery in deliveries[1:]:
-                if start <= delivery['acceptedAtMs'] < end:
+            for index,delivery in enumerate(deliveries):
+                prior_bound=any(x['acceptedUpperBoundMs']<=delivery['acceptedAtMs'] for x in bounds)
+                if (index>0 or prior_bound) and start <= delivery['acceptedAtMs'] < end:
                     instances['R3'].append({'workItemId':item['id'],'reason':'duplicate-result',
                                             'atMs':delivery['acceptedAtMs']})
         else:
