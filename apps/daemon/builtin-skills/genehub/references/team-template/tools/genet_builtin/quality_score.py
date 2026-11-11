@@ -81,6 +81,9 @@ def score(facts):
     audience_basis = facts.get('resultAudienceBasis')
     if audience_basis not in (None, 'source-result-generation/1'):
         raise ValueError('unsupported result audience basis')
+    idle_basis = facts.get('idleObservationBasis')
+    if idle_basis not in (None, 'native-minute-freshness/1'):
+        raise ValueError('unsupported idle observation basis')
     start, end = facts['window']['startAtMs'], facts['window']['endAtMs']
     cutoff = facts['capturedAtMs']
     if not all(number(x) for x in (start, end, cutoff)) or not start < end <= cutoff:
@@ -357,8 +360,9 @@ def score(facts):
     if resource_basis is not None:result['resourceObligationBasis'] = resource_basis
     if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
     if audience_basis is not None:result['resultAudienceBasis'] = audience_basis
-    if resource_basis is not None or coverage_basis is not None or audience_basis is not None:
-        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis,audience_basis) if x is not None])
+    if idle_basis is not None:result['idleObservationBasis'] = idle_basis
+    if any(x is not None for x in (resource_basis,coverage_basis,audience_basis,idle_basis)):
+        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis,audience_basis,idle_basis) if x is not None])
         result['streakCompatibilityKey'] = result['measurementVersion']
     if 'warnings' in facts:
         result['warnings']=facts['warnings']
