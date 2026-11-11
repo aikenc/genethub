@@ -45,6 +45,7 @@ from genehub_agent import rpc as _rpc
 PROFILES = (
     "normal",
     "terminal-persist",
+    "coded-failure",
     "cli-question",
     "cli-command",
     "provider-cli",
@@ -327,6 +328,11 @@ class FixtureSession(Session):
             self.pending = None
             journal("resume-invalidated", sessionId=self.native)
             self.ctx.emit(events.turn_failed(turn_id, "External conversation no longer exists", "upstream"))
+            return
+
+        if profile == "coded-failure":
+            self.pending = None
+            self.ctx.emit(events.turn_failed(turn_id, "Controlled native terminal failure", CONTROL.get("failureCode", "upstream")))
             return
 
         if profile == "cli-command":

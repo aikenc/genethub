@@ -131,6 +131,8 @@ export interface ScriptAgentControl {
   processTree?: boolean;
   /** cli-command reports its actual running argv child through the public SDK PID event. */
   commandProcess?: boolean;
+  /** Native SDK terminal code, with no product state or error-text injection. */
+  failureCode?: "missingCredentials" | "rateLimited" | "upstream" | "timeout" | "agentCrashed" | "canceled" | "internal";
   /** Emit one completed tool item per turn, named by this value. */
   tool?: string;
   /** The profile's fault fires once per state directory, then the Agent behaves normally. */
@@ -145,6 +147,7 @@ export type ScriptAgentProfile =
   | "normal"
   /** Invalidates its resume handle immediately before a requested failure. */
   | "terminal-persist"
+  | "coded-failure"
   /** Calls the real public CLI with its Session controller identity, then stops. */
   | "cli-question"
   /** Executes a JSON argv/cwd request through a real Agent-bound child process. */
