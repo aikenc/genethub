@@ -779,6 +779,7 @@ def reconcile_withdrawals(t, root):
             intent['withdrawCheckedAtMs'] = t.now_ms()
             intent['withdrawRetryAtMs'] = t.now_ms() + 300_000
             t.write_json(path, intent)
+            protocol_error = None
             try:
                 result = t.remote_receive(target, dict(id=operation, workspaceId=target['workspaceId'],
                     role=request['role'], operation='settle-prepare' if settling else 'withdraw-prepare', originalRequest=original))
@@ -791,7 +792,17 @@ def reconcile_withdrawals(t, root):
                     intent['withdrawError'] = 'executor retained an existing receipt or resource'
             except (t.ExpertError, OSError, subprocess.TimeoutExpired) as error:
                 intent['withdrawError'] = str(error)[:600]
+                if isinstance(error, t.ExpertError) and error.code == 'REMOTE_PROTOCOL_UNSUPPORTED':
+                    protocol_error = error.what
             t.write_json(path, intent)
+            if protocol_error:
+                # Reuse reflection's durable input, keyed by the original
+                # operation; a retry or an already handled note stays one note.
+                t.add_note(root, {'kind': 'anomaly', 'from': 'system:remote-protocol',
+                    'session': None, 'turn': None, 'ref': None, 'quote': '',
+                    'text': '远端协议不兼容',
+                    'context': '原派单 %s：%s。保留原意图、回执与资源；沿定义源同步远端运行制品后核对原任务，不重派。' % (operation, protocol_error)},
+                    'remote-protocol', operation, protocol_error)
     # Durable negative result precedes notification. Retry uses the same native
     # input identity and body; a paused requester remains paused.
     notices = [x for x in records(t, root, 'task-dispatch')
