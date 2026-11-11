@@ -39,6 +39,27 @@ defineSpecialty({
     const front=await r.create("ctl-cli-command");
     const task=await ok(front,["task","start","--space","leader","--desc","bounded observation fixture","--request-id","quality.goal","Coordinate independent bounded checks"]);
     const owner=task.owner.sessionId as string;await idle(owner);
+    // A paused native Owner still owns an unfinished user goal. A documented
+    // age limit must not archive its observation or silently resolve the task.
+    const ownerPending=r.state("pending",owner+".json");
+    const originalConfig=readFileSync(config,"utf8");
+    try {
+      writeFileSync(config,originalConfig+"\nTEAM_GIVEUP_AFTER=0\n");
+      await r.client.call({type:"session.interrupt",payload:{sessionId:owner}});
+      await t.tools.waitUntil(async()=>Boolean((await r.snapshot(owner)).summary.inputSummary?.paused),10000);
+      r.ok(["hook"]);
+      t.assertions.assert(existsSync(ownerPending)
+        && !JSON.parse(readFileSync(r.state("tasks",task.taskId+".json"),"utf8")).finished,
+        "age limit archived a paused Owner with an unfinished user goal");
+      const observed=JSON.parse(readFileSync(ownerPending,"utf8")).observedAtMs;
+      r.ok(["hook"]);
+      t.assertions.assert(existsSync(ownerPending)
+        && JSON.parse(readFileSync(ownerPending,"utf8")).observedAtMs>observed
+        && (await r.snapshot(owner)).summary.inputSummary?.paused===true,
+        "unresolved paused Owner lost ongoing observation or was automatically resumed");
+    } finally { writeFileSync(config,originalConfig); }
+    const continued=await ok(owner,["task","status",task.taskId]);
+    t.assertions.assert(continued.owner.sessionId===owner,"explicit continuation replaced the original Owner");
     const first=await ok(owner,["task","support",task.taskId,"--space","qa","--desc","original check","--request-id","quality.original","Check a bounded artifact"]);
     await idle(first.collaborator);
     const status=await ok(owner,["task","status",task.taskId]);
