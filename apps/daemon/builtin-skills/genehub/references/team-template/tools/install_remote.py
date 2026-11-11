@@ -65,7 +65,7 @@ def shell(machine, workspace, argv):
 # This small bootstrap runs under the target daemon's Python. Archive bytes
 # travel exclusively through file download, never through shell output.
 BOOTSTRAP = r'''
-import hashlib,json,os,pathlib,subprocess,sys,zipfile,tempfile
+import hashlib,json,os,pathlib,subprocess,sys,zipfile,tempfile,shutil
 c=json.loads(sys.argv[1])
 base=pathlib.Path(c['target']) if c.get('target') else pathlib.Path.home()/'.genehub-teams'/c['source']
 c['target']=str(base); base.parent.mkdir(parents=True,exist_ok=True)
@@ -77,16 +77,22 @@ if not archive.exists():
  if p.returncode or result.get('state')!='completed': raise RuntimeError('transfer incomplete: '+p.stdout[-2000:])
 if hashlib.sha256(archive.read_bytes()).hexdigest()!=c['digest']: raise RuntimeError('archive digest mismatch')
 stage=pathlib.Path(tempfile.mkdtemp(prefix='.'+base.name+'.incoming-',dir=base.parent))
-with zipfile.ZipFile(archive) as z:
- for item in z.infolist():
-  p=pathlib.PurePosixPath(item.filename)
-  if p.is_absolute() or '..' in p.parts or (item.external_attr>>16)&0o170000==0o120000: raise RuntimeError('unsafe archive')
- z.extractall(stage)
- for item in z.infolist():
-  if not item.is_dir(): (stage/item.filename).chmod((item.external_attr>>16)&0o777 or 0o644)
-p=subprocess.run([sys.executable,'-B',str(stage/'tools/install_remote.py'),'--accept',json.dumps(c)],text=True,capture_output=True)
-if p.returncode: raise RuntimeError(p.stdout+p.stderr)
-print(p.stdout.strip())
+try:
+ with zipfile.ZipFile(archive) as z:
+  for item in z.infolist():
+   p=pathlib.PurePosixPath(item.filename)
+   if p.is_absolute() or '..' in p.parts or (item.external_attr>>16)&0o170000==0o120000: raise RuntimeError('unsafe archive')
+  z.extractall(stage)
+  for item in z.infolist():
+   if not item.is_dir(): (stage/item.filename).chmod((item.external_attr>>16)&0o777 or 0o644)
+ p=subprocess.run([sys.executable,'-B',str(stage/'tools/install_remote.py'),'--accept',json.dumps(c)],text=True,capture_output=True)
+ if p.returncode: raise RuntimeError(p.stdout+p.stderr)
+ print(p.stdout.strip())
+finally:
+ # Only this invocation's unregistered temporary copy is ours to remove.
+ # Successful replacement moves it away; rollback keeps the old target or
+ # its separate backup. Never sweep older stages, backups or the target.
+ if stage.exists(): shutil.rmtree(stage)
 '''
 
 
