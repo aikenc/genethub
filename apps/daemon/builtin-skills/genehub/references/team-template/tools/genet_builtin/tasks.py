@@ -144,6 +144,8 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         name, mine = t.me(root)
         if (not machine and role not in mine.get('spaces', {})) or role in ('root', 'front', 'default'):
             raise t.ExpertError('目标不是已登记执行岗位', '没有派单', '先核对 directory；前台不作为写工位')
+        if machine and directory:
+            raise t.ExpertError('远端工位必须使用执行端固定绑定', '没有派单', '核对远端岗位的 WORKTREE_DIR')
         if not old:
             with t.inbox_lock(root, 'task-capacity', purpose='任务共享预算'):
                 intents = records(t, root, 'task-dispatch')
@@ -156,8 +158,6 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
                     raise t.ExpertError('团队或任务共享预算已到限额', '没有创建额外会话', '保留任务成果，核对预算后明确决定')
                 old = dict(version=1, operationId=op_id, request=request, state='creating',
                            selection=None, lock=None, createdAtMs=t.now_ms(), recoverable=False, createAttempted=False)
-                if machine:
-                    old['remoteResourceMode'] = 'session'
                 t.write_json(path, old)
         quality_events.emit(t, root, 'dispatch', op_id, at_ms=old['createdAtMs'],
                             taskId=task['taskId'], operationId=op_id, requester=requester,
@@ -182,9 +182,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         prompt = ('[任务上下文] taskId=%s；本次派单=%s；请求方会话=%s。\n'
                   '你是该任务的负责执行会话，可以直接实施；需要支持时使用 task support，结果自动回到本会话。'
                   '收尾前用 task finish 提交明确结论和证据；普通中间回复不代表任务完成。\n%s\n%s'
-                  % (task['taskId'], op_id, requester,
-                     ('固定业务目录：' + (directory if machine else resolved)) if (directory if machine else resolved)
-                     else '尚未认领业务写目录；修改项目前先 task bind-directory。', goal))
+                  % (task['taskId'], op_id, requester, ('固定业务目录：' + resolved) if resolved else '尚未认领业务写目录；修改项目前先 task bind-directory。', goal))
         remote = None
         prompt = record.get('prompt') or (parallelism_text(t, root, task['taskId']) + prompt)
         record['prompt'] = prompt
@@ -195,9 +193,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         # can consume its first business input, including remote execution.
         if operation == task['taskId'] + ':owner':
             task['owner'] = dict(sessionId=sid, machine=machine, space=role)
-            if record.get('remoteBinding'):
-                task['executionBinding'] = dict(record['remoteBinding'], machine=machine)
-            elif resolved:
+            if resolved:
                 task['executionBinding'] = dict(directory=resolved, sessionId=sid, lock=lock)
             t.write_json(task_path(t, root, task['taskId']), task)
         else:
@@ -209,20 +205,6 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         activate(t, root, record, path)
         return record
 
-
-
-def remote_prepare_request(record):
-    # Old intents reconstruct their exact original wire payload, including
-    # withdrawal/settlement retries. Only new intents opt into session resources.
-    request, target = record['request'], record['target']
-    envelope = dict(id=record['operationId'], workspaceId=target['workspaceId'], role=request['role'],
-                    desc=request['desc'], text=record['prompt'], tier=request.get('tier'),
-                    model=request.get('model'), media=None, prepareOnly=True, returnTo=record['returnTo'])
-    if record.get('remoteResourceMode') == 'session':
-        envelope['resourceMode'] = 'session'
-        if request.get('directory') is not None:
-            envelope['directory'] = request['directory']
-    return envelope
 
 
 def prepare_intent(t, root, record):
@@ -240,15 +222,10 @@ def prepare_intent(t, root, record):
         record['target'] = target
         record.setdefault('returnTo', t.source_route(root))
         t.write_json(t.state_dir(root, 'task-dispatch', op_id + '.json'), record)
-        result = t.remote_receive(target, remote_prepare_request(record))
+        remote_request = dict(id=op_id, workspaceId=target['workspaceId'], role=role, desc=desc, text=prompt,
+                              tier=tier, model=model, media=None, prepareOnly=True, returnTo=record['returnTo'])
+        result = t.remote_receive(target, remote_request)
         sid, why = result['sessionId'], result['why']
-        if record.get('remoteResourceMode') == 'session' and request.get('directory') is not None:
-            binding = result.get('binding')
-            if (not isinstance(binding, dict) or binding.get('sessionId') != sid
-                    or not isinstance(binding.get('directory'), str) or not binding['directory']
-                    or not isinstance(binding.get('lock'), str) or not binding['lock']):
-                raise TeamConfigurationError('executor did not confirm its exact requested resource binding')
-            record['remoteBinding'] = binding
         remote = dict(id=op_id, target=target)
     else:
         sid, why = t.start(root, mine['spaces'][role], role, desc, prompt, t.role_model_key(role),
@@ -285,9 +262,7 @@ def activate(t, root, record, path):
     owner_op = 'taskop.' + identity(task['taskId'] + ':owner')
     if record['operationId'] == owner_op and not task.get('owner'):
         task['owner'] = dict(sessionId=sid, machine=record['request'].get('machine'), space=record['request']['role'])
-        if record.get('remoteBinding'):
-            task['executionBinding'] = dict(record['remoteBinding'], machine=record['request']['machine'])
-        elif record['request'].get('directory') and not record['request'].get('machine'):
+        if record['request'].get('directory'):
             task['executionBinding'] = dict(directory=t.resolve_expert_dir(root, record['request']['directory']), sessionId=sid, lock=record.get('lock'))
         t.write_json(task_path(t, root, task['taskId']), task)
     elif record['operationId'] != owner_op and not any(x['operationId'] == record['operationId'] for x in task['collaborators']):
@@ -360,9 +335,7 @@ def command(t, args, root=None, sender=None):
                               args.machine, args.directory, args.tier, args.model, parameters)
             if not task.get('owner'):
                 task['owner'] = dict(sessionId=result['sessionId'], machine=result['request'].get('machine'), space=args.space)
-                if result.get('remoteBinding'):
-                    task['executionBinding'] = dict(result['remoteBinding'], machine=result['request']['machine'])
-                elif args.directory and not result['request'].get('machine'):
+                if args.directory:
                     task['executionBinding'] = dict(directory=t.resolve_expert_dir(root, args.directory), sessionId=result['sessionId'], lock=result.get('lock'))
                 t.write_json(path, task)
         publish(t, root)
@@ -396,9 +369,6 @@ def command(t, args, root=None, sender=None):
         publish(t, root)
         print(json.dumps(dict(taskId=task['taskId'], collaborator=result['sessionId'], parallelism=parallelism(t, root, task['taskId'])), ensure_ascii=False))
     elif action == 'finish':
-        outstanding = [x for x in records(t, root, 'pending') if x.get('requester') == sid and not x.get('done')]
-        if outstanding and args.outcome == 'success':
-            raise t.ExpertError('必需协作尚未结算', '没有把任务标成成功', '核对支持结果或明确报告阻塞')
         with t.inbox_lock(root, task['taskId'], purpose='任务结论'):
             task = read_task(t, root, task['taskId'])
             outcome = dict(outcome=args.outcome, evidence=' '.join(args.words), atMs=t.now_ms())
@@ -407,6 +377,8 @@ def command(t, args, root=None, sender=None):
                 if prior.get('outcome') != args.outcome or prior.get('evidence') != outcome['evidence']:
                     raise t.ExpertError('原任务结论已记录', '没有覆盖结论', '新要求通过明确恢复继续原任务')
                 outcome = prior
+            if not prior:
+                require_results_read(t, root, sid)
             if not prior and args.outcome == 'success':
                 decision = check_decision(runtime.workflow.check_completion(runtime.for_operation(task['taskId'] + ':' + sid), completion_view(task, sid, outcome)))
                 if not decision.allowed:
@@ -440,6 +412,24 @@ def command(t, args, root=None, sender=None):
         print(json.dumps(dict(taskId=task['taskId'], accepted=True), ensure_ascii=False))
     elif action == 'bind-directory':
         print(json.dumps(bind_directory(t, root, task['taskId'], sid, args.directory), ensure_ascii=False))
+
+
+def require_results_read(t, root, sid):
+    """Queue acceptance is not consumption. Keep resource and read obligations separate."""
+    parent = t.read_dispatch_record(t.state_dir(root, 'pending', sid + '.json')) or {}
+    inspection = t.genet('session', 'inspect', sid, *t.machine_args(parent.get('machine')), timeout=5)['inspection']
+    receipts = inspection.get('retainedInputs')
+    if not isinstance(receipts, list):
+        raise t.ExpertError('无法核对原生输入读入回执', '没有结束任务', '保留原任务，恢复原生读取后重试')
+    consumed = {x['messageId'] for x in receipts if isinstance(x.get('deliveredAtMs'), (int, float))}
+    unread = any(x.get('state') != 'handled' and x.get('messageId') not in consumed for x in receipts)
+    outstanding = [x for x in records(t, root, 'pending') if x.get('requester') == sid
+                   and (not (x.get('resultDelivery') or {}).get('queued')
+                        or (x.get('resultDelivery') or {}).get('messageId') not in consumed)]
+    inbox = any(item.get('purpose') == 'result' and t._inbox_message_id(sid, item) not in consumed
+                for item in t.peek_session_inbox(root, sid))
+    if outstanding or has_intent(t, root, sid) or unread or inbox:
+        raise t.ExpertError('必需结果或追加输入尚未读入', '没有结束任务，结果与资源义务保留', '读入原生排队消息并核对支持结果后沿原任务收尾')
 
 
 def completion_view(task, sid, outcome):
@@ -857,7 +847,9 @@ def reconcile_withdrawals(t, root):
             # Reconstruct the exact original target-side prepare envelope.
             if not intent.get('prompt') or not intent.get('returnTo'):
                 continue
-            original = remote_prepare_request(intent)
+            original = dict(id=operation, workspaceId=target['workspaceId'], role=request['role'],
+                            desc=request['desc'], text=intent['prompt'], tier=request.get('tier'),
+                            model=request.get('model'), media=None, prepareOnly=True, returnTo=intent['returnTo'])
             intent['withdrawCheckedAtMs'] = t.now_ms()
             intent['withdrawRetryAtMs'] = t.now_ms() + 300_000
             t.write_json(path, intent)

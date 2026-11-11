@@ -484,8 +484,6 @@ def remote_receive(target, request):
     # could interpret a new operation as an ordinary prepare request.
     settling = request.get("operation") == "settle-prepare"
     withdrawing = request.get("operation") == "withdraw-prepare" or settling
-    if not request.get('operation') and request.get('resourceMode') == 'session':
-        argv.append('--require-session-workstation')
     if withdrawing:
         argv[argv.index("--timeout") + 1] = "15"
         argv.append("--require-prepare-settlement" if settling else "--require-dispatch-fence")
@@ -503,7 +501,7 @@ def remote_receive(target, request):
                          if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
         required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
-                                          "--require-quality-metadata", "--require-session-workstation") if flag in argv), None)
+                                          "--require-quality-metadata") if flag in argv), None)
         if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
             diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
                                  if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
@@ -573,10 +571,6 @@ def _cmd_receive(args):
     if len(raw if isinstance(raw, bytes) else raw.encode("utf-8")) > 1024 * 1024:
         raise ExpertError("接单请求超过 1MiB", "没有执行操作，原任务和回执保留", "缩小请求或用已有文件传输传递产物")
     request = json.loads(raw)
-    session_resource = request.get('resourceMode') == 'session' and request.get('prepareOnly') is True and not request.get('operation')
-    if (request.get('resourceMode') is not None and not session_resource
-            or bool(args.require_session_workstation) != session_resource):
-        raise ExpertError('会话工位需要匹配的准备协议', '没有创建会话或认领工位', '同步支持该协议的执行端并保留原派单编号')
     key = request.get("id")
     if not isinstance(key, str) or not key or len(key) > 200:
         raise ExpertError("缺少有效派单编号", "没有创建会话", "传入 1–200 字符的稳定 id")
@@ -691,15 +685,11 @@ def _cmd_receive(args):
                                 print(json.dumps({"ok": True, "withdrawn": False, "id": key,
                                                   "reason": "native creation reservation retained"}))
                                 return
-            # Missing receipts can coexist with an explicit new resource or
-            # a legacy receiver's configured lease. Neither may be fenced away.
             configured = open_env(role_root).get("WORKTREE_DIR")
-            for candidate in (original.get('directory'), configured):
-                if candidate is None:
-                    continue
-                if not isinstance(candidate, str) or not candidate:
-                    raise ExpertError('准备工位记录无效', '原意图保留，没有撤回', '核对原始执行端工位')
-                directory = resolve_expert_dir(root, candidate)
+            if configured:
+                directory = resolve_expert_dir(root, configured)
+                # A pre-create reservation without a receipt is also uncertainty.
+                # Do not release it or a newer writer in this protocol.
                 holder = read_json(os.path.join(writer_lock(directory), "genet-writer.json"), {}) or {}
                 if holder.get("requestId") == key:
                     print(json.dumps({"ok": True, "withdrawn": False, "id": key,
@@ -816,8 +806,7 @@ def _cmd_receive(args):
                     genet("session", "send", old["sessionId"], request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
                     old['activated'] = True
                     write_json(receipt_path,old)
-                print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"],
-                                  "binding": {"directory": old['directory'], "sessionId": old['sessionId'], "lock": old['lock']} if old.get('directory') else None}))
+                print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"]}))
                 return
             if not old.get("recoverable") or not old.get("selection"):
                 raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
@@ -827,12 +816,8 @@ def _cmd_receive(args):
         lock = old.get("lock") if old else None
         directory = old.get("directory") if old else None
         configured = open_env(role_root).get("WORKTREE_DIR")
-        explicit = request.get('directory') if session_resource else None
-        if session_resource and explicit is not None and (not isinstance(explicit, str) or not os.path.isabs(explicit) or not os.path.isdir(explicit)):
-            raise ExpertError('远端工位必须是执行端已存在的绝对目录', '没有创建会话或源端目录', '先在执行端准备独立工位')
-        legacy_directory = not session_resource and role != 'research' and (configured or not request.get('prepareOnly'))
-        if not old and (explicit is not None or legacy_directory):
-            directory = resolve_expert_dir(root, explicit if session_resource else (configured or role_root))
+        if role != "research" and not old and (configured or not request.get("prepareOnly")):
+            directory = resolve_expert_dir(root, configured or role_root)
             with inbox_lock(writer_lock(directory), "writer", purpose="写者锁"):
                 lock, won = claim(directory, {"session": None, "requestId": key, "at": now_ms()}, "genet-writer.json")
                 if not won:
@@ -855,8 +840,7 @@ def _cmd_receive(args):
             genet("session", "send", sid, request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
             record["activated"] = True
             write_json(receipt_path,record)
-        print(json.dumps({"ok": True, "sessionId": sid, "why": why,
-                          "binding": {"directory": directory, "sessionId": sid, "lock": lock} if directory else None}))
+        print(json.dumps({"ok": True, "sessionId": sid, "why": why}))
 
 
 def child_role_names(root):
@@ -1149,11 +1133,11 @@ def live_sessions(workspace_id, machine=None):
     return [item for item in sessions_of(workspace_id, machine) if not item.get("archived")]
 
 
-def session_summary(session_id, machine=None):
+def session_summary(session_id, machine=None, fresh=False):
     # Coordination needs live status and inbox metadata, not the Agent's full
     # native conversation. The explicit summary mode skips the history view,
     # including narrative cloning and digesting, in watchdog/lock checks.
-    synced = _synced(machine)
+    synced = None if fresh else _synced(machine)
     if synced is not None:
         found = [row for (_, sid), row in synced[0].items() if sid == session_id]
         if len(found) == 1:
@@ -1490,9 +1474,9 @@ def _inbox_message_id(session_id, item):
     return item.get("messageId") or message_id(session_id, json.dumps(item, ensure_ascii=False, sort_keys=True))
 
 
-def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_parts=(), machine=None):
+def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_parts=(), machine=None, delivery_id=None):
     path = state_dir(root, "inbox", session_id + ".jsonl")
-    stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
+    stable_id = delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)
     with inbox_lock(root, session_id):
         for existing in _inbox_paths(root, session_id):
             if any(_inbox_message_id(session_id, item) == stable_id for item in _read_inbox(existing)):
@@ -1646,7 +1630,10 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
                     if stable in pending_ids:
                         kept.append(item)
                     continue
-                if not can_send:
+                # Results enter the native queue even during a long round or
+                # Human pause. --system preserves pause; ordinary inbox traffic
+                # retains its existing idle/explicit-control behavior.
+                if not can_send and item.get('purpose') != 'result':
                     kept.append(item)
                     continue
                 if not force and _has_unfinished_children(root, session_id) and item.get("purpose") not in ("human", "patrol", "task", "question", "result"):
@@ -1670,9 +1657,7 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
                 quality_events.emit(sys.modules[__name__], root, 'input-accepted', session_id + ':' + stable,
                                     sessionId=session_id, messageId=stable, purpose=item.get('purpose'),
                                     ref=item.get('ref'), machine=machine, timeBasis='observed-acceptance')
-                after_inputs = (session_summary(session_id, machine).get("inputSummary") or {})
-                if stable in set(after_inputs.get("pendingMessageIds") or []):
-                    kept.append(item)
+                kept.append(item)  # acceptance is not consumption; next tick reads native state
                 # Persist each receipt before touching another message. A crash
                 # before this write retries exactly the same ID and body.
                 _write_inbox(path, kept + items[items.index(item) + 1:])
@@ -1685,7 +1670,7 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
     return delivered
 
 
-def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False, machine=None):
+def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False, machine=None, delivery_id=None):
     if machine is None:
         # Reports and watchers use the same exact persisted address as results.
         # No role-name/latest-session fallback when the recipient is remote.
@@ -1698,18 +1683,18 @@ def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=No
             raise ExpertError("该会话没有本团队尚未结束的远端派单回执", "没有投递或重新启动会话", "新任务用 spawn；补充要求使用仍在 pending 中的派单会话")
         target = dispatch["target"]
         if record.get("taskId"):
-            push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts, machine=machine)
-            return "queue" if flush_session_inbox_if_idle(root, session_id) else "inbox"
-        stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
+            push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts, machine=machine, delivery_id=delivery_id)
+            return "queue" if (flush_session_inbox_if_idle(root, session_id) or any(item.get("accepted") and _inbox_message_id(session_id, item) == (delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)) for item in peek_session_inbox(root, session_id))) else "inbox"
+        stable_id = delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)
         remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
                                "role": record["kind"], "operation": "notice", "sessionId": session_id,
                                "purpose": purpose, "sender": sender, "text": text, "ref": ref, "messageId": stable_id})
         return "queue"
     team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("TEAM_MODE") or is_team_root(root))
     if team_mode:
-        push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts)
-        return "queue" if flush_session_inbox_if_idle(root, session_id) else "inbox"
-    notice(session_id, purpose, sender, text, *id_parts, ref=ref)
+        push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts, delivery_id=delivery_id)
+        return "queue" if (flush_session_inbox_if_idle(root, session_id) or any(item.get("accepted") and _inbox_message_id(session_id, item) == (delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)) for item in peek_session_inbox(root, session_id))) else "inbox"
+    notice(session_id, purpose, sender, text, *id_parts, ref=ref, delivery_id=delivery_id)
     return "queue"
 
 
@@ -4392,7 +4377,7 @@ def reconcile(root, name, mine):
     for _, rec in records:
         bkey = rec.get("batch") or rec["sessionId"]
         batch_counts[bkey] = batch_counts.get(bkey, 0) + 1
-        if rec.get("done"):
+        if rec.get("done") or rec.get("siblingResultReady"):
             batch_has_done.add(bkey)
     closed = set()
     stopped_after = setting(root, "TEAM_STOPPED_AFTER", STOPPED_AFTER_S)
@@ -4602,99 +4587,72 @@ def reconcile(root, name, mine):
             update_pending(root, path, record)
             record_system_issue(root, "team-reconcile", str(error), record.get("sessionId"))
             continue
-    batches = {}
+    ready_batches = {rec.get('batch') for _, rec in records if rec.get('done') and rec.get('batch')}
+    for path, rec in records:
+        if rec.get('batch') in ready_batches and not rec.get('done'):
+            rec['siblingResultReady'] = True
+            update_pending(root, path, rec)
     for path, record in records:
-        if record["sessionId"] not in closed:
-            batches.setdefault(record.get("batch") or record["sessionId"], []).append((path, record))
-    for batch_key, group in batches.items():
-        if not all(item[1].get("done") for item in group):
+        if record['sessionId'] in closed or not record.get('done'):
             continue
-        # Do not partially retire a batch after publishing it. Confirm every
-        # executor release first; a failed release retains the whole batch.
-        released = [release_remote(root, p, rec) for p, rec in group]
-        if not all(released):
-            continue
-        to = group[0][1].get("requester") or front
-        parent_record = read_dispatch_record(state_dir(root, "pending", str(to) + ".json")) or {}
-        parent_machine = parent_record.get("machine")
-        should_unpause = False
-        if to:
+        try:
+            resource_ready = True
             try:
-                to_summary = session_summary(to, parent_machine)
-            except ExpertError as error:
-                if any(rec.get("taskId") for _, rec in group):
-                    for path, rec in group:
-                        rec["lastReconcileError"] = error.what
-                        update_pending(root, path, rec)
+                if record.get('taskId'):
+                    resource_ready = team_tasks.release_local(sys.modules[__name__], root, record)
+                remote_ready = release_remote(root, path, record)
+                resource_ready = resource_ready and remote_ready
+            except (ExpertError, TeamConfigurationError, OSError, subprocess.TimeoutExpired) as error:
+                resource_ready = False
+                record['lastReconcileError'] = str(error)[:300]
+                update_pending(root, path, record)
+            # A failed release can mean a new correction raced with the result.
+            # Do not publish an obsolete reply; resource-only failures need not
+            # withhold a still-current conclusion from its requester.
+            if not resource_ready:
+                latest = session_summary(record['sessionId'], record.get('machine'), fresh=True)
+                if (latest.get('status') not in ('idle', 'failed')
+                        or ((latest.get('latestReply') or {}).get('itemId') != record['done']['reply']
+                            and record['done'].get('outcome') == 'ok')):
                     continue
-                to_summary = None
-                if front and to != front:
+            to = record.get('requester') or front
+            parent = read_dispatch_record(state_dir(root, 'pending', str(to) + '.json')) or {}
+            parent_machine = parent.get('machine')
+            done = record['done']
+            delivery = record.get('resultDelivery') or {}
+            key = [to, done['reply']]
+            if delivery.get('generation') != key:
+                wt = (' [工位: %s, 分支: %s]' % (record['worktree'], record.get('branch') or '-')) if record.get('worktree') else ''
+                sender = '%s（%s）%s' % (record['sessionId'], record['desc'], wt)
+                text = '%s\n\nref: %s' % (done['text'], done['ref'])
+                if record.get('taskId') and parent.get('taskId') == record['taskId']:
+                    text = team_tasks.parallelism_text(sys.modules[__name__], root, record['taskId']) + text
+                delivery = dict(generation=key, recipient=to, machine=parent_machine,
+                                sender=sender, text=text, ref=done['ref'], queued=False)
+                if to:
+                    delivery['messageId'] = message_id(to, 'result', sender, text, done['ref'], record['sessionId'], done['reply'])
+                record['resultDelivery'] = delivery
+                update_pending(root, path, record)  # durable identity before any send
+            if to and not delivery.get('queued'):
+                _advance_parent_baseline(root, to)
+                accepted = deliver_or_notice(root, to, 'result', delivery['sender'], delivery['text'],
+                    ref=delivery['ref'], machine=delivery.get('machine'), delivery_id=delivery['messageId'])
+                delivery['queued'] = accepted == 'queue'
+                update_pending(root, path, record)
+            for watcher in record.get('watchers') or []:
+                if watcher and watcher != to:
                     try:
-                        to_summary = session_summary(front)
-                        to = front
-                        parent_machine = None
-                    except ExpertError:
-                        to = None
-                else:
-                    to = None
-            if to and to_summary:
-                to_status = to_summary.get("status")
-                if to_status not in ("idle", "failed"):
-                    # Law 2 (Hold-Until-Parent-Ready): the parent is still in its own round.
-                    # Keep completed children in pending/ so `has_children` stays True until the parent is ready!
-                    continue
-                to_inputs = to_summary.get("inputSummary") or {}
-                if to_status == "idle" and to_inputs.get("paused") and to == front:
-                    should_unpause = False
-                else:
-                    should_unpause = (to_status == "failed") or bool(to_inputs.get("paused"))
-                _advance_parent_baseline(root, to, to_summary)
-        decision_context = ""
-        task_id = group[0][1].get("taskId")
-        if task_id and parent_record.get("taskId") == task_id:
-            # Freeze the hint with this result generation: changing counts
-            # during a transport retry must not create a new message identity.
-            path, first = group[0]
-            key = team_tasks.identity(json.dumps([to, *[rec["done"]["reply"] for _, rec in group]]))
-            saved = first.get("decisionContext") or {}
-            if saved.get("key") != key:
-                saved = dict(key=key, text=team_tasks.parallelism_text(sys.modules[__name__], root, task_id))
-                first["decisionContext"] = saved
-                update_pending(root, path, first)
-            decision_context = saved["text"]
-        watchers = []
-        for _, rec in group:
-            for w in (rec.get("watchers") or []):
-                if w and w != to and w not in watchers:
-                    watchers.append(w)
-        if len(group) == 1:
-            path, record = group[0]
-            done = record["done"]
-            wt_extra = (" [工位: %s, 分支: %s]" % (record["worktree"], record.get("branch") or "-")) if record.get("worktree") else ""
-            if to:
-                deliver_or_notice(root, to, "result", "%s（%s）%s" % (record["sessionId"], record["desc"], wt_extra), decision_context + "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], ref=done["ref"], unpause=should_unpause, machine=parent_machine)
-            for w in watchers:
-                try:
-                    deliver_or_notice(root, w, "result", "%s（%s）" % (record["sessionId"], record["desc"]), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], "watcher", w, ref=done["ref"])
-                except Exception:
-                    pass
-            move(root, path, record)
-        else:
-            if to:
-                refs = ", ".join(item[1]["done"]["ref"] for item in group)
-                parts = []
-                for _, rec in group:
-                    wt_line = ("\nworktree: %s (branch: %s)" % (rec["worktree"], rec.get("branch") or "-")) if rec.get("worktree") else ""
-                    parts.append("### %s（%s）\nref: %s%s\n\n%s" % (rec["sessionId"], rec["desc"], rec["done"]["ref"], wt_line, rec["done"]["text"]))
-                sender = "批次完成（%d 项）：%s" % (len(group), "、".join(item[1]["sessionId"] for item in group))
-                deliver_or_notice(root, to, "result", sender, decision_context + "\n\n".join(parts), batch_key, *(item[1]["done"]["reply"] for item in group), ref=refs, unpause=should_unpause, machine=parent_machine)
-            for w in watchers:
-                try:
-                    deliver_or_notice(root, w, "result", sender, "\n\n".join(parts), batch_key, "watcher", w, ref=refs)
-                except Exception:
-                    pass
-            for path, rec in group:
-                move(root, path, rec)
+                        deliver_or_notice(root, watcher, 'result', delivery['sender'],
+                            '%s\n\nref: %s' % (done['text'], done['ref']), record['sessionId'], done['reply'],
+                            'watcher', watcher, ref=done['ref'])
+                    except Exception:
+                        pass
+            if resource_ready and (not to or delivery.get('queued')):
+                move(root, path, record)
+        except (ExpertError, TeamConfigurationError, OSError, subprocess.TimeoutExpired) as error:
+            record['lastReconcileError'] = str(error)[:300]
+            update_pending(root, path, record)
+            record_system_issue(root, 'result-delivery', str(error), record.get('operationId') or record['sessionId'])
     inbox_dir = state_dir(root, "inbox")
     if os.path.isdir(inbox_dir):
         session_ids = {entry.split(".jsonl", 1)[0] for entry in os.listdir(inbox_dir) if ".jsonl" in entry and (entry.endswith(".jsonl") or entry.endswith(".read"))}
@@ -5257,7 +5215,6 @@ def main(argv):
     receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
     receive.add_argument("--require-prepare-settlement", action="store_true", help="require exact no-create acknowledgement; old receivers must reject before mutation")
-    receive.add_argument('--require-session-workstation', action='store_true', help='require per-session executor resources; old receivers reject before mutation')
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
