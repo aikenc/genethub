@@ -476,14 +476,67 @@ sys.exit(r.returncode)
     // A real competing writer rejects preparation before a native Session
     // exists. Restoring its overdue source intent must not leave it unknown
     // forever, retry business, or disturb that writer.
+    const intentsRoot = path.join(sourceRoot, ".genethub/team/task-dispatch");
     const roleEnv = path.join(targetRoot, "spaces/qa/.genethub/open.env");
     const previousRoleEnv = existsSync(roleEnv) ? readFileSync(roleEnv) : null;
     mkdirSync(path.dirname(roleEnv), { recursive: true });
+    // The configured role directory is held by the first real Owner. A new
+    // Task is a distinct execution Session, not another writer of that directory.
     writeFileSync(roleEnv, `WORKTREE_DIR=${remoteDirectory}\n`);
-    const refused = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.refused" : v));
+    let secondOwnerReply: Awaited<ReturnType<typeof callTask>>;
+    try {
+      secondOwnerReply = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.independent" : v));
+    } finally {
+      if (previousRoleEnv) writeFileSync(roleEnv, previousRoleEnv); else unlinkSync(roleEnv);
+    }
+    t.assertions.assert(secondOwnerReply.code === 0, "the remote Space was still treated as an exclusive workstation: " + secondOwnerReply.err);
+    const secondTask = JSON.parse(secondOwnerReply.out.trim().split("\n").at(-1)!);
+    const secondOwner = secondTask.owner.sessionId;
+    await idleSession(secondOwner, true);
+    const contested = await callTask(secondOwner, targetRoot, ["task", "bind-directory", secondTask.taskId, "--directory", remoteDirectory], true);
+    t.assertions.assert(contested.code !== 0 && JSON.parse(readFileSync(boundReply.lock, "utf8")).session === remoteOwner, "independent remote session stole the first Owner's actual directory");
+    const secondReleaseObservedAfter=Date.now();
+    const secondDone = await callTask(secondOwner, targetRoot, ["task", "finish", secondTask.taskId, "--outcome", "success", "Read-only independent remote task completed"], true);
+    t.assertions.assert(secondDone.code === 0, "second remote Owner did not settle");
+    await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", secondTask.taskId + ".json"), "utf8")).state === "delivered"; }, 30000);
+    t.assertions.assert(existsSync(boundReply.lock), "unrelated remote task released another Owner's resource");
+    const noLeaseWork=(await qualityFacts()).workItems.find((x:any)=>x.sessionId===secondOwner);
+    const noLeaseBound=releaseEvents().find(e=>e.kind==="resource-release-observed"&&e.sessionId===secondOwner);
+    t.assertions.assert(!!noLeaseBound && noLeaseBound.atMs>=secondReleaseObservedAfter && noLeaseWork?.releasedAtMs===noLeaseBound.atMs && noLeaseWork.releaseTimeBasis==="observed-absence-upper-bound", "hourly collection lost or relabeled the real remote release observation");
+    // An external old CLI grammar rejects the mandatory new protocol before
+    // native creation. Restoring a pre-upgrade source intent then uses the old
+    // exact envelope against a real prepared receiver, without changing its ID.
+    const legacyArgs=beginOwner.map(v=>v==="remote.owner.task"?"remote.owner.legacy-resume":v);
+    const legacyCount=(await cliJson(["session","list","--workspace",qa.id,"--limit","100"],true)).sessions.length;
+    writeFileSync(compatibilityMarker,"legacy");
+    let oldGrammar: Awaited<ReturnType<typeof callTask>>;
+    try {oldGrammar=await callTask(callerSid,sourceRoot,legacyArgs);} finally {unlinkSync(compatibilityMarker);}
+    t.assertions.assert(oldGrammar.code!==0 && oldGrammar.err.includes("--require-session-workstation")
+      && (await cliJson(["session","list","--workspace",qa.id,"--limit","100"],true)).sessions.length===legacyCount,
+      "old receiver mutated before rejecting the per-session resource protocol");
+    const legacyIntentPath=readdirSync(intentsRoot).map(f=>path.join(intentsRoot,f)).find(f=>{const r=JSON.parse(readFileSync(f,"utf8"));return r.state==="creating"&&!r.sessionId;})!;
+    const legacyIntent=JSON.parse(readFileSync(legacyIntentPath,"utf8"));
+    t.assertions.assert(legacyIntent.remoteResourceMode==="session","new remote intent did not durably select its resource protocol");
+    delete legacyIntent.remoteResourceMode; // restored pre-upgrade ledger fixture
+    writeFileSync(legacyIntentPath,JSON.stringify(legacyIntent));
+    const legacyRequest={id:legacyIntent.operationId,workspaceId:qa.id,role:"qa",desc:legacyIntent.request.desc,text:legacyIntent.prompt,
+      tier:legacyIntent.request.tier,model:legacyIntent.request.model,media:null,prepareOnly:true,returnTo:legacyIntent.returnTo};
+    const legacyPrepare=spawnSync(python,[path.join(targetRoot,"tools/team.py"),"receive",JSON.stringify(legacyRequest)],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    t.assertions.assert(legacyPrepare.status===0,"restored legacy prepare failed: "+legacyPrepare.stderr);
+    const legacySid=JSON.parse(legacyPrepare.stdout).sessionId;
+    const legacyRetry=await callTask(callerSid,sourceRoot,legacyArgs);
+    t.assertions.assert(legacyRetry.code===0 && JSON.parse(legacyRetry.out.trim().split("\n").at(-1)!).owner.sessionId===legacySid
+      && JSON.stringify(targetReceipt(legacyIntent.operationId).request)===JSON.stringify(legacyRequest),
+      "pre-upgrade intent retry changed its original receive envelope or duplicated a Session");
+    await idleSession(legacySid,true);
+    const legacyFinish=await callTask(legacySid,targetRoot,["task","finish",legacyIntent.request.taskId,"--outcome","success","Legacy operation resumed with original receipt"],true);
+    t.assertions.assert(legacyFinish.code===0,"legacy resumed task did not finish");
+    await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw new Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",legacyIntent.request.taskId+".json"),"utf8")).state==="delivered";},30000);
+    writeFileSync(roleEnv, `WORKTREE_DIR=${remoteDirectory}\n`);
+    const refused = await callTask(callerSid, sourceRoot, [...beginOwner.slice(0,-1), "--directory", remoteDirectory, beginOwner.at(-1)!].map(v => v === "remote.owner.task" ? "remote.owner.refused" : v));
     t.assertions.assert(refused.code !== 0 && refused.err.includes("写锁"), "actual competing writer did not reject remote preparation");
     if (previousRoleEnv) writeFileSync(roleEnv, previousRoleEnv); else unlinkSync(roleEnv);
-    const intentsRoot = path.join(sourceRoot, ".genethub/team/task-dispatch");
+
     const refusedPath = readdirSync(intentsRoot).map(f => path.join(intentsRoot, f)).find(f => {
       const row = JSON.parse(readFileSync(f, "utf8"));
       return row.state === "creating" && !row.sessionId;
@@ -558,7 +611,7 @@ sys.exit(r.returncode)
     let timelyRefusal: Awaited<ReturnType<typeof callTask>>;
     try {
       timelyRefusal = await callTask(callerSid, sourceRoot,
-        beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.timely-refusal" : v));
+        [...beginOwner.slice(0,-1), "--directory", remoteDirectory, beginOwner.at(-1)!].map(v => v === "remote.owner.task" ? "remote.owner.timely-refusal" : v));
     } finally {
       if (previousRoleEnv) writeFileSync(roleEnv, previousRoleEnv); else unlinkSync(roleEnv);
     }
@@ -588,21 +641,46 @@ sys.exit(r.returncode)
       && readFileSync(boundReply.lock).equals(originalLease)
       && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === timelyCount,
       "timely negative acknowledgement created work or changed the independent writer");
-    const secondOwnerReply = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.independent" : v));
-    t.assertions.assert(secondOwnerReply.code === 0, "the remote Space was still treated as an exclusive workstation: " + secondOwnerReply.err);
-    const secondTask = JSON.parse(secondOwnerReply.out.trim().split("\n").at(-1)!);
-    const secondOwner = secondTask.owner.sessionId;
-    await idleSession(secondOwner, true);
-    const contested = await callTask(secondOwner, targetRoot, ["task", "bind-directory", secondTask.taskId, "--directory", remoteDirectory], true);
-    t.assertions.assert(contested.code !== 0 && JSON.parse(readFileSync(boundReply.lock, "utf8")).session === remoteOwner, "independent remote session stole the first Owner's actual directory");
-    const secondReleaseObservedAfter=Date.now();
-    const secondDone = await callTask(secondOwner, targetRoot, ["task", "finish", secondTask.taskId, "--outcome", "success", "Read-only independent remote task completed"], true);
-    t.assertions.assert(secondDone.code === 0, "second remote Owner did not settle");
-    await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", secondTask.taskId + ".json"), "utf8")).state === "delivered"; }, 30000);
-    t.assertions.assert(existsSync(boundReply.lock), "unrelated remote task released another Owner's resource");
-    const noLeaseWork=(await qualityFacts()).workItems.find((x:any)=>x.sessionId===secondOwner);
-    const noLeaseBound=releaseEvents().find(e=>e.kind==="resource-release-observed"&&e.sessionId===secondOwner);
-    t.assertions.assert(!!noLeaseBound && noLeaseBound.atMs>=secondReleaseObservedAfter && noLeaseWork?.releasedAtMs===noLeaseBound.atMs && noLeaseWork.releaseTimeBasis==="observed-absence-upper-bound", "hourly collection lost or relabeled the real remote release observation");
+    const explicitDirectory = path.join(targetRoot, "explicit-session-workstation"); mkdirSync(explicitDirectory);
+    const explicitArgs = [...beginOwner.slice(0,-1).map(v => v === "remote.owner.task" ? "remote.owner.explicit" : v), "--directory", explicitDirectory, beginOwner.at(-1)!];
+    const explicitReply = await callTask(callerSid, sourceRoot, explicitArgs);
+    t.assertions.assert(explicitReply.code === 0, "explicit executor directory was rejected or claimed on the source: " + explicitReply.err);
+    const explicitTask = JSON.parse(explicitReply.out.trim().split("\n").at(-1)!);
+    const explicitOwner = explicitTask.owner.sessionId; await idleSession(explicitOwner, true);
+    const explicitState = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", explicitTask.taskId + ".json"), "utf8"));
+    const explicitIntent = readdirSync(intentsRoot).map(f => JSON.parse(readFileSync(path.join(intentsRoot,f),"utf8"))).find(r=>r.sessionId===explicitOwner)!;
+    const explicitReceipt = targetReceipt(explicitIntent.operationId);
+    t.assertions.assert(explicitIntent.lock === null && explicitIntent.resourcePlan === null && !explicitIntent.resourceBinding
+      && explicitState.executionBinding?.directory === explicitDirectory && explicitState.executionBinding?.machine === machine
+      && explicitReceipt.directory === explicitDirectory && JSON.parse(readFileSync(explicitReceipt.lock,"utf8")).session === explicitOwner,
+      "remote directory acquired a source lease or lost its exact executor binding");
+    for(const leaseKind of ["explicit","legacy"] as const) {
+      const key="reserved-without-receipt-"+leaseKind;
+      const original={...explicitReceipt.request,id:key};
+      const protectedLock=leaseKind==="explicit"?explicitReceipt.lock:boundReply.lock;
+      const before=readFileSync(protectedLock),holder=JSON.parse(before.toString());
+      const beforeEnv=existsSync(roleEnv)?readFileSync(roleEnv):null;
+      try {
+        writeFileSync(protectedLock,JSON.stringify({...holder,requestId:key}));
+        writeFileSync(roleEnv,`WORKTREE_DIR=${remoteDirectory}\n`);
+        const retainedBytes=readFileSync(protectedLock);
+        const r=spawnSync(python,[path.join(targetRoot,"tools/team.py"),"receive",JSON.stringify({id:key,workspaceId:qa.id,role:"qa",operation:"settle-prepare",originalRequest:original}),"--require-prepare-settlement"],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+        t.assertions.assert(r.status===0 && JSON.parse(r.stdout).withdrawn===false
+          && readFileSync(protectedLock).equals(retainedBytes)
+          && !existsSync(path.join(targetDispatchDir,createHash("sha256").update(key).digest("hex")+".json")),
+          "missing receipt fenced a retained "+leaseKind+" exact writer reservation");
+      } finally {
+        writeFileSync(protectedLock,before);
+        if(beforeEnv)writeFileSync(roleEnv,beforeEnv);else unlinkSync(roleEnv);
+      }
+    }
+    const explicitRetry=await callTask(callerSid,sourceRoot,explicitArgs);
+    t.assertions.assert(explicitRetry.code===0 && JSON.parse(explicitRetry.out.trim().split("\n").at(-1)!).owner.sessionId===explicitOwner,
+      "same explicit Task retry created a new executor Session");
+    const explicitDone=await callTask(explicitOwner,targetRoot,["task","finish",explicitTask.taskId,"--outcome","success","Independent executor workstation complete"],true);
+    t.assertions.assert(explicitDone.code===0,"explicit remote Task did not finish");
+    await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw new Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",explicitTask.taskId+".json"),"utf8")).state==="delivered";},30000);
+    t.assertions.assert(!existsSync(explicitReceipt.lock) && existsSync(boundReply.lock),"explicit task release affected the independent original writer");
     t.note("TaskOwner remote: source ownership saved; asking source support");
     // Changing the install default cannot redirect already accepted work.
     writeFileSync(path.join(targetRoot,".genethub/task-source.json"),JSON.stringify({machineId:"m_missing",workspaceId:"w_missing",role:"qa",command:[python,"/missing/run.py"]}));
