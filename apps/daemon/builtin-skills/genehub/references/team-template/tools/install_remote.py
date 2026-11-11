@@ -224,6 +224,18 @@ def accept(config):
         print(json.dumps(results if config.get('roles') else results[0],ensure_ascii=False))
 
 
+def retain_archive(temporary, zipped, digest):
+    """Publish immutable bytes without changing the identity of active readers."""
+    try:
+        os.link(temporary, zipped)
+    except FileExistsError:
+        if (zipped.is_symlink() or not zipped.is_file()
+                or zipped.stat().st_size != temporary.stat().st_size
+                or hashlib.sha256(zipped.read_bytes()).hexdigest() != digest):
+            raise RuntimeError('existing content-addressed archive differs; retained for inspection')
+    temporary.unlink()
+
+
 def install(output, source, machine, roles, destination=None):
     """Transfer one verified complete Team output and install `roles` on `machine`."""
     from genet_builtin import team
@@ -231,21 +243,23 @@ def install(output, source, machine, roles, destination=None):
     route = team.source_route(str(source))
     source_id = team.projection_source(str(source),route['machineId'])
     archive_dir = source/'temp'/'artifacts'; archive_dir.mkdir(parents=True,exist_ok=True)
-    # Deterministic archive bytes make retries reuse the same download.
-    temporary = archive_dir/(hashlib.sha256((','.join(roles)+machine+(destination or '')).encode()).hexdigest()+'.new')
+    # Keep both deterministic bytes and file identity stable across retries.
+    # Private staging prevents another writer from modifying a published inode.
     files = owned(output)
-    with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED) as z:
-        for directory in sorted(p for p in output.rglob('*') if p.is_dir()):
-            z.writestr(zipfile.ZipInfo(directory.relative_to(output).as_posix()+'/',date_time=(2020,1,1,0,0,0)),b'')
-        for relative in sorted(files):
-            child = output/relative
-            if child.is_file():
-                info = zipfile.ZipInfo(child.relative_to(output).as_posix(),date_time=(2020,1,1,0,0,0))
-                info.external_attr = (stat.S_IFREG | stat.S_IMODE(child.stat().st_mode)) << 16
-                z.writestr(info,child.read_bytes())
-    digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
-    zipped = archive_dir/(digest+'.zip')
-    os.replace(temporary,zipped)
+    with tempfile.TemporaryDirectory(prefix='.archive-',dir=archive_dir) as staging:
+        temporary = Path(staging)/'artifact.zip'
+        with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED) as z:
+            for directory in sorted(p for p in output.rglob('*') if p.is_dir()):
+                z.writestr(zipfile.ZipInfo(directory.relative_to(output).as_posix()+'/',date_time=(2020,1,1,0,0,0)),b'')
+            for relative in sorted(files):
+                child = output/relative
+                if child.is_file():
+                    info = zipfile.ZipInfo(child.relative_to(output).as_posix(),date_time=(2020,1,1,0,0,0))
+                    info.external_attr = (stat.S_IFREG | stat.S_IMODE(child.stat().st_mode)) << 16
+                    z.writestr(info,child.read_bytes())
+        digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        zipped = archive_dir/(digest+'.zip')
+        retain_archive(temporary,zipped,digest)
     config = dict(archive=str(zipped),digest=digest,target=destination,source=source_id,returnTo=route,
                   definitionSource=dict(machineId=route['machineId'],workspaceId=route['workspaceId'],sourcePath=str(source)))
     if destination is None: config['roles'] = roles
