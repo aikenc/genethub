@@ -4633,6 +4633,19 @@ def reconcile(root, name, mine):
                 else:
                     should_unpause = (to_status == "failed") or bool(to_inputs.get("paused"))
                 _advance_parent_baseline(root, to, to_summary)
+        decision_context = ""
+        task_id = group[0][1].get("taskId")
+        if task_id and parent_record.get("taskId") == task_id:
+            # Freeze the hint with this result generation: changing counts
+            # during a transport retry must not create a new message identity.
+            path, first = group[0]
+            key = team_tasks.identity(json.dumps([to, *[rec["done"]["reply"] for _, rec in group]]))
+            saved = first.get("decisionContext") or {}
+            if saved.get("key") != key:
+                saved = dict(key=key, text=team_tasks.parallelism_text(sys.modules[__name__], root, task_id))
+                first["decisionContext"] = saved
+                update_pending(root, path, first)
+            decision_context = saved["text"]
         watchers = []
         for _, rec in group:
             for w in (rec.get("watchers") or []):
@@ -4643,7 +4656,7 @@ def reconcile(root, name, mine):
             done = record["done"]
             wt_extra = (" [工位: %s, 分支: %s]" % (record["worktree"], record.get("branch") or "-")) if record.get("worktree") else ""
             if to:
-                deliver_or_notice(root, to, "result", "%s（%s）%s" % (record["sessionId"], record["desc"], wt_extra), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], ref=done["ref"], unpause=should_unpause, machine=parent_machine)
+                deliver_or_notice(root, to, "result", "%s（%s）%s" % (record["sessionId"], record["desc"], wt_extra), decision_context + "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], ref=done["ref"], unpause=should_unpause, machine=parent_machine)
             for w in watchers:
                 try:
                     deliver_or_notice(root, w, "result", "%s（%s）" % (record["sessionId"], record["desc"]), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], "watcher", w, ref=done["ref"])
@@ -4658,7 +4671,7 @@ def reconcile(root, name, mine):
                     wt_line = ("\nworktree: %s (branch: %s)" % (rec["worktree"], rec.get("branch") or "-")) if rec.get("worktree") else ""
                     parts.append("### %s（%s）\nref: %s%s\n\n%s" % (rec["sessionId"], rec["desc"], rec["done"]["ref"], wt_line, rec["done"]["text"]))
                 sender = "批次完成（%d 项）：%s" % (len(group), "、".join(item[1]["sessionId"] for item in group))
-                deliver_or_notice(root, to, "result", sender, "\n\n".join(parts), batch_key, *(item[1]["done"]["reply"] for item in group), ref=refs, unpause=should_unpause, machine=parent_machine)
+                deliver_or_notice(root, to, "result", sender, decision_context + "\n\n".join(parts), batch_key, *(item[1]["done"]["reply"] for item in group), ref=refs, unpause=should_unpause, machine=parent_machine)
             for w in watchers:
                 try:
                     deliver_or_notice(root, w, "result", sender, "\n\n".join(parts), batch_key, "watcher", w, ref=refs)

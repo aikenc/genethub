@@ -38,6 +38,56 @@ def read_task(t, root, task_id):
     return value
 
 
+
+def parallelism(t, root, task_id):
+    """Decision information from the task ledger, never a dispatch gate.
+
+    Idle coordination remains in flight. Paused/waiting sessions do not;
+    unobserved, stale or unreadable state is unknown. R6 uses native work
+    intervals independently, not this point-in-time ledger count.
+    """
+    result = dict(basis='task-ledger-observation/1', asOfMs=t.now_ms(),
+                  target=5, minimum=2, inFlight=0, unknown=0, paused=0,
+                  waitingForUser=0, unsettled=0, available=True)
+    try:
+        task = read_task(t, root, task_id)
+        people = ([task['owner']] if task.get('owner') else []) + task.get('collaborators', [])
+        people = {x['sessionId']: x for x in people if x.get('sessionId')}
+        pending = {x['sessionId']: x for x in records(t, root, 'pending') if x.get('taskId') == task_id}
+        for sid, person in people.items():
+            finished = task.get('finished') if sid == (task.get('owner') or {}).get('sessionId') else person.get('finished')
+            if finished:
+                continue
+            result['unsettled'] += 1
+            rec = pending.get(sid, {})
+            age = result['asOfMs'] - rec.get('observedAtMs', 0)
+            if rec.get('lastReconcileError') or not 0 <= age <= 120000 or rec.get('observedStatus') not in ('running', 'idle'):
+                result['unknown'] += 1
+            elif rec.get('observedPaused'):
+                result['paused'] += 1
+            elif rec.get('observedRequests'):
+                result['waitingForUser'] += 1
+            else:
+                result['inFlight'] += 1
+        for rec in records(t, root, 'task-dispatch'):
+            if (rec.get('request', {}).get('taskId') == task_id and rec.get('state') in ('creating', 'prepared')
+                    and rec.get('sessionId') not in people):
+                result['unsettled'] += 1; result['unknown'] += 1
+    except Exception:
+        # A diagnostic read must not turn a successful task action into failure.
+        result.update(available=False, inFlight=None, unknown=None, unsettled=None)
+    return result
+
+
+def parallelism_text(t, root, task_id):
+    v = parallelism(t, root, task_id)
+    known = str(v['inFlight']) if v['available'] else '未知'
+    unknown = str(v['unknown']) if v['available'] else '未知'
+    return ('[并行决策信息] 本任务在途 %s，未知 %s；预计超过30分钟且可拆时目标5、最少2，短任务直接完成。'
+            '在途含协调会话，暂停/等待用户不计；基于最近120秒内的账本观测，不是R6实际Agent工时。\n'
+            % (known, unknown))
+
+
 def own_session(t):
     sid = os.environ.get('GENEHUB_SESSION_ID')
     if not sid or not t.SESSION_ID.fullmatch(sid):
@@ -134,6 +184,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
                   '收尾前用 task finish 提交明确结论和证据；普通中间回复不代表任务完成。\n%s\n%s'
                   % (task['taskId'], op_id, requester, ('固定业务目录：' + resolved) if resolved else '尚未认领业务写目录；修改项目前先 task bind-directory。', goal))
         remote = None
+        prompt = record.get('prompt') or (parallelism_text(t, root, task['taskId']) + prompt)
         record['prompt'] = prompt
         record['createAttempted'] = True
         t.write_json(path, record)
@@ -288,12 +339,12 @@ def command(t, args, root=None, sender=None):
                     task['executionBinding'] = dict(directory=t.resolve_expert_dir(root, args.directory), sessionId=result['sessionId'], lock=result.get('lock'))
                 t.write_json(path, task)
         publish(t, root)
-        print(json.dumps(dict(taskId=task_id, owner=task['owner'], state=task['state']), ensure_ascii=False))
+        print(json.dumps(dict(taskId=task_id, owner=task['owner'], state=task['state'], parallelism=parallelism(t, root, task_id)), ensure_ascii=False))
         return
     task = read_task(t, root, args.task_id)
     path = task_path(t, root, args.task_id)
     if action == 'status':
-        print(json.dumps(task, ensure_ascii=False)); return
+        print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId'])), ensure_ascii=False)); return
     if action in ('support', 'finish', 'bind-directory') and sid != (task.get('owner') or {}).get('sessionId'):
         # A collaborator can finish its own bounded work, but cannot finish another owner's task.
         mine = next((x for x in task.get('collaborators', []) if x['sessionId'] == sid), None)
@@ -316,7 +367,7 @@ def command(t, args, root=None, sender=None):
                 task['collaborators'].append(dict(operationId=result['operationId'], sessionId=result['sessionId'], machine=result['request'].get('machine'), requester=sid))
                 t.write_json(path, task)
         publish(t, root)
-        print(json.dumps(dict(taskId=task['taskId'], collaborator=result['sessionId']), ensure_ascii=False))
+        print(json.dumps(dict(taskId=task['taskId'], collaborator=result['sessionId'], parallelism=parallelism(t, root, task['taskId'])), ensure_ascii=False))
     elif action == 'finish':
         outstanding = [x for x in records(t, root, 'pending') if x.get('requester') == sid and not x.get('done')]
         if outstanding and args.outcome == 'success':
