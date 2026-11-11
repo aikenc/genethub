@@ -351,6 +351,8 @@ class FixtureSession(Session):
             return
 
         if profile == "cli-command":
+            if CONTROL.get("expectedResume"):
+                journal("continuation-received", matched=CONTROL["expectedResume"] in text)
             try:
                 request = json.loads(text)
             except (ValueError, TypeError):
