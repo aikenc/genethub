@@ -92,6 +92,17 @@ defineSpecialty({
       t.assertions.assert(concluded.finished?.outcome === outcome
         && concluded.finished.unresolvedWork?.pending.some((x: any) => x.sessionId === sid), "non-success conclusion lost its outstanding support evidence");
       r.ok(["tick"]); await idle(front);
+      const ownerPending = r.state("pending", coordinator+".json");
+      const ownerRecord = JSON.parse(readFileSync(existsSync(ownerPending) ? ownerPending : r.state("done", coordinator+".json"), "utf8"));
+      const resultId = ownerRecord.resultDelivery?.messageId;
+      const frontResults = (await r.snapshot(front)).items.filter(x => x.type === "userMessage" && x.id === resultId);
+      t.assertions.assert(ownerRecord.done?.outcome === outcome && ownerRecord.resultDelivery?.queued === true
+        && frontResults.length === 1 && frontResults[0].type === "userMessage"
+        && frontResults[0].text.includes("Unfinished support retained; no success claimed"),
+        "recorded non-success owner conclusion was withheld from its actual requester by unfinished support");
+      r.ok(["tick"]); await idle(front);
+      t.assertions.assert((await r.snapshot(front)).items.filter(x => x.type === "userMessage" && x.id === resultId).length === 1,
+        "retained support replayed its owner's recorded conclusion");
       t.assertions.assert(existsSync(pending.lock) && (await r.snapshot(sid)).summary.inputSummary?.paused,
         "parent non-success conclusion released or resumed its paused writer");
       await cli(sid, ["task", "finish", parent.taskId, "--outcome", "success", "Actual late independent support result"]);
