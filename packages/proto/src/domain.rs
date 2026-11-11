@@ -1295,6 +1295,12 @@ pub struct RoundSummary {
     #[ts(type = "number")]
     pub ended_at_ms: i64,
     pub outcome: RoundLayerOutcome,
+    /// Native terminal code, or `kernelUnsettled` when the kernel projects an
+    /// unfinished persisted Round as failed without a live execution. The
+    /// latter identifies a settlement gap, not a guessed provider error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_code: Option<String>,
     pub trunk_count: u32,
 }
 

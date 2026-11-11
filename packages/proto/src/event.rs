@@ -134,6 +134,11 @@ pub enum TurnOutcome {
 pub struct TurnStats {
     pub turn_id: String,
     pub outcome: TurnOutcome,
+    /// Exact terminal error code, retained without copying error text.
+    /// Absent for successful/canceled turns and pre-instrumentation history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_code: Option<TurnErrorCode>,
     #[ts(type = "number")]
     pub started_at_ms: i64,
     #[ts(type = "number")]

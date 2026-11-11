@@ -1441,7 +1441,13 @@ export type RoundLayerOutcome = "completed" | "failed" | "canceled" | "supersede
 /**
  * Compact session-layer description of one user request.
  */
-export type RoundSummary = { roundId: string, userItemId?: string, startedAtMs: number, endedAtMs: number, outcome: RoundLayerOutcome, trunkCount: number, };
+export type RoundSummary = { roundId: string, userItemId?: string, startedAtMs: number, endedAtMs: number, outcome: RoundLayerOutcome, 
+/**
+ * Native terminal code, or `kernelUnsettled` when the kernel projects an
+ * unfinished persisted Round as failed without a live execution. The
+ * latter identifies a settlement gap, not a guessed provider error.
+ */
+failureCode?: string, trunkCount: number, };
 
 export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch>, };
 
@@ -2164,7 +2170,12 @@ export type TurnOutcome = "completed" | "failed" | "canceled";
 /**
  * Metrics retained with the turn rather than only with the latest event.
  */
-export type TurnStats = { turnId: string, outcome: TurnOutcome, startedAtMs: number, finishedAtMs: number, durationMs: number, usage: Usage, toolCalls: number, 
+export type TurnStats = { turnId: string, outcome: TurnOutcome, 
+/**
+ * Exact terminal error code, retained without copying error text.
+ * Absent for successful/canceled turns and pre-instrumentation history.
+ */
+failureCode?: TurnErrorCode, startedAtMs: number, finishedAtMs: number, durationMs: number, usage: Usage, toolCalls: number, 
 /**
  * Exact runtime that produced this turn. Optional for histories written
  * before in-session Agent switching existed.

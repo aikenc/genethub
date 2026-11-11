@@ -410,6 +410,7 @@ struct RoundView {
     started_at_ms: i64,
     ended_at_ms: i64,
     outcome: RoundLayerOutcome,
+    failure_code: Option<String>,
     trunk_count: u32,
 }
 
@@ -2639,6 +2640,21 @@ impl SessionManager {
             .as_ref()
             .filter(|round| round.outcome.is_none())
             .map(|round| round.round_id.clone());
+        let failures: HashMap<String, String> = live
+            .items
+            .lock()
+            .await
+            .iter()
+            .filter_map(|item| match item {
+                TimelineItem::TurnSummary { stats, .. } => stats.failure_code.and_then(|code| {
+                    serde_json::to_value(code)
+                        .ok()?
+                        .as_str()
+                        .map(|value| (stats.turn_id.clone(), value.to_owned()))
+                }),
+                _ => None,
+            })
+            .collect();
         let mut views: Vec<RoundView> = live
             .rounds
             .lock()
@@ -2651,6 +2667,17 @@ impl SessionManager {
                 user_item_id: record.user_item_id.clone(),
                 started_at_ms: record.started_at_ms,
                 ended_at_ms: record.ended_at_ms,
+                failure_code: match record.outcome {
+                    None if open.as_deref() != Some(record.round_id.as_str()) => {
+                        Some("kernelUnsettled".into())
+                    }
+                    Some(RoundOutcome::Failed) => record
+                        .adapter_turn_ids
+                        .iter()
+                        .rev()
+                        .find_map(|id| failures.get(id).cloned()),
+                    _ => None,
+                },
                 outcome: match record.outcome {
                     Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
                     Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
@@ -2676,6 +2703,7 @@ impl SessionManager {
             {
                 Some(view) => {
                     view.outcome = RoundLayerOutcome::Running;
+                    view.failure_code = None;
                     view.trunk_count = open_trunks;
                 }
                 None => views.push(RoundView {
@@ -2686,6 +2714,7 @@ impl SessionManager {
                     started_at_ms: round.started_at_ms,
                     ended_at_ms: 0,
                     outcome: RoundLayerOutcome::Running,
+                    failure_code: None,
                     trunk_count: open_trunks,
                 }),
             }
@@ -2754,6 +2783,15 @@ impl SessionManager {
                         user_item_id: record.user_item_id,
                         started_at_ms: record.started_at_ms,
                         ended_at_ms: record.ended_at_ms,
+                        failure_code: if record.outcome == Some(RoundOutcome::Failed) {
+                            record
+                                .adapter_turn_ids
+                                .iter()
+                                .rev()
+                                .find_map(|id| failures.get(id).cloned())
+                        } else {
+                            None
+                        },
                         outcome: match record.outcome {
                             Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
                             Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
@@ -5508,6 +5546,7 @@ fn round_summary(view: &RoundView) -> RoundSummary {
         started_at_ms: view.started_at_ms,
         ended_at_ms: view.ended_at_ms,
         outcome: view.outcome,
+        failure_code: view.failure_code.clone(),
         trunk_count: view.trunk_count,
     }
 }
@@ -7916,6 +7955,10 @@ fn turn_summary(
     Some(TurnStats {
         turn_id: turn_id.clone(),
         outcome,
+        failure_code: match event {
+            SessionEvent::TurnFailed { error, .. } => Some(error.code),
+            _ => None,
+        },
         started_at_ms,
         finished_at_ms,
         duration_ms: finished_at_ms.saturating_sub(started_at_ms) as u64,
@@ -9140,6 +9183,7 @@ mod tests {
                 stats: TurnStats {
                     turn_id: "source-turn".into(),
                     outcome: TurnOutcome::Completed,
+                    failure_code: None,
                     started_at_ms: 1,
                     finished_at_ms: 2,
                     duration_ms: 1,

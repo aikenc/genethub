@@ -439,6 +439,7 @@ mod tests {
             stats: TurnStats {
                 turn_id: id.into(),
                 outcome: TurnOutcome::Completed,
+                failure_code: None,
                 started_at_ms: 1,
                 finished_at_ms: 2,
                 duration_ms: 1,
