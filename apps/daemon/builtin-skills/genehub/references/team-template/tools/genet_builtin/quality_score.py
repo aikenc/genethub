@@ -75,6 +75,9 @@ def score(facts):
     resource_basis = facts.get('resourceObligationBasis')
     if resource_basis not in (None, 'dispatch-resource-obligation/2'):
         raise ValueError('unsupported resource obligation basis')
+    coverage_basis = facts.get('evidenceCoverageBasis')
+    if coverage_basis not in (None, 'per-source-failure-domain/1'):
+        raise ValueError('unsupported evidence coverage basis')
     start, end = facts['window']['startAtMs'], facts['window']['endAtMs']
     cutoff = facts['capturedAtMs']
     if not all(number(x) for x in (start, end, cutoff)) or not start < end <= cutoff:
@@ -323,9 +326,10 @@ def score(facts):
         result['redLines']['R6']['basis'] = 'task-agent-hours/1'
         result['effectiveInFlight']['basis'] = 'eligible-task-weighted-summary/1'
         result['streakCompatibilityKey'] = model
-    if resource_basis is not None:
-        result['resourceObligationBasis'] = resource_basis
-        result['measurementVersion'] = model+'+'+resource_basis
+    if resource_basis is not None:result['resourceObligationBasis'] = resource_basis
+    if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
+    if resource_basis is not None or coverage_basis is not None:
+        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis) if x is not None])
         result['streakCompatibilityKey'] = result['measurementVersion']
     from .quality_attribution import attach
     attach(result, facts)

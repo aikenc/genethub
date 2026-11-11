@@ -182,7 +182,29 @@ def idle_periods(samples, rounds, children, begin, stop):
     return periods
 
 
-def wake_observations(native, machines, log, start, end, complete, failure_times):
+def event_failures(state, since, cutoff):
+    """A failed ledger observation is not a missing native execution/receipt.
+
+    Unknown legacy failure kinds retain conservative lifecycle coverage. A
+    missing timestamp cannot establish a safe interval for negative evidence.
+    """
+    paths=sorted((Path(state)/'events/failures').glob('*'))
+    if len(paths)>10000:raise ValueError('event failures exceed bounded capture')
+    result=[]
+    for path in paths:
+        first=path.name.split('-')[0]
+        at=int(first) if first.isdigit() else None
+        if number(at) and not since <= at <= cutoff:continue
+        try:
+            value=read(path,maximum=8192)
+            kind=value.get('kind') if isinstance(value,dict) else None
+        except (OSError,ValueError,TypeError):kind=None
+        result.append({'atMs':at,'kind':kind if isinstance(kind,str) else 'unknown',
+                       'domain':'ledger' if kind in ('ledger-changed','ledger-observed','ledger-gap') else 'lifecycle'})
+    return result
+
+
+def wake_observations(native, machines, log, start, end, complete, failure_times, unplaced_gap=False):
     """Observe ledger increments, not the meaning or usefulness of a reply.
 
     Negative evidence requires uninterrupted instrumentation around the whole
@@ -215,7 +237,7 @@ def wake_observations(native, machines, log, start, end, complete, failure_times
                 else:
                     left = max((at for at in samples if at <= a), default=None)
                     right = min((at for at in samples if at >= b), default=None)
-                    if left is not None and right is not None:
+                    if not unplaced_gap and left is not None and right is not None:
                         covered = [at for at in samples if left <= at <= right]
                         if (a-left <= 125000 and right-b <= 125000
                                 and all(y-x <= 125000 for x,y in zip(covered,covered[1:]))
@@ -563,11 +585,14 @@ def capture(team, root, end, cutoff):
                 all_inputs.append(row)
         for turn in session.get('turns',[]):
             all_turns.append(dict(turn,sessionId=sid,coordination=sid in fronts or sid in reflect_ids or any(i['sessionId']==sid and i['role'] in ('reflect','team-reflect') for i in work)))
-    failures=list((state/'events/failures').glob('*'))
-    failure_times=[int(p.name.split('-')[0]) for p in failures if p.name.split('-')[0].isdigit()]
-    logger_clean=not any(start <= at <= cutoff for at in failure_times)
-    complete=not issues and logger_clean and before==template_digest()
-    wakes = wake_observations(native, wanted, log, metric_start, end, complete, failure_times)
+    failures=event_failures(state,metric_start,cutoff)
+    failure_times=[x['atMs'] for x in failures if number(x['atMs'])]
+    unplaced_gap=any(not number(x['atMs']) for x in failures)
+    lifecycle_failures=[x for x in failures if x['domain']=='lifecycle']
+    lifecycle_clean=not any(not number(x['atMs']) or start <= x['atMs'] <= cutoff for x in lifecycle_failures)
+    native_complete=not issues and before==template_digest()
+    complete=native_complete and lifecycle_clean
+    wakes = wake_observations(native, wanted, log, metric_start, end, native_complete, failure_times,unplaced_gap)
     baseline=read(store/'baseline.json',{})
     adopted=[i for i in work if i.get('disposition')=='adopted-inferred' and number(i.get('executionMs'))]
     if not baseline and len(adopted)>=20:
@@ -578,7 +603,7 @@ def capture(team, root, end, cutoff):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
             'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
                               'backgroundBasis':'registered-native-process-runtime/1',
                               'backgroundRunsAppliedToScore':False,
@@ -589,6 +614,9 @@ def capture(team, root, end, cutoff):
             'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
             'workItems':work,'goalIntervals':union_intervals([(a,b) for task_id,a,b in goals if task_id in goal_tasks]),'stalls':stalls,
             'inputs':all_inputs,'turns':all_turns,'wakes':wakes,'failures':[],'baseline':baseline,
+            'evidenceCoverage':{'schema':'team-evidence-coverage/1','nativeComplete':native_complete,
+                                'lifecycleEventsComplete':lifecycle_clean,'failureCount':len(failures),
+                                'ledgerGapTimes':failure_times,'unplacedGap':unplaced_gap},
             'wakeCoverage':{'basis':'native-nonhuman-rounds-task-ledger/1',
                             'known':sum(type(x['ledgerChanged']) is bool for x in wakes),
                             'unknown':sum(x['ledgerChanged'] is None for x in wakes)},
@@ -597,7 +625,7 @@ def capture(team, root, end, cutoff):
                         'deliveries':complete and all(s.get('retainedInputs') is not None for s in native.values()) and all(i['deliveryCoverageKnown'] for i in work if number(i.get('conclusionAtMs')) and i['conclusionAtMs'] < end),
                         'observations':complete and observed_complete,'idleObligations':complete and idle_complete,
                         'goals':complete and observed_complete and goal_ownership_known,
-                        'resources':complete and resources_complete,'turns':complete,'inputs':complete and all(s.get('retainedInputs') is not None and all(x.get('source') in ('user','agent','system','workflow') for x in s['retainedInputs']) for s in native.values())},
+                        'resources':complete and resources_complete,'turns':native_complete,'inputs':native_complete and all(s.get('retainedInputs') is not None and all(x.get('source') in ('user','agent','system','workflow') for x in s['retainedInputs']) for s in native.values())},
             'versions':{'platformAtCapture':[dict(selector=k,**v) for k,v in sorted(platforms.items(),key=lambda x:x[0] or '')],
                         'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
             'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
