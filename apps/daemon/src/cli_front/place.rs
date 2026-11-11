@@ -158,6 +158,7 @@ mod tests {
                     root_handle: format!("h{index}"),
                 })
                 .collect(),
+            preview_entries: None,
             workspace_file: None,
             agent_space: None,
             terminated_at_ms: None,

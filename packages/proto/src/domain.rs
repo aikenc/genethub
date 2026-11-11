@@ -513,6 +513,31 @@ pub struct AgentSpaceHealth {
     pub reasons: Vec<String>,
 }
 
+/// One project-pinned entry shown in the Workbench entry strip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreviewEntryInfo {
+    pub id: String,
+    pub title: String,
+    /// Path relative to the first project folder.
+    pub entry: String,
+    /// `fullscreen` (whole-page expanded preview) or `float`.
+    #[serde(default = "default_preview_open_mode")]
+    pub open_mode: String,
+    /// `file` or `service`.
+    #[serde(default = "default_preview_kind")]
+    pub kind: String,
+}
+
+fn default_preview_open_mode() -> String {
+    "fullscreen".into()
+}
+
+fn default_preview_kind() -> String {
+    "file".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -528,6 +553,10 @@ pub struct WorkspaceInfo {
     pub root: String,
     pub is_git_repo: bool,
     pub folders: Vec<WorkspaceFolderInfo>,
+    /// Project-pinned entries. Absent for projects that never pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preview_entries: Option<Vec<PreviewEntryInfo>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_file: Option<String>,

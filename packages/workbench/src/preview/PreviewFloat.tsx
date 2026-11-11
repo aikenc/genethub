@@ -81,7 +81,10 @@ export function PreviewFloat({
     return () => { controller.abort(); lease?.release(); };
   }, [connections, sameSource, source.deviceHandle]);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
-  const [mode, setMode] = useState<Mode>("expanded");
+  const [mode, setMode] = useState<Mode>(source.initialMode === "float" ? "float" : "expanded");
+  useEffect(() => {
+    setMode(source.initialMode === "float" ? "float" : "expanded");
+  }, [source.path, source.initialMode]);
   const [sizeLevel, setSizeLevel] = useState(0);
   const [pos, setPos] = useState(() => ({
     x: Math.max(EDGE, window.innerWidth - Math.round(BASE_W * SIZE_FACTORS[0]) - EDGE),
