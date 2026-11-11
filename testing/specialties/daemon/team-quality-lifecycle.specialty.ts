@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
@@ -112,6 +112,50 @@ defineSpecialty({
         .workActivity.excluded.length===0,"expired pause observation erased later unobserved time");
     } finally {writeFileSync(eventFile,savedSamples);}
     await ok(first.collaborator,["task","finish",task.taskId,"--outcome","success","Actual first check has concluded"]);
+    const historicalSupport=await ok(owner,["task","support",task.taskId,"--space","qa","--desc","no resource check","--request-id","quality.noresource","Conclude without taking a resource"]);
+    await idle(historicalSupport.collaborator);
+    await ok(historicalSupport.collaborator,["task","finish",task.taskId,"--outcome","success","No resource was acquired"]);
+    const historicalIntent=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8"))).find(x=>x.sessionId===historicalSupport.collaborator);
+    // Explicit historical ledger fixture, before the separate event failure.
+    // Native idle sessions/process absence stay real; restore all changed bytes.
+    const historicalTask=r.state("tasks",task.taskId+".json");
+    const historicalPath=r.state("task-dispatch",historicalIntent.operationId+".json");
+    const savedTask=readFileSync(historicalTask),savedIntent=readFileSync(historicalPath),savedEvents=readFileSync(eventFile);
+    const savedChecks=[original,historicalIntent.operationId].map(id=>{
+      const file=r.state("quality","resource-checks",id+".json");
+      return {file,bytes:existsSync(file)?readFileSync(file):null};
+    });
+    try {
+      const historical=JSON.parse(savedTask.toString());
+      const finishedAt=Date.now()-660000;
+      historical.collaborators.find((x:any)=>x.sessionId===historicalSupport.collaborator).finished.atMs=finishedAt;
+      writeFileSync(historicalTask,JSON.stringify(historical));
+      writeFileSync(historicalPath,JSON.stringify({...JSON.parse(savedIntent.toString()),createdAtMs:finishedAt-60000}));
+      const withoutRelease=savedEvents.toString().trim().split("\n").map(x=>JSON.parse(x))
+        .filter(x=>!(x.kind==="resource-released" && x.operationId===historicalIntent.operationId));
+      writeFileSync(eventFile,withoutRelease.map(x=>JSON.stringify(x)).join("\n")+"\n");
+      const noResource=r.command(["quality","facts"]);
+      t.assertions.assert(noResource.code===0,"historical no-resource capture failed: "+noResource.err);
+      const noResourceFacts=JSON.parse(noResource.out);
+      const noResourceItem=noResourceFacts.workItems.find((x:any)=>x.sessionId===historicalSupport.collaborator);
+      t.assertions.assert(noResourceItem?.resourceRequired===false && noResourceItem.releasedAtMs>finishedAt+600000,
+        "fixture did not reach late native absence for non-resource work");
+      t.assertions.assert(noResourceFacts.coverage.resources===true,
+        "a no-resource conclusion manufactured uncertain resource return coverage: "+JSON.stringify(noResourceFacts.issues));
+      historical.collaborators.find((x:any)=>x.sessionId===first.collaborator).finished.atMs=finishedAt;
+      writeFileSync(historicalTask,JSON.stringify(historical));
+      writeFileSync(eventFile,withoutRelease.filter(x=>!(x.kind==="resource-released" && x.operationId===original))
+        .map(x=>JSON.stringify(x)).join("\n")+"\n");
+      const leased=r.command(["quality","facts"]);
+      t.assertions.assert(leased.code===0 && JSON.parse(leased.out).coverage.resources===false,
+        "a real resource obligation lost uncertainty about its historical release time");
+    } finally {
+      writeFileSync(historicalTask,savedTask);writeFileSync(historicalPath,savedIntent);writeFileSync(eventFile,savedEvents);
+      for(const {file,bytes} of savedChecks) {
+        if(bytes) writeFileSync(file,bytes);
+        else if(existsSync(file)) unlinkSync(file);
+      }
+    }
     // Explicit real filesystem fault, after the first genuine conclusion.
     const saved=eventFile+".preserved";
     renameSync(eventFile,saved);mkdirSync(eventFile);
