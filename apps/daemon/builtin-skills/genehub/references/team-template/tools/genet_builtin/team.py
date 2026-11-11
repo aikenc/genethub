@@ -4538,6 +4538,22 @@ def reconcile(root, name, mine):
                         add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
                     said.append("stop")
                     update_pending(root, path, record)
+                failed_execution = status == 'failed' or (paused and TURN_FAILED_ERROR in (inputs.get('error') or ''))
+                if record.get('taskId') and failed_execution and not stopped_by_person and not record.get('taskConclusion'):
+                    # Task business may still be unfinished (including actual
+                    # children). Report this observed execution failure anyway;
+                    # never turn it into a business conclusion or resume it.
+                    # The normal publication and resource guards below retain
+                    # paused inputs, real child work and writer obligations.
+                    if not record.get('done'):
+                        round_id = latest_round(session_id, record.get('machine'))
+                        record['executionFailure'] = dict(status='failed', roundId=round_id, observedAtMs=now_ms())
+                        record['done'] = dict(outcome='failed',
+                            reply='native-failure:%s:%s' % (session_id, round_id or 'unknown'),
+                            ref='ghref:session:' + session_id,
+                            text='执行回合已失败，业务任务尚未结论；原输入、未完成支持及资源义务保留。\n原生错误：%s' % (inputs.get('error') or '无附加信息'))
+                        update_pending(root, path, record)
+                    continue
                 if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
                     if is_multi_batch and not record.get("quiet"):
                         if not record.get("done"):

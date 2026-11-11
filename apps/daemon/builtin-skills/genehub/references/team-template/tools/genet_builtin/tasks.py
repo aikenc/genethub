@@ -385,7 +385,9 @@ def command(t, args, root=None, sender=None):
                     raise t.ExpertError('原任务结论已记录', '没有覆盖结论', '新要求通过明确恢复继续原任务')
                 outcome = prior
             if not prior:
-                require_results_read(t, root, sid)
+                unresolved = require_results_read(t, root, sid, require_supports=args.outcome == 'success')
+                if unresolved['pending'] or unresolved['preparing']:
+                    outcome['unresolvedWork'] = dict(unresolved, observedAtMs=t.now_ms())
             if not prior and args.outcome == 'success':
                 decision = check_decision(runtime.workflow.check_completion(runtime.for_operation(task['taskId'] + ':' + sid), completion_view(task, sid, outcome)))
                 if not decision.allowed:
@@ -421,7 +423,7 @@ def command(t, args, root=None, sender=None):
         print(json.dumps(bind_directory(t, root, task['taskId'], sid, args.directory), ensure_ascii=False))
 
 
-def require_results_read(t, root, sid):
+def require_results_read(t, root, sid, require_supports=True):
     """Queue acceptance is not consumption. Keep resource and read obligations separate."""
     parent = t.read_dispatch_record(t.state_dir(root, 'pending', sid + '.json')) or {}
     inspection = t.genet('session', 'inspect', sid, *t.machine_args(parent.get('machine')), timeout=5)['inspection']
@@ -435,8 +437,16 @@ def require_results_read(t, root, sid):
                         or (x.get('resultDelivery') or {}).get('messageId') not in consumed)]
     inbox = any(item.get('purpose') == 'result' and t._inbox_message_id(sid, item) not in consumed
                 for item in t.peek_session_inbox(root, sid))
-    if outstanding or has_intent(t, root, sid) or unread or inbox:
+    preparing = [x for x in records(t, root, 'task-dispatch')
+                 if x.get('state') in ('creating', 'prepared') and x.get('request', {}).get('requester') == sid]
+    if (require_supports and (outstanding or preparing)) or unread or inbox:
         raise t.ExpertError('必需结果或追加输入尚未读入', '没有结束任务，结果与资源义务保留', '读入原生排队消息并核对支持结果后沿原任务收尾')
+    # A blocked/failed conclusion is an honest result, not a cancellation or a
+    # claim that its supports completed. Preserve the exact unresolved work in
+    # this conclusion, leaving its original ledgers, inputs and leases intact.
+    return dict(pending=[{k: x.get(k) for k in ('operationId', 'sessionId', 'taskId', 'machine')}
+                         for x in outstanding],
+                preparing=[{k: x.get(k) for k in ('operationId', 'state')} for x in preparing])
 
 
 def completion_view(task, sid, outcome):
