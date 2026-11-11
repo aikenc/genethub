@@ -464,7 +464,8 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => (await cliJson(["session", "get", callerSid])).summary.inputSummary?.paused, 10000);
     // The real shell must carry the old process's stderr and exit status.
     // Neither generic failure nor a missing protocol may settle/replay work.
-    for(const mode of ["unrelated","legacy"]) {
+    let protocolNoteId: string | undefined;
+    for(const mode of ["unrelated","legacy","legacy"]) {
       writeFileSync(compatibilityMarker,mode);
       try {
         const diagnostic=await script(["hook"]);
@@ -476,6 +477,17 @@ sys.exit(r.returncode)
           && !retained.withdrawError.includes("fixture-stderr-must-not-leak"),"unrelated stderr became a capability claim or leaked raw text");
         else t.assertions.assert(retained.withdrawError.includes("--require-prepare-settlement") && retained.withdrawError.includes("同步"),
           "old receiver protocol failure lost its actionable diagnostic: "+retained.withdrawError);
+        const notes = await script(["notes", "ls"]);
+        const diagnosticNotes = notes.stdout.split(/(?=^n[0-9a-f]{12}  )/m)
+          .filter(note => note.includes(refusedIntent.operationId) && note.includes("--require-prepare-settlement"));
+        t.assertions.assert(notes.code === 0 && !notes.stdout.includes("fixture-stderr-must-not-leak"), "public reflection notes leaked receiver stderr");
+        if (mode === "unrelated") t.assertions.assert(diagnosticNotes.length === 0, "unrelated failure became a protocol maintenance note");
+        else {
+          t.assertions.assert(diagnosticNotes.length === 1, "proven protocol failure is invisible or duplicated in reflection notes: " + diagnosticNotes.length);
+          const id = diagnosticNotes[0]!.match(/^n[0-9a-f]{12}/)?.[0];
+          t.assertions.assert(Boolean(id) && (!protocolNoteId || protocolNoteId === id), "repeated reconciliation created a new maintenance obligation");
+          protocolNoteId = id;
+        }
         t.assertions.assert((await cliJson(["session","list","--workspace",qa.id,"--limit","100"],true)).sessions.length===countBeforeSettlement,
           "unsupported receiver command created another native execution");
         retained.withdrawRetryAtMs=0; // isolated due-retry fixture, original operation stays intact
