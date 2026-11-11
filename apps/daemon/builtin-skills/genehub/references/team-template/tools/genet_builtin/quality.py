@@ -303,6 +303,12 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     store = state/'quality'
     start = end-HOUR
     metric_start = end-24*HOUR
+    from .quality_epoch import context as epoch_context
+    lifecycle = epoch_context(root, end)
+    if lifecycle['epoch']:
+        metric_start = max(metric_start, lifecycle['epoch']['atMs'])
+        start = max(start, metric_start)
+        if start >= end:raise ValueError('await the first post-adoption measurement hour')
     before = template_digest()
     log = events(root, cutoff)
     tasks = {v['taskId']: v for v in records(state/'tasks')}
@@ -410,6 +416,16 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                    and number(record.get('createdAtMs')) and record['createdAtMs'] >= metric_start}
     for sid in reflect_ids:
         wanted.setdefault(sid, pending[sid].get('machine'))
+    # A conclusion outside the metric horizon drops that cost/adoption sample,
+    # not its native membership in a root task still spanning this card. An
+    # epoch advance must not turn a readable finished support into unknown R6.
+    for task in tasks.values():
+        finished=(task.get('finished') or {}).get('atMs')
+        if not number(task.get('createdAtMs')) or task['createdAtMs']>=end or number(finished) and finished<=start:
+            continue
+        people=([task['owner']] if task.get('owner') else [])+task.get('collaborators',[])+task.get('previousOwners',[])
+        for person in people:
+            if person.get('sessionId'):wanted.setdefault(person['sessionId'],person.get('machine'))
     native, platforms, processes = {}, {}, {}
     for machine in sorted(set(wanted.values()),key=lambda x:x or ""):
         try:
@@ -620,7 +636,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                               'backgroundRunsAppliedToScore':False,
                               'note':'Measurement foundation; final versioned scoring model will consume timing segments and background runs'},
             'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
-            'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},
+            'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},'redlineLifecycle':lifecycle,
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
             'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
             'workItems':work,'goalIntervals':union_intervals([(a,b) for task_id,a,b in goals if task_id in goal_tasks]),'stalls':stalls,
@@ -654,14 +670,17 @@ def register(sub):
     c=a.add_parser('triage',help='record redline attribution without closing a repair');c.add_argument('incident')
     c.add_argument('--attribution',required=True,choices=['team','platform-template','kernel','provider','unknown'])
     c.add_argument('--evidence',required=True)
+    c=a.add_parser('resolve',help='verify repaired/adopted evidence and current native obligation before closing a redline')
+    c.add_argument('incident');c.add_argument('--repair-evidence',required=True);c.add_argument('--adoption-evidence',required=True)
 
 
 def _command(team,args):
     root=team.find_root();store=Path(root)/'.genethub/team/quality'
     action=args.quality_action
-    if action in ('alerts','triage'):
+    if action in ('alerts','triage','resolve'):
         from . import quality_live
-        value=(quality_live.replay(read(Path(args.snapshot))) if args.snapshot else quality_live.current(root)) if action=='alerts' else quality_live.triage(team,root,args)
+        value=(quality_live.replay(read(Path(args.snapshot))) if args.snapshot else quality_live.current(root)) if action=='alerts' else (
+            quality_live.triage(team,root,args) if action=='triage' else quality_live.resolve(team,root,args))
         print(canonical(value),end='');return
     if action=='execution':
         from .execution_facts import view
@@ -687,6 +706,9 @@ def _command(team,args):
             print(canonical({'status':'busy','cardProduced':False}),end='');return
         try:
             cutoff=team.now_ms();offset=[0,1,0,2][cutoff//300000 % 4];end=(cutoff//HOUR-offset)*HOUR
+            redstate=read(store/'redline-state.json') or {}
+            if any(x['atMs'] >= end for x in redstate.get('measurementEpochs',[])):
+                print(canonical({'status':'重新测量中','cardProduced':False,'reason':'await first post-adoption hour; prior immutable cards retained'}),end='');return
             facts=capture(team,root,end,cutoff);facts['captureKind']='native-hour'
             from .quality_live import current
             live=current(root)

@@ -220,6 +220,16 @@ def score(facts):
         possible_parallel = sum(x['high']*x['hourEffectiveMs'] for x in eligible)/wall if wall else None
 
     required = {'R1': 'dispatches', 'R2': 'idleObligations' if 'idleObligations' in coverage else 'observations', 'R3': 'deliveries', 'R4': 'observations', 'R5': 'resources'}
+    lifecycle = facts.get('redlineLifecycle')
+    if lifecycle is not None:
+        from .quality_epoch import validate
+        validate(lifecycle)
+        for row in lifecycle['open']:
+            rule=row['rule']
+            if rule not in instances:raise ValueError('unsupported durable redline rule')
+            if not instances[rule]:
+                instances[rule].append({'workItemId':row['workItemId'],'incidentId':row['id'],
+                    'reason':'repair-adoption-unverified','dueAtMs':row['firstSeenAtMs']-1})
     red = {}
     for key in instances:
         known = r6_known if key == 'R6' else coverage.get(required[key]) is True
@@ -334,6 +344,9 @@ def score(facts):
     if 'warnings' in facts:
         result['warnings']=facts['warnings']
         result['liveWarningsAsOfMs']=facts.get('liveWarningsAsOfMs')
+    if lifecycle is not None:
+        from .quality_epoch import attach as attach_epoch
+        attach_epoch(result,lifecycle)
     from .quality_attribution import attach
     attach(result, facts)
     return result

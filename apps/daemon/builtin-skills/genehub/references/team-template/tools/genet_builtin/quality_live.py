@@ -19,6 +19,11 @@ def identity(value):
 
 
 def project(facts):
+    # Detection uses current obligations. Durable unresolved episodes are a
+    # separate scoring policy, not evidence that the symptom still exists.
+    facts=dict(facts)
+    if 'redlineLifecycle' in facts:
+        facts['redlineLifecycle']=dict(facts['redlineLifecycle'],open=[])
     card = score(facts)
     now = facts['window']['endAtMs']
     basis = card.get('streakCompatibilityKey', card['model'])
@@ -67,10 +72,23 @@ def advance(state, sample):
         rule = signal['rule'];basis = signal['measurementVersion']
         key = identity([rule,signal['workItemId'],signal.get('reason'),
                         basis,signal.get('dueAtMs') if rule!='R6' else 'parallelism'])
-        row = state['incidents'].get(key)
+        def same(row):
+            return (row['rule']==rule and row['workItemId']==signal['workItemId']
+                    and row.get('reason')==signal.get('reason')
+                    and (rule=='R6' or row.get('dueAtMs')==signal.get('dueAtMs')))
+        row=next((x for x in state['incidents'].values() if x['status']=='open' and same(x)),None)
+        closed=max((x for x in state['incidents'].values() if x['status']=='closed' and same(x)),
+                   key=lambda x:x['closedAtMs'],default=None)
+        if row is None and closed:
+            if (signal.get('officialHour') and signal['sourceWindowEndMs']<=closed['closedAtMs']
+                    or number(signal.get('resolvedAtMs')) and signal['resolvedAtMs']<=closed['closedAtMs']):
+                continue
+            key=identity([key,closed['closedAtMs']])
         if row is None:
             row = dict(signal,id=key,firstSeenAtMs=now,triageDueAtMs=now+900000,status='open')
+            if closed:row['previousClosedAtMs']=closed['closedAtMs']
             state['incidents'][key] = row;new.append(key)
+        else:key=row['id']
         row['lastSeenAtMs'] = now
         if number(signal.get('resolvedAtMs')):
             row['symptomResolvedAtMs'] = max(row.get('symptomResolvedAtMs') or 0,signal['resolvedAtMs'])
@@ -78,7 +96,7 @@ def advance(state, sample):
             hour = signal['sourceWindowEndMs'];hour_key=rule+':'+basis
             hours = state['hours'].setdefault(hour_key,[])
             if hour not in hours:hours.append(hour);hours.sort();hours[:]=hours[-48:]
-            if hour-HOUR in hours and not row.get('platformEscalation'):
+            if hour-HOUR in hours and hour-HOUR>row.get('previousClosedAtMs',0) and not row.get('platformEscalation'):
                 row['platformEscalation'] = 'consecutive-hours';escalated.append(key)
     for key,row in state['incidents'].items():
         if (row['status']=='open' and (row.get('triage') or {}).get('attribution','unknown')=='unknown'
@@ -116,6 +134,7 @@ def _card_signals(root, started, now):
         basis=card.get('streakCompatibilityKey',card['model'])
         for rule,v in card['redLines'].items():
             for item in v.get('instances',[]):
+                if item.get('incidentId'):continue  # Carried debt is not a new physical occurrence.
                 signals.append(dict(item,workItemId=item.get('workItemId',item.get('taskId','team-active-goals')),rule=rule,
                                     attribution=item.get('attribution') or {'component':ROUTES[rule],'rootCauseConfirmed':False},measurementVersion=basis,
                                     officialHour=True,sourceWindowEndMs=end,cardEvidence=card['factsSha256']))
@@ -172,6 +191,7 @@ def tick(team, root):
         # Explicit repair/adoption closure is a separate operation, never inferred
         # from baseline refresh or an unreadable Session.
         sample['redLines']=[dict(row) for row in state['incidents'].values() if row['status']=='open']
+        sample['measurementEpoch']=next(iter(reversed(state.get('measurementEpochs',[]))),None)
         for warning in sample['warnings']:
             warning['id']=identity([warning['rule'],warning['workItemId'],warning['sinceAtMs']])
         team.write_json(str(store/'live-alerts.json'),sample)
@@ -203,6 +223,61 @@ def failed(team, root, error):
     value['unknown']=[x for x in value['unknown'] if x.get('rule')!='live-capture']+[
         {'rule':'live-capture','error':type(error).__name__}]
     team.write_json(str(Path(root)/'.genethub/team/quality/live-alerts.json'),value)
+
+
+def _evidence(root, name):
+    path=Path(name)
+    if path.is_absolute() or '..' in path.parts:raise ValueError('evidence must be a Team-relative regular file')
+    root=Path(root).resolve();path=root/path
+    if path.is_symlink() or not path.is_file() or root not in path.resolve().parents or not 0<path.stat().st_size<=131072:
+        raise ValueError('bounded regular repair/adoption evidence required')
+    return {'path':str(path.relative_to(root)),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def resolve(team, root, args):
+    """Explicit Team verification; never called automatically by an upgrade."""
+    import os
+    actor=os.environ.get('GENEHUB_SESSION_ID','')
+    if not team.SESSION_ID.fullmatch(actor):raise ValueError('native Agent session required for repair verification')
+    repair=_evidence(root,args.repair_evidence);adoption=_evidence(root,args.adoption_evidence)
+    store=Path(root)/'.genethub/team/quality'
+    with team.inbox_lock(root,'quality-live',purpose='红线修复采用复验'):
+        state=quality.read(store/'redline-state.json');row=state['incidents'][args.incident]
+        if row['status']=='closed':
+            if row['resolution']['repair']!=repair or row['resolution']['adoption']!=adoption:
+                raise ValueError('closed incident evidence is immutable')
+            return row
+        now=team.now_ms()
+        facts=quality.capture(team,root,now,now,budget_seconds=100)
+        sample=project(facts)
+        if facts.get('issues') or any(x['rule']==row['rule'] for x in sample['unknown']):
+            raise ValueError('unknown native evidence cannot close an incident')
+        matching=[x for x in sample['redLines'] if x['rule']==row['rule']
+                  and x['workItemId']==row['workItemId'] and x.get('reason')==row.get('reason')]
+        if any(not number(x.get('resolvedAtMs')) or x['resolvedAtMs']>now for x in matching):
+            raise ValueError('native obligation remains open after the claimed repair')
+        closed_at=team.now_ms()
+        proof=store/'resolutions'/(args.incident+'-facts.json')
+        team.write_json(str(proof),facts)
+        row['status']='closed';row['closedAtMs']=closed_at
+        row['resolution']={'repair':repair,'adoption':adoption,'sessionId':actor,
+            'nativeFacts':str(proof.relative_to(Path(root))),
+            'nativeFactsSha256':hashlib.sha256(canonical(facts).encode()).hexdigest(),
+            'observedAtMs':now,'versions':facts['versions']}
+        epoch=None
+        if not any(x['status']=='open' for x in state['incidents'].values()):
+            epoch={'id':identity([closed_at,sorted(state['incidents'])]),'atMs':closed_at,
+                   'closedIncidentIds':sorted(state['incidents'])}
+            state.setdefault('measurementEpochs',[]).append(epoch)
+        state['asOfMs']=closed_at
+        team.write_json(str(store/'redline-state.json'),state)
+        sample['redLines']=[dict(x) for x in state['incidents'].values() if x['status']=='open']
+        sample['measurementEpoch']=epoch or next(iter(reversed(state.get('measurementEpochs',[]))),None)
+        team.write_json(str(store/'live-alerts.json'),sample)
+        team.quality_events.emit(team,root,'redline-closed',args.incident,
+            at_ms=closed_at,incidentId=args.incident,rule=row['rule'],resolution=row['resolution'])
+        if epoch:team.quality_events.emit(team,root,'measurement-epoch-started',epoch['id'],at_ms=closed_at,epoch=epoch)
+        return row
 
 
 def briefing(root):

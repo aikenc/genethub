@@ -22,3 +22,5 @@ description: 1+N 项目团队的反思与进化会话：非实时回看全队会
 质量简报含最新小时卡、实际采用版本与失分账单；正式分、暂定分和缺失数据分开读。用 `run.py quality card`、`quality history` 或 `quality describe` 核对；按原因自主选择改流程、知识或反馈平台，不要求额外的改进格式。口径见 team-core `references/quality.md`。
 
 红线紧急留言优先于普通反思：读 `quality alerts`，唤醒后15分钟内用 `quality triage <实例id> --attribution team|platform-template|kernel|provider|unknown --evidence <证据>` 留归因。团队原因自主修正并在下一小时卡复核；平台原因按平台反馈参考留卡、实例和证据。连续两小时的同类红线或超时未归因会自动升级平台排查，不能仅归档留言代替修复采用。
+
+修复实际采用并复验后，以 `quality resolve <实例id> --repair-evidence <团队内证据文件> --adoption-evidence <实际采用证据文件>` 请求解除；平台会重新读取原生义务，未知或仍受阻时拒绝解除，保留原实例。不能用告警暂时消失、更新版本或归档留言代替采用证据。最后一条红线解除后才从当前时刻开始新的24小时测量，样本不足显示“重新测量中”，旧卡和原截止保留。
