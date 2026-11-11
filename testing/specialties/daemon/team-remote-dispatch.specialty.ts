@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, connectProductClient, registerControlledAgent, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
 
@@ -700,7 +700,8 @@ sys.exit(r.returncode)
     const preservedData=path.join(declaredRuntime,"datas/stage-cleanup-save.bin");
     mkdirSync(path.dirname(preservedData),{recursive:true});writeFileSync(preservedData,Buffer.alloc(1024*1024,19));
     const outside=path.join(t.env.root,"outside-install-sentinel");writeFileSync(outside,"retain unrelated target");
-    const rejectedLink=path.join(declaredRuntime,"datas/rejected-link");symlinkSync(outside,rejectedLink);
+    // Installer control metadata must never become an alias to another file.
+    const rejectedLink=path.join(declaredRuntime,".genethub/rejected-link");symlinkSync(outside,rejectedLink);
     writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'runtime preservation failure'\n");
     const failedCopy=await script(["employee","sync"],builder);
     t.assertions.assert(failedCopy.code!==0&&failedCopy.stderr.includes("runtime symlink")
@@ -709,13 +710,55 @@ sys.exit(r.returncode)
       &&readFileSync(preservedData).equals(Buffer.alloc(1024*1024,19))&&readFileSync(outside,"utf8")==="retain unrelated target",
       "failed runtime preservation leaked staging or changed original data/receipt");
     unlinkSync(rejectedLink);
+    // A normal runtime can also contain real business worktrees, generated
+    // bytecode, and opaque data aliases. Upgrade must not require moving them.
+    const businessRepo=path.join(t.env.root,"upgrade-business-repo");mkdirSync(businessRepo);
+    const git=(cwd:string,...args:string[])=>{
+      const r=spawnSync("git",["-C",cwd,...args],{env:o.daemon.env,encoding:"utf8"});
+      t.assertions.assert(r.status===0,"fixture Git operation failed: "+r.stderr);return r.stdout.trim();
+    };
+    git(businessRepo,"init");writeFileSync(path.join(businessRepo,"scene.txt"),"committed scene\n");
+    git(businessRepo,"add","scene.txt");git(businessRepo,"-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-m","scene baseline");
+    const businessTree=path.join(declaredRuntime,"worktrees/qa-scene");mkdirSync(path.dirname(businessTree),{recursive:true});
+    git(businessRepo,"worktree","add","-b","qa-scene",businessTree);
+    const businessHead=git(businessTree,"rev-parse","HEAD");
+    writeFileSync(path.join(businessTree,"scene.txt"),"unfinished scene edit\n");
+    const localBind=spawnSync(python,[path.join(declaredRuntime,"tools/run.py"),"worktree","bind","qa",businessTree],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    t.assertions.assert(localBind.status===0,"runtime worktree bind failed: "+localBind.stdout+localBind.stderr);
+    const boundSettings=readFileSync(path.join(declaredRuntime,"spaces/qa/.genethub/open.env"),"utf8");
+    const cache=spawnSync(python,["-c","import py_compile,sys; print(py_compile.compile(sys.argv[1], doraise=True))",path.join(declaredRuntime,"tools/version-marker.py")],{env:o.daemon.env,encoding:"utf8"});
+    t.assertions.assert(cache.status===0,"real owned Python cache was not generated: "+cache.stderr);
+    const cachePath=cache.stdout.trim();t.assertions.assert(existsSync(cachePath),"real cache fixture missing");
+    const dataLink=path.join(declaredRuntime,"datas/retained-alias");symlinkSync(outside,dataLink);
+    const tempLink=path.join(declaredRuntime,"temp/retained-directory");mkdirSync(path.dirname(tempLink),{recursive:true});symlinkSync(businessRepo,tempLink,"dir");
+    const danglingLink=path.join(declaredRuntime,"temp/future-output");symlinkSync("not-created-yet",danglingLink);
     const afterCopyFailure=await script(["employee","sync"],builder);
+    t.assertions.assert(afterCopyFailure.code===0,"normal runtime data blocked upgrade: "+afterCopyFailure.stdout+afterCopyFailure.stderr);
     const repeatedInstall=await script(["employee","sync"],builder);
     t.assertions.assert(afterCopyFailure.code===0&&repeatedInstall.code===0
       &&JSON.stringify(incomingDirectories())===retainedStages
       &&readFileSync(path.join(olderStage,"evidence.txt"),"utf8")==="not created by this install"
       &&readFileSync(preservedData).equals(Buffer.alloc(1024*1024,19)),
       "successful retry or idempotent installation retained an extra runtime copy");
+    t.assertions.assert(git(businessTree,"rev-parse","HEAD")===businessHead
+      &&git(businessRepo,"worktree","list","--porcelain").includes("worktree "+businessTree)
+      &&readFileSync(path.join(businessTree,"scene.txt"),"utf8")==="unfinished scene edit\n"
+      &&readFileSync(path.join(declaredRuntime,"spaces/qa/.genethub/open.env"),"utf8")===boundSettings,
+      "upgrade lost the registered business worktree, local binding or unfinished edits");
+    t.assertions.assert(readlinkSync(dataLink)===outside&&readlinkSync(tempLink)===businessRepo
+      &&lstatSync(danglingLink).isSymbolicLink()&&readlinkSync(danglingLink)==="not-created-yet"
+      &&readFileSync(outside,"utf8")==="retain unrelated target"&&!existsSync(cachePath),
+      "upgrade followed/lost a runtime alias or carried stale owned bytecode");
+    // Unowned source is not runtime data, even though normal data is retained.
+    const unknownSource=path.join(declaredRuntime,"tools/unowned-source.py");writeFileSync(unknownSource,"VALUE = 'local author input'\n");
+    const receiptBeforeUnknown=readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8");
+    writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'unknown source guard'\n");
+    const unknownUpgrade=await script(["employee","sync"],builder);
+    t.assertions.assert(unknownUpgrade.code!==0&&unknownUpgrade.stderr.includes("unowned runtime file")
+      &&readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")===receiptBeforeUnknown
+      &&readFileSync(unknownSource,"utf8")==="VALUE = 'local author input'\n"
+      &&JSON.stringify(incomingDirectories())===retainedStages,"upgrade silently adopted author input or leaked a failed stage");
+    unlinkSync(unknownSource);
     // The executor accepts only roles installed for it, even if someone registers another role by hand.
     const intruder=(await cliJson(["space","open",path.join(declaredRuntime,"spaces/research")],true));
     const intruderId=(intruder.workspace??intruder).id;
