@@ -76,8 +76,9 @@ defineSpecialty({
     const wrapper = path.join(targetRoot, "lose-one-reply.py"), dropped = path.join(targetRoot, "reply-dropped");
     const correctionMarker = path.join(targetRoot, "correct-before-release");
     writeFileSync(wrapper, `import json,os,pathlib,subprocess,sys,time
-body=sys.stdin.read() if sys.argv[-1]=='-' else None
-q=json.loads(body if body is not None else sys.argv[-1]); race=pathlib.Path(${JSON.stringify(correctionMarker)})
+payload=sys.argv[sys.argv.index('receive')+1]
+body=sys.stdin.read() if payload=='-' else None
+q=json.loads(body if body is not None else payload); race=pathlib.Path(${JSON.stringify(correctionMarker)})
 def summary():
  r=subprocess.run([os.environ['GENEHUB_CLI'],'session','get',q['sessionId']],capture_output=True,text=True)
  return json.loads(r.stdout.strip().splitlines()[-1])['data']['summary']
@@ -326,11 +327,28 @@ sys.exit(r.returncode)
       const snap = await cliJson(["session", "get", sid], remote);
       return snap.summary.status === "idle" && !snap.summary.inputSummary?.pendingMessageIds.length;
     }, 30000);
+    let commandSequence = 0;
     const callTask = async (sid: string, root: string, args: string[], remote = false) => {
-      await cliJson(["session", "send", sid, JSON.stringify({ argv: [python, path.join(root, "tools/team.py"), ...args], cwd: root }), "--no-wait"], remote);
+      const inputId = `u_remote_contract_command_${++commandSequence}`;
+      await cliJson(["session", "send", sid, JSON.stringify({ argv: [python, path.join(root, "tools/team.py"), ...args], cwd: root, requestId: inputId }), "--message-id", inputId, "--no-wait"], remote);
+      let commandRound: any;
+      await t.tools.waitUntil(async () => {
+        commandRound = (await cliJson(["session", "rounds", sid, "--limit", "100"], remote)).page.rounds.find((r: any) => r.userItemId === inputId && r.outcome === "completed");
+        return Boolean(commandRound);
+      }, 30000);
       await idleSession(sid, remote);
-      const item = (await inspectSession(sid, remote)).items.filter((i: any) => i.type === "assistantMessage").at(-1);
-      if (!item) throw new Error("real task caller returned no reply");
+      // Concurrent notices can be inserted before a command's answer. Match
+      // its external request id in the native timeline; a chronological Round
+      // boundary or the latest answer does not identify a command result.
+      const narrative = await cliJson(["session", "narrative", sid, "--limit", "100"], remote);
+      const item = narrative.page.items.find((i: any) => {
+        if (i.type !== "assistantMessage") return false;
+        try { return JSON.parse(i.text).requestId === inputId; } catch { return false; }
+      });
+      if (!item) throw new Error("real task caller returned no reply for " + inputId + " " + args.slice(0, 3).join(" ")
+        + "; replies=" + JSON.stringify(narrative.page.items.filter((i: any) => i.type === "assistantMessage").map((i: any) => {
+          try { const r=JSON.parse(i.text);return {requestId:r.requestId,code:r.code}; } catch { return "non-command"; }
+        })) + "; unparsed=" + readFileSync(commandAgent.journalPath, "utf8").split("\n").filter(l => l.includes("unparsed")).slice(-2).join(" ").slice(-2500));
       try { return JSON.parse(item.text) as { code: number; out: string; err: string }; }
       catch {
         const snap = await inspectSession(sid, remote);
@@ -393,6 +411,69 @@ sys.exit(r.returncode)
     const bound = await callTask(remoteOwner, targetRoot, ["task", "bind-directory", remoteTask.taskId, "--directory", remoteDirectory], true);
     t.assertions.assert(bound.code === 0, "remote Owner could not claim an executor-side directory: " + bound.err);
     const boundReply = JSON.parse(JSON.parse(bound.out.trim()).result.trim());
+    const ownerReceiverPath = path.join(targetDispatchDir, createHash("sha256").update(startedWork.id).digest("hex") + ".json");
+    const ownerReceiverBytes = readFileSync(ownerReceiverPath);
+    const ownerReceiver = JSON.parse(ownerReceiverBytes.toString());
+    const settleExisting = () => spawnSync(python, [path.join(targetRoot, "tools/team.py"), "receive", JSON.stringify({
+      id: startedWork.id, workspaceId: qa.id, role: "qa", operation: "settle-prepare", originalRequest: ownerReceiver.request,
+    }), "--require-prepare-settlement"], { env: { ...o.daemon.env, GENEHUB_CLI: o.daemon.genet }, encoding: "utf8" });
+    const existingSettlement = settleExisting();
+    t.assertions.assert(existingSettlement.status === 0 && JSON.parse(existingSettlement.stdout).withdrawn === false
+      && readFileSync(ownerReceiverPath).equals(ownerReceiverBytes), "settlement changed an existing real receiver receipt");
+    // Explicit missing-receipt recovery fixture: the independently created
+    // native Session still proves that absence is not a negative acknowledgement.
+    try {
+      unlinkSync(ownerReceiverPath);
+      const missingReceipt = settleExisting();
+      t.assertions.assert(missingReceipt.status === 0 && JSON.parse(missingReceipt.stdout).withdrawn === false
+        && !existsSync(ownerReceiverPath), "missing receiver receipt erased an existing native creation");
+    } finally { writeFileSync(ownerReceiverPath, ownerReceiverBytes); }
+    // A real competing writer rejects preparation before a native Session
+    // exists. Restoring its overdue source intent must not leave it unknown
+    // forever, retry business, or disturb that writer.
+    const roleEnv = path.join(targetRoot, "spaces/qa/.genethub/open.env");
+    const previousRoleEnv = existsSync(roleEnv) ? readFileSync(roleEnv) : null;
+    mkdirSync(path.dirname(roleEnv), { recursive: true });
+    writeFileSync(roleEnv, `WORKTREE_DIR=${remoteDirectory}\n`);
+    const refused = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.refused" : v));
+    t.assertions.assert(refused.code !== 0 && refused.err.includes("写锁"), "actual competing writer did not reject remote preparation");
+    if (previousRoleEnv) writeFileSync(roleEnv, previousRoleEnv); else unlinkSync(roleEnv);
+    const intentsRoot = path.join(sourceRoot, ".genethub/team/task-dispatch");
+    const refusedPath = readdirSync(intentsRoot).map(f => path.join(intentsRoot, f)).find(f => {
+      const row = JSON.parse(readFileSync(f, "utf8"));
+      return row.state === "creating" && !row.sessionId;
+    })!;
+    t.assertions.assert(Boolean(refusedPath), "failed remote prepare lost its durable intent");
+    const refusedIntent = JSON.parse(readFileSync(refusedPath, "utf8"));
+    refusedIntent.createdAtMs = Date.now() - 601000; // restored overdue operation, no mocked clock
+    writeFileSync(refusedPath, JSON.stringify(refusedIntent));
+    const originalLease = readFileSync(boundReply.lock);
+    const countBeforeSettlement = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length;
+    await cliJson(["session", "interrupt", callerSid]);
+    await t.tools.waitUntil(async () => (await cliJson(["session", "get", callerSid])).summary.inputSummary?.paused, 10000);
+    const settled = await script(["hook"]);
+    const negative = JSON.parse(readFileSync(refusedPath, "utf8"));
+    t.assertions.assert(settled.code === 0 && negative.state === "withdrawn" && negative.withdrawnAtMs >= refusedIntent.createdAtMs + 600000,
+      "executor-confirmed uncreated attempt remains an unknown source obligation: " + JSON.stringify({ code:settled.code, error:negative.withdrawError, state:negative.state }));
+    const receiverFence = targetReceipt(refusedIntent.operationId);
+    t.assertions.assert(receiverFence.status === "withdrawn" && receiverFence.settlement === "not-created"
+      && readFileSync(boundReply.lock).equals(originalLease), "negative acknowledgement lost its durable fence or another writer lease");
+    const delayed = spawnSync(python, [path.join(targetRoot, "tools/team.py"), "receive", JSON.stringify(receiverFence.request)], {
+      env: { ...o.daemon.env, GENEHUB_CLI: o.daemon.genet }, encoding: "utf8",
+    });
+    t.assertions.assert(delayed.status !== 0 && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === countBeforeSettlement,
+      "late original prepare escaped negative acknowledgement and created work");
+    const repeated = await script(["hook"]);
+    t.assertions.assert(repeated.code === 0 && JSON.parse(readFileSync(refusedPath, "utf8")).withdrawnAtMs === negative.withdrawnAtMs
+      && (await cliJson(["session", "get", callerSid])).summary.inputSummary?.paused, "settlement retry changed history or lifted caller pause");
+    await cliJson(["session", "send", callerSid, "Continue after the observed failed preparation", "--message-id", "u_prepare_settlement_continue", "--no-wait"]);
+    await idleSession(callerSid);
+    await t.tools.waitUntil(async () => {
+      const tick = await script(["hook"]);
+      return tick.code === 0 && (await inspectSession(callerSid)).items.some((i: any) => i.type === "userMessage" && i.text.includes(refusedIntent.operationId) && i.text.includes("没有创建"));
+    }, 15000);
+    const failureNotes = (await inspectSession(callerSid)).items.filter((i: any) => i.type === "userMessage" && i.text.includes(refusedIntent.operationId) && i.text.includes("没有创建"));
+    t.assertions.assert(failureNotes.length === 1, "failed preparation was not reported exactly once to its original requester");
     const secondOwnerReply = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.independent" : v));
     t.assertions.assert(secondOwnerReply.code === 0, "the remote Space was still treated as an exclusive workstation: " + secondOwnerReply.err);
     const secondTask = JSON.parse(secondOwnerReply.out.trim().split("\n").at(-1)!);

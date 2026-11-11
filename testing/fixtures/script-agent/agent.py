@@ -341,9 +341,18 @@ class FixtureSession(Session):
                 if marker:
                     try:
                         inputs, _ = json.JSONDecoder().raw_decode(payload)
-                        messages = [entry["text"] for entry in inputs if isinstance(entry, dict) and isinstance(entry.get("text"), str)]
-                        if len(messages) == 1:
-                            request = json.loads(messages[0])
+                        commands = []
+                        for entry in inputs:
+                            if not isinstance(entry, dict) or entry.get("delivery") == "sent" or not isinstance(entry.get("text"), str):
+                                continue
+                            try:
+                                candidate = json.loads(entry["text"])
+                            except (ValueError, TypeError):
+                                continue
+                            if isinstance(candidate, dict) and isinstance(candidate.get("argv"), list):
+                                commands.append(candidate)
+                        if len(commands) == 1:
+                            request = commands[0]
                     except (ValueError, TypeError):
                         pass
             if not isinstance(request, dict):
@@ -356,8 +365,11 @@ class FixtureSession(Session):
                 )
                 stdout, stderr = await child.communicate()
                 journal("cli-command-returned", code=child.returncode, stdoutBytes=len(stdout), stderrBytes=len(stderr))
-                self.say(turn_id, item, json.dumps({"code": child.returncode, "out": stdout.decode("utf-8", "replace")[-32768:],
-                                                  "err": stderr.decode("utf-8", "replace")[-4096:]}), True)
+                reply = {"code": child.returncode, "out": stdout.decode("utf-8", "replace")[-32768:],
+                         "err": stderr.decode("utf-8", "replace")[-4096:]}
+                if isinstance(request.get("requestId"), str):
+                    reply["requestId"] = request["requestId"]
+                self.say(turn_id, item, json.dumps(reply), True)
                 self.complete(turn_id)
                 return
             profile = "normal"
