@@ -484,6 +484,8 @@ def remote_receive(target, request):
     # could interpret a new operation as an ordinary prepare request.
     settling = request.get("operation") == "settle-prepare"
     withdrawing = request.get("operation") == "withdraw-prepare" or settling
+    if not request.get('operation') and request.get('resourceMode') == 'session':
+        argv.append('--require-session-workstation')
     if withdrawing:
         argv[argv.index("--timeout") + 1] = "15"
         argv.append("--require-prepare-settlement" if settling else "--require-dispatch-fence")
@@ -501,7 +503,7 @@ def remote_receive(target, request):
                          if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
         required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
-                                          "--require-quality-metadata") if flag in argv), None)
+                                          "--require-quality-metadata", "--require-session-workstation") if flag in argv), None)
         if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
             diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
                                  if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
@@ -571,6 +573,10 @@ def _cmd_receive(args):
     if len(raw if isinstance(raw, bytes) else raw.encode("utf-8")) > 1024 * 1024:
         raise ExpertError("接单请求超过 1MiB", "没有执行操作，原任务和回执保留", "缩小请求或用已有文件传输传递产物")
     request = json.loads(raw)
+    session_resource = request.get('resourceMode') == 'session' and request.get('prepareOnly') is True and not request.get('operation')
+    if (request.get('resourceMode') is not None and not session_resource
+            or bool(args.require_session_workstation) != session_resource):
+        raise ExpertError('会话工位需要匹配的准备协议', '没有创建会话或认领工位', '同步支持该协议的执行端并保留原派单编号')
     key = request.get("id")
     if not isinstance(key, str) or not key or len(key) > 200:
         raise ExpertError("缺少有效派单编号", "没有创建会话", "传入 1–200 字符的稳定 id")
@@ -685,11 +691,15 @@ def _cmd_receive(args):
                                 print(json.dumps({"ok": True, "withdrawn": False, "id": key,
                                                   "reason": "native creation reservation retained"}))
                                 return
+            # Missing receipts can coexist with an explicit new resource or
+            # a legacy receiver's configured lease. Neither may be fenced away.
             configured = open_env(role_root).get("WORKTREE_DIR")
-            if configured:
-                directory = resolve_expert_dir(root, configured)
-                # A pre-create reservation without a receipt is also uncertainty.
-                # Do not release it or a newer writer in this protocol.
+            for candidate in (original.get('directory'), configured):
+                if candidate is None:
+                    continue
+                if not isinstance(candidate, str) or not candidate:
+                    raise ExpertError('准备工位记录无效', '原意图保留，没有撤回', '核对原始执行端工位')
+                directory = resolve_expert_dir(root, candidate)
                 holder = read_json(os.path.join(writer_lock(directory), "genet-writer.json"), {}) or {}
                 if holder.get("requestId") == key:
                     print(json.dumps({"ok": True, "withdrawn": False, "id": key,
@@ -806,7 +816,8 @@ def _cmd_receive(args):
                     genet("session", "send", old["sessionId"], request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
                     old['activated'] = True
                     write_json(receipt_path,old)
-                print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"]}))
+                print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"],
+                                  "binding": {"directory": old['directory'], "sessionId": old['sessionId'], "lock": old['lock']} if old.get('directory') else None}))
                 return
             if not old.get("recoverable") or not old.get("selection"):
                 raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
@@ -816,8 +827,12 @@ def _cmd_receive(args):
         lock = old.get("lock") if old else None
         directory = old.get("directory") if old else None
         configured = open_env(role_root).get("WORKTREE_DIR")
-        if role != "research" and not old and (configured or not request.get("prepareOnly")):
-            directory = resolve_expert_dir(root, configured or role_root)
+        explicit = request.get('directory') if session_resource else None
+        if session_resource and explicit is not None and (not isinstance(explicit, str) or not os.path.isabs(explicit) or not os.path.isdir(explicit)):
+            raise ExpertError('远端工位必须是执行端已存在的绝对目录', '没有创建会话或源端目录', '先在执行端准备独立工位')
+        legacy_directory = not session_resource and role != 'research' and (configured or not request.get('prepareOnly'))
+        if not old and (explicit is not None or legacy_directory):
+            directory = resolve_expert_dir(root, explicit if session_resource else (configured or role_root))
             with inbox_lock(writer_lock(directory), "writer", purpose="写者锁"):
                 lock, won = claim(directory, {"session": None, "requestId": key, "at": now_ms()}, "genet-writer.json")
                 if not won:
@@ -840,7 +855,8 @@ def _cmd_receive(args):
             genet("session", "send", sid, request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
             record["activated"] = True
             write_json(receipt_path,record)
-        print(json.dumps({"ok": True, "sessionId": sid, "why": why}))
+        print(json.dumps({"ok": True, "sessionId": sid, "why": why,
+                          "binding": {"directory": directory, "sessionId": sid, "lock": lock} if directory else None}))
 
 
 def child_role_names(root):
@@ -5241,6 +5257,7 @@ def main(argv):
     receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     receive.add_argument("--require-dispatch-fence", action="store_true", help="require durable prepare-withdrawal protocol; old receivers must reject before mutation")
     receive.add_argument("--require-prepare-settlement", action="store_true", help="require exact no-create acknowledgement; old receivers must reject before mutation")
+    receive.add_argument('--require-session-workstation', action='store_true', help='require per-session executor resources; old receivers reject before mutation')
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
