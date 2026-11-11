@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, connectProductClient, registerControlledAgent, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
 
@@ -523,6 +523,10 @@ sys.exit(r.returncode)
     const syncReport=JSON.parse(synced.stdout.trim().split("\n").at(-1)!);
     const declaredBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
     const declaredRuntime=path.dirname(path.dirname(declaredBinding.command[1]));
+    const incomingDirectories=()=>readdirSync(path.dirname(declaredRuntime)).filter(n=>n.startsWith("."+path.basename(declaredRuntime)+".incoming-")).sort();
+    const olderStage=path.join(path.dirname(declaredRuntime),"."+path.basename(declaredRuntime)+".incoming-retain-existing");
+    mkdirSync(olderStage);writeFileSync(path.join(olderStage,"evidence.txt"),"not created by this install");
+    const retainedStages=JSON.stringify(incomingDirectories());
     t.assertions.assert(syncReport.installed.length===1&&syncReport.installed[0].roles.join()==="qa"&&declaredBinding.machineId===machine&&declaredBinding.workspaceId===syncReport.installed[0].workspaces.qa,"sync did not write exactly the declared binding");
     t.assertions.assert(declaredRuntime.startsWith(path.join(t.env.home,".genehub-teams","team."))&&declaredRuntime!==runtimeRoot,"runtime directory was not chosen by the platform: "+declaredRuntime);
     writeFileSync(path.join(declaredRuntime,".genethub/open.env"),"TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=9999\n");
@@ -546,6 +550,7 @@ sys.exit(r.returncode)
     writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'upgrade after withdrawal'\n");
     let blockedFence=await script(["employee","sync"],builder);
     t.assertions.assert(blockedFence.code!==0&&readFileSync(fencePath,"utf8")===unsupportedBytes&&JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256===declaredReceipt.archiveSha256,"unsupported withdrawal proof was replaced during upgrade");
+    t.assertions.assert(JSON.stringify(incomingDirectories())===retainedStages,"a refused upgrade left its temporary installation stage");
     writeFileSync(fencePath,fenceBytes);
     const fenceUpgrade=await script(["employee","sync"],builder);
     t.assertions.assert(fenceUpgrade.code===0,"terminal withdrawal blocked real upgrade: "+fenceUpgrade.stdout+fenceUpgrade.stderr);
@@ -567,6 +572,26 @@ sys.exit(r.returncode)
     t.assertions.assert(releasedPrepared.status===0,"prepared release failed: "+releasedPrepared.stdout+releasedPrepared.stderr);
     const releasedUpgrade=await script(["employee","sync"],builder);
     t.assertions.assert(releasedUpgrade.code===0&&readFileSync(fencePath,"utf8")===fenceBytes,"settled upgrade discarded the fence: "+releasedUpgrade.stdout+releasedUpgrade.stderr);
+    const receiptBeforeCopyFailure=readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8");
+    const preservedData=path.join(declaredRuntime,"datas/stage-cleanup-save.bin");
+    mkdirSync(path.dirname(preservedData),{recursive:true});writeFileSync(preservedData,Buffer.alloc(1024*1024,19));
+    const outside=path.join(t.env.root,"outside-install-sentinel");writeFileSync(outside,"retain unrelated target");
+    const rejectedLink=path.join(declaredRuntime,"datas/rejected-link");symlinkSync(outside,rejectedLink);
+    writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'runtime preservation failure'\n");
+    const failedCopy=await script(["employee","sync"],builder);
+    t.assertions.assert(failedCopy.code!==0&&failedCopy.stderr.includes("runtime symlink")
+      &&JSON.stringify(incomingDirectories())===retainedStages
+      &&readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")===receiptBeforeCopyFailure
+      &&readFileSync(preservedData).equals(Buffer.alloc(1024*1024,19))&&readFileSync(outside,"utf8")==="retain unrelated target",
+      "failed runtime preservation leaked staging or changed original data/receipt");
+    unlinkSync(rejectedLink);
+    const afterCopyFailure=await script(["employee","sync"],builder);
+    const repeatedInstall=await script(["employee","sync"],builder);
+    t.assertions.assert(afterCopyFailure.code===0&&repeatedInstall.code===0
+      &&JSON.stringify(incomingDirectories())===retainedStages
+      &&readFileSync(path.join(olderStage,"evidence.txt"),"utf8")==="not created by this install"
+      &&readFileSync(preservedData).equals(Buffer.alloc(1024*1024,19)),
+      "successful retry or idempotent installation retained an extra runtime copy");
     // The executor accepts only roles installed for it, even if someone registers another role by hand.
     const intruder=(await cliJson(["space","open",path.join(declaredRuntime,"spaces/research")],true));
     const intruderId=(intruder.workspace??intruder).id;
