@@ -250,3 +250,57 @@ defineSpecialty({
     t.note("native Agent-bound commands and real daemon summaries; no synthetic task status injection; unknown projection remains visible until timer rebuild");
   } finally { await r.dispose(); }
 });
+
+defineSpecialty({
+  ...common, id:"specialty.daemon.task-owner.ready-result-queue",
+  title:"Ready children enter a busy Owner's native queue and release independent resources before that Owner finishes its round",
+  oracle:"A real Owner Agent runs a gate-controlled operation with a 100-minute cap. Each child queues in one tick despite that running round and an unfinished sibling; its exact lease is released, duplicate ticks preserve one input, and public finish fails until native consumption then succeeds.",
+  catches:["result waits for a parent round or unfinished sibling", "local lease waits for parent consumption", "parent finishes after conclusion but before reading", "tick duplicates an unread result"],
+},async t=>{
+  const r=await openTeam(t,"ready-result-queue",[{id:"ctl-cli-command",profile:"cli-command"}]);
+  const release=join(r.root,"release-parent-operation");
+  try {
+    const config=join(r.root,".genethub/open.env");writeFileSync(config,readFileSync(config,"utf8")+"\nTEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=999999\nTEAM_WATCHDOG_AFTER=999999\n");
+    const idle=(sid:string)=>t.tools.waitUntil(async()=>{const s=(await r.snapshot(sid)).summary;return s.status==="idle"&&!s.inputSummary?.pendingMessageIds.length;},30000);
+    const cli=async(sid:string,args:string[])=>{
+      await r.send(sid,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,join(r.root,"tools/run.py"),...args],cwd:r.root}));await idle(sid);
+      const reply=(await r.snapshot(sid)).items.filter(i=>i.type==="assistantMessage").at(-1);
+      if(reply?.type!=="assistantMessage")throw new Error("Agent CLI had no result");return JSON.parse(reply.text) as {code:number;out:string;err:string};
+    };
+    const ok=async(sid:string,args:string[])=>{const v=await cli(sid,args);t.assertions.assert(v.code===0,"public Task command failed: "+v.err);return JSON.parse(v.out.trim().split("\n").at(-1)!);};
+    const front=await r.create("ctl-cli-command");
+    const task=await ok(front,["task","start","--space","leader","--desc","busy parent","--request-id","ready.parent","Coordinate independent evidence"]);
+    const owner=task.owner.sessionId as string;await idle(owner);
+    const children=[] as string[];
+    for(let n=0;n<2;n++){const c=await ok(owner,["task","support",task.taskId,"--space","qa","--desc","ready child "+n,"--request-id","ready.child."+n,"Complete independent evidence"]);children.push(c.collaborator);await idle(c.collaborator);}
+    const {mkdirSync}=await import("node:fs");const dir=join(r.root,"child-resource");mkdirSync(dir);
+    const binding=await ok(children[0]!,["task","bind-directory",task.taskId,"--directory",dir]);
+    const gate=join(r.root,"long-operation.py"),started=join(r.root,"parent-operation-started"),attempt=join(r.root,"attempt-parent-finish"),attempted=join(r.root,"parent-finish-attempt.json");
+    writeFileSync(gate,`import os,time,json,subprocess\nfrom pathlib import Path\nroot=Path(${JSON.stringify(r.root)})\n(root/'parent-operation-started').write_text('100-minute-cap operation')\nend=time.monotonic()+6000\nwhile not (root/'release-parent-operation').exists():\n if time.monotonic()>end:raise RuntimeError('fixture operation deadline reached')\n if (root/'attempt-parent-finish').exists():\n  (root/'attempt-parent-finish').unlink()\n  r=subprocess.run([${JSON.stringify(process.env.GENEHUB_PYTHON)},str(root/'tools/run.py'),'task','finish',${JSON.stringify(task.taskId)},'--outcome','success','Attempt finish before reading child results'],capture_output=True,text=True)\n  (root/'parent-finish-attempt.json').write_text(json.dumps({'code':r.returncode,'out':r.stdout,'err':r.stderr}))\n time.sleep(.02)\nprint('long operation released by fixture')\n`);
+    await r.send(owner,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,gate],cwd:r.root}));
+    await t.tools.waitUntil(async()=>existsSync(started)&&(await r.snapshot(owner)).summary.status==="running",10000);
+    const resultRows=async()=>{
+      const rows=(await r.snapshot(owner)).items.filter(i=>i.type==="userMessage"&&i.text.startsWith("用途: result\n"));return rows;
+    };
+    for(let n=0;n<2;n++){
+      await ok(children[n]!,["task","finish",task.taskId,"--outcome","success","READY_CHILD_EVIDENCE_"+n]);
+      const before=Date.now();r.ok(["hook"]);const elapsed=Date.now()-before;
+      const rows=await resultRows();const found=rows.find(i=>i.type==="userMessage"&&i.text.includes("READY_CHILD_EVIDENCE_"+n));
+      t.assertions.assert(!!found&&elapsed<15000&&(await r.snapshot(owner)).summary.status==="running",
+        "one tick held a ready child behind the running parent or sibling: "+JSON.stringify({n,elapsed}));
+      t.assertions.assert((await r.snapshot(owner)).summary.inputSummary?.pendingMessageIds.includes(found!.id),"result bypassed the native input queue");
+      t.assertions.assert(!existsSync(binding.lock),"completed child's resource still waits for parent delivery/consumption");
+    }
+    writeFileSync(attempt,"finish now");await t.tools.waitUntil(()=>existsSync(attempted),15000);
+    const refused=JSON.parse(readFileSync(attempted,"utf8"));
+    t.assertions.assert(refused.code!==0&&!JSON.parse(readFileSync(r.state("tasks",task.taskId+".json"),"utf8")).finished,
+      "all children concluded but unread results allowed the parent to finish");
+    r.ok(["hook"]);
+    for(let n=0;n<2;n++)t.assertions.assert((await resultRows()).filter(i=>i.type==="userMessage"&&i.text.includes("READY_CHILD_EVIDENCE_"+n)).length===1,"unread result was queued twice");
+    writeFileSync(release,"release");await idle(owner);
+    await ok(owner,["task","finish",task.taskId,"--outcome","success","Read all independently queued child evidence"]);
+    r.ok(["hook"]);await idle(front);r.ok(["hook"]);
+    t.assertions.assert(JSON.parse(readFileSync(r.state("tasks",task.taskId+".json"),"utf8")).state==="delivered","native consumption did not unblock final delivery");
+    t.note("Real Agent-bound 100-minute-cap operation held until assertions, not a claim of 100 elapsed minutes; two independent native inputs, prompt lease release, finish rejected before read then accepted, exact-once ticks.");
+  } finally {writeFileSync(release,"fixture cleanup");await r.dispose();}
+});

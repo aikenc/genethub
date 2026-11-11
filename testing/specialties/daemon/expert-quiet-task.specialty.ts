@@ -4,8 +4,8 @@ import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.expert-quiet-task-completes",
-  title: "a quiet worker survives its diagnostic window and delivers its real batch result once",
-  oracle: "A slow real external Agent remains running beyond the batch quiet window; its completed sibling stays pending, one diagnostic is retained without undoing a Human pause, then both actual results arrive once",
+  title: "a quiet worker survives its diagnostic window while ready siblings deliver independently",
+  oracle: "A slow real external Agent remains running beyond the batch quiet window; its completed sibling queues immediately, one diagnostic is retained without undoing a Human pause, and each actual result arrives once",
   catches: ["silence cancels valid work", "finished sibling fabricates a stuck batch result", "diagnostic floods the requester", "a diagnostic undoes a Human pause"],
   tags: ["core", "expert", "quiet-task"], llm: { default: "none" },
   expectedDurationMs: 45000, timeoutMs: 120000,
@@ -33,7 +33,7 @@ defineSpecialty({
     hook(); hook();
     const live = (await r.snapshot(slow)).summary;
     t.assertions.assert(live.status === "running" && !live.inputSummary?.paused, "quiet computation was interrupted");
-    t.assertions.assert(!record(slow).done && !record(slow).stopReason && record(fast).done?.outcome === "ok", "batch retired or fabricated failure before the slow result");
+    t.assertions.assert(!record(slow).done && !record(slow).stopReason && !existsSync(r.state("pending", `${fast}.json`)) && JSON.parse(readFileSync(r.state("done", `${fast}.json`), "utf8")).done?.outcome === "ok", "ready sibling was held or slow worker retired before its real result");
     t.assertions.assert((await r.snapshot(r.front)).summary.inputSummary?.paused, "diagnostic undid Human pause");
     const diagnostics = readdirSync(r.state("notes")).filter(f => f.endsWith(".json"))
       .map(f => JSON.parse(readFileSync(r.state("notes", f), "utf8")))
@@ -48,8 +48,8 @@ defineSpecialty({
     }
     await r.send(r.front, "Continue and collect the completed results");
     await idle(r.front); hook(); await idle(r.front); hook();
-    const replies = (await r.snapshot(r.front)).items.filter(item => item.type === "userMessage" && item.text.includes(slow) && item.text.includes(fast));
-    t.assertions.assert(replies.length === 1, "actual batch result missing or duplicated");
+    const replies = (await r.snapshot(r.front)).items.filter(item => item.type === "userMessage" && item.text.startsWith("用途: result\n"));
+    for (const id of [slow, fast]) t.assertions.assert(replies.filter(item => item.type === "userMessage" && item.text.includes(id)).length === 1, "independent actual result missing or duplicated");
     t.note("quiet computation survived, one diagnostic retained, Human pause preserved and both true results delivered once");
   } finally { await r.dispose(); }
 });

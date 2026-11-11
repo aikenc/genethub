@@ -62,7 +62,7 @@ reflectCase("expert-reflect-now", "reflect now starts through real CLI and route
   r.ok(["tell-user", "需要用户判断的进展"]);
   await t.tools.waitUntil(async () => (await r.snapshot(r.front)).items.some(item => item.type === "userMessage" && item.text.includes("需要用户判断的进展") && item.origin?.sessionId === "system"), 20000);
 });
-reflectCase("expert-three-law-team-relay", "real parallel children share a Human round batch, stay pending while parent is running, then report once without undoing an explicit pause", async (t, r) => {
+reflectCase("expert-three-law-team-relay", "real parallel children share a Human round batch and independently queue results without undoing an explicit pause", async (t, r) => {
   await r.send(r.front, "Please delegate this round");
   await t.tools.waitUntil(async () => (await r.snapshot(r.front)).summary.status === "idle", 20000);
   const children: string[] = [];
