@@ -62,7 +62,16 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget):
     inputs=summary.get('inputSummary') or {}
     stable = (summary.get('status') in ('idle','failed') and (inputs.get('paused') or not inputs.get('pendingMessageIds'))
               and not (summary.get('interactionSummary') or {}).get('requests'))
-    if stable and old and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('kernel') == kernel and old.get('updatedAtMs') == summary.get('updatedAtMs') and old.get('sinceAtMs', since+1) <= since:
+    # Live and hourly readers request different horizons. A completely paged
+    # unchanged native history covers both; its last requested `since` is not
+    # the oldest evidence it contains. Legacy/partial caches keep the stricter
+    # horizon guard, and every reuse still requires this fresh native summary.
+    coverage = (old or {}).get('historyCoverage') or {}
+    full_history = (coverage.get('basis') == 'native-page-completion/1'
+                    and coverage.get('roundsComplete') is True
+                    and coverage.get('narrativeComplete') is True)
+    covered = old and (old.get('sinceAtMs', since+1) <= since or full_history)
+    if stable and covered and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('kernel') == kernel and old.get('updatedAtMs') == summary.get('updatedAtMs'):
         return old
     inspection = call('session', 'inspect', sid)['inspection']
     rounds, cursor, round_digest = [], None, None
@@ -80,10 +89,12 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget):
             break
     else:
         raise ValueError('native rounds pagination exceeded capture budget')
+    rounds_complete = cursor is None
     rounds.sort(key=lambda x: (x['startedAtMs'], x['roundId']))
     completed = [x for x in rounds if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
     anchor = completed[-1]['roundId'] if completed else None
     turns, links, cursor, digest = [], [], None, None
+    narrative_complete = False
     if anchor:
         for _ in range(100):
             args = ['session', 'narrative', sid, '--through-round', anchor, '--limit', '100']
@@ -107,12 +118,15 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget):
                 break
         else:
             raise ValueError('native narrative pagination exceeded capture budget')
+        narrative_complete = cursor is None
     value = {'sessionId': sid, 'workspaceId':summary.get('workspaceId'), 'kernel': kernel, 'sinceAtMs': since,
              'updatedAtMs': summary.get('updatedAtMs'), 'createdAtMs': summary.get('createdAtMs'),
              'status': summary.get('status'), 'inputSummary': summary.get('inputSummary', {}),
              'waitingForUser': bool((summary.get('interactionSummary') or {}).get('requests')),
              'retainedInputs': inspection.get('retainedInputs'), 'rounds': rounds,
-             'turns': list({x['turnId']: x for x in turns}.values()), 'inputLinks':links,'historyDigest': digest}
+             'turns': list({x['turnId']: x for x in turns}.values()), 'inputLinks':links,'historyDigest': digest,
+             'historyCoverage': {'basis':'native-page-completion/1','roundsComplete':rounds_complete,
+                                 'narrativeComplete':narrative_complete}}
     team.write_json(str(cache), value)
     return value
 
