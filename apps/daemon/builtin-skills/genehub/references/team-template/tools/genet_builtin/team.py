@@ -4397,6 +4397,14 @@ def reconcile(root, name, mine):
                 record.pop("lastReconcileError", None)
                 record.pop("lastReconcileErrorAtMs", None)
                 update_pending(root, path, record)
+            recovered = record.get("resultRecovery") or {}
+            if (recovered.get("kind") == "archived-task-conclusion" and record.get("done")
+                    and not record.get("resumeRequestId") and recovered.get("operationId") == record.get("operationId")
+                    and recovered.get("concludedAtMs") == (record.get("taskConclusion") or {}).get("atMs")):
+                # This completed generation is independent of later session
+                # work or pause. Normal recipient and lease guards still run
+                # below; no input is sent to or resumed on the old executor.
+                continue
             age = (now_ms() - record["createdAtMs"]) / 1000
             said = record.setdefault("notified", [])
             if requests:

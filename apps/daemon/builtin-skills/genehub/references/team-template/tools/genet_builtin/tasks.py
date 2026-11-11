@@ -666,7 +666,18 @@ def recover_concluded_archives(t, root):
                 current = t.read_dispatch_record(t.state_dir(root, 'done', sid + '.json'))
                 if os.path.exists(pending) or current != saved:
                     continue
-                t.write_json(pending, saved)
+                # The session can have newer, paused work. Publish only the
+                # original declared conclusion, not its latest partial reply.
+                # A session reference is real; no native reply ID is invented.
+                recovered = dict(saved)
+                recovered['done'] = dict(
+                    outcome='ok' if conclusion['outcome'] == 'success' else conclusion['outcome'],
+                    reply='conclusion:' + operation + ':' + str(conclusion['atMs']),
+                    ref='ghref:session:' + sid,
+                    text='任务结论：%s\n证据：%s' % (conclusion['outcome'], conclusion['evidence']))
+                recovered['resultRecovery'] = dict(kind='archived-task-conclusion', operationId=operation,
+                                                   concludedAtMs=conclusion['atMs'])
+                t.write_json(pending, recovered)
 
 
 

@@ -304,7 +304,9 @@ def capture(team, root, end, cutoff):
         item['startedAtMs']=begun if number(begun) and begun <= cutoff else None
         if item['confirmedAtMs'] is None and number(begun) and begun < start:
             item['confirmedAtMs']=begun  # acknowledged no later than actual activation, before this window
-        matching=[x for x in deliveries if item.get('sessionId') and any(ref.strip().startswith('ghref:item:'+item['sessionId']+':') for ref in (x.get('ref') or '').split(','))]
+        matching=[x for x in deliveries if item.get('sessionId') and any(
+            ref.strip().startswith('ghref:item:'+item['sessionId']+':')
+            or ref.strip()=='ghref:session:'+item['sessionId'] for ref in (x.get('ref') or '').split(','))]
         def accepted_at(delivery):
             return next((x['receivedAtMs'] for x in native.get(delivery['sessionId'],{}).get('retainedInputs') or [] if x['messageId']==delivery['messageId']), delivery.get('receivedAtMs'))
         proven=[x for x in matching if number(accepted_at(x)) and accepted_at(x)<=cutoff]
