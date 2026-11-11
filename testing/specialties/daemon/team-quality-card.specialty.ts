@@ -161,6 +161,31 @@ defineSpecialty({
   const unresolvedTime=card(timeless).value;
   t.assertions.assert(unresolvedTime.redLines.R3.triggered===null && unresolvedTime.formal===false,
     "legacy duplicate IDs without occurrence times were placed into a formal hour");
+  const boundedDelivery=clone();
+  const boundedItem:any={...prior,id:"bounded-old-delivery",deliveredAtMs:null,consumedAtMs:null,
+    disposition:null,deliveryMessageIds:[],deliveryEvents:[],deliveryCoverageKnown:true,
+    deliveryBounds:[{messageId:"history.first",recipient:"requester",acceptedUpperBoundMs:start-60000}]};
+  boundedDelivery.workItems.push(boundedItem);
+  const boundedCard=card(boundedDelivery).value;
+  t.assertions.assert(boundedCard.redLines.R3.triggered===false && boundedCard.redLines.R3.coverageKnown===true,
+    "a native-history corroborated delivery before the hour remained an outstanding result");
+  t.assertions.assert(boundedCard.indicators.conclusionToDeliveryP90Min.samples===20
+    && boundedCard.indicators.deliveryToConsumeP90Min.samples===20,
+    "an observed acceptance upper bound manufactured an exact latency or read sample");
+  boundedItem.deliveryBounds[0].acceptedUpperBoundMs=start+60000;
+  const currentBound=card(boundedDelivery).value;
+  t.assertions.assert(currentBound.redLines.R3.triggered===null && !currentBound.formal,
+    "a current-hour upper bound cleared or invented a historical delivery breach");
+  boundedItem.deliveryBounds[0].acceptedUpperBoundMs=start-60000;
+  boundedItem.deliveryEvents.push({messageId:"current.second",recipient:"requester",acceptedAtMs:start+300000});
+  t.assertions.assert(card(boundedDelivery).value.redLines.R3.instances.some((x:any)=>x.reason==="duplicate-result"),
+    "an exact current duplicate was hidden because the first accepted input lost its precise time");
+  boundedItem.deliveryEvents[0].recipient="wrong";
+  t.assertions.assert(card(boundedDelivery).value.redLines.R3.instances.some((x:any)=>x.reason==="wrong-recipient"),
+    "a current misroute after earlier bounded success disappeared");
+  boundedItem.deliveryEvents=[];boundedItem.deliveryBounds[0].recipient="wrong";
+  t.assertions.assert(card(boundedDelivery).value.redLines.R3.triggered===true,
+    "old wrong-recipient history alone discharged the correct recipient obligation");
   const legacyRelease=clone();
   const legacyItem={...prior,id:"legacy-release",deliveryMessageIds:[],deliveryEvents:[],
     releaseTimeBasis:"observed-absence-upper-bound",releasedAtMs:start+60000};

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { defineSpecialty, openTeam } from "../../framework/public.ts";
+import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-lifecycle",
@@ -228,6 +228,50 @@ sys.stdin.read(1)
       locker.stdin?.end();
       await t.tools.waitUntil(async()=>locker.exitCode!==null,5000);
     }
+
+    // Case-owned durable receipt loss, while the actual daemon is stopped.
+    // Preserve genuine history, rounds and the Team's real acceptance event;
+    // the public native reader must expose the fault before capture uses it.
+    await idle(owner);
+    const acceptance=readFileSync(eventFile,"utf8").trim().split("\n").map(x=>JSON.parse(x))
+      .find(x=>x.kind==="input-accepted" && x.purpose==="result" && x.sessionId===owner
+        && (x.ref||"").includes(first.collaborator));
+    t.assertions.assert(Boolean(acceptance),"real accepted result event missing before receipt-loss fixture");
+    const ownerWorkspaceId=(await r.snapshot(owner)).summary.workspaceId;
+    const ownerWorkspace=r.spaces.find(x=>x.id===ownerWorkspaceId);
+    if(!ownerWorkspace) throw new Error("actual owner workspace not found");
+    const metaPath=path.join(ownerWorkspace.root,".genethub/sessions",owner,"meta.json");
+    const stopped=await runGenetAsync(r.daemon.genet,["daemon","stop"],r.daemon.env);
+    t.assertions.assert(stopped.code===0,"isolated daemon did not stop for durable loss fixture");
+    const meta=JSON.parse(readFileSync(metaPath,"utf8"));
+    t.assertions.assert(meta.inbox.entries.some((x:any)=>x.messageId===acceptance.messageId),"target receipt absent before fault");
+    meta.inbox.entries=meta.inbox.entries.filter((x:any)=>x.messageId!==acceptance.messageId);
+    writeFileSync(metaPath,JSON.stringify(meta));
+    const cache=r.state("quality","native",owner+".json");if(existsSync(cache)) unlinkSync(cache);
+    const restarted=await runGenetAsync(r.daemon.genet,["daemon","start"],r.daemon.env);
+    t.assertions.assert(restarted.code===0,"isolated daemon failed to restart");
+    await t.tools.waitUntil(()=>r.client.connectionState==="ready",30000);
+    const inspected=await r.client.call({type:"session.inspect",payload:{sessionId:owner,throughRoundId:null}});
+    if(inspected?.type!=="sessionInspection") throw new Error("native loss inspection unavailable: "+inspected?.type);
+    t.assertions.assert(!inspected.data.retainedInputs?.some(x=>x.messageId===acceptance.messageId),
+      "fault did not remove the real native receipt");
+    const historical=r.command(["quality","facts"]);
+    t.assertions.assert(historical.code===0,"public historical delivery capture failed: "+historical.err);
+    const bounded=JSON.parse(historical.out).workItems.find((x:any)=>x.id===original);
+    t.assertions.assert(bounded.deliveredAtMs==null && bounded.consumedAtMs==null
+      && bounded.deliveryBounds?.some((x:any)=>x.messageId===acceptance.messageId
+        && x.recipient===owner && x.acceptedUpperBoundMs===acceptance.atMs),
+      "native history and acceptance event lost their bound or manufactured exact delivery/read time");
+    const savedDeliveryEvents=readFileSync(eventFile);
+    try {
+      writeFileSync(eventFile,savedDeliveryEvents.toString().trim().split("\n").map(x=>JSON.parse(x))
+        .filter(x=>x.eventId!==acceptance.eventId).map(x=>JSON.stringify(x)).join("\n")+"\n");
+      const withoutEvent=r.command(["quality","facts"]);
+      t.assertions.assert(withoutEvent.code===0,"header-only capture failed");
+      const unproven=JSON.parse(withoutEvent.out).workItems.find((x:any)=>x.id===original);
+      t.assertions.assert(!unproven.deliveryBounds?.length && unproven.deliveryCoverageKnown===false,
+        "history without a matching acceptance event invented a timed delivery bound");
+    } finally {writeFileSync(eventFile,savedDeliveryEvents);}
 
   } finally { await r.dispose(); }
 });
