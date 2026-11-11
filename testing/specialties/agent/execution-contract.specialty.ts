@@ -95,8 +95,8 @@ contractCase(
 
 contractCase(
   "terminal-persist-invalidation-survives-restart",
-  "an external Agent invalidates its missing conversation just before failure; the same native Session continues with a fresh handle both immediately and after restart, while valid handles and failed history survive",
-  ["retirement drops the adapter's last resume update", "one-second checkpoint resurrects a lost conversation", "clearing a handle erases native history or automatically replays a failed input"],
+  "an external Agent invalidates its missing conversation just before failure; the public Session retains the actionable cause across restart and clears it on explicit continuation, while valid handles and failed history survive",
+  ["retirement drops the adapter's last resume update", "one-second checkpoint resurrects a lost conversation", "clearing a handle erases native history or automatically replays a failed input", "zero-output failure loses its actionable cause in the durable summary"],
   { profile: "terminal-persist", chunks: 1 },
   async (t, session) => {
     const meta = path.join(session.workspaceRoot, ".genethub", "sessions", session.sessionId, "meta.json");
@@ -133,8 +133,12 @@ contractCase(
       if (reboot) await restart();
       const stopped = await snapshot(session);
       t.assertions.assert(stopped.summary.inputSummary?.paused === true, "a failed input was automatically unpaused");
+      t.assertions.assert(stopped.summary.inputSummary?.error?.includes("External conversation no longer exists"),
+        "public failure summary lost the actionable external error");
       t.assertions.assert(session.journal().filter((entry) => entry.event === "prompt").length === prompts, "failure or restart replayed the input without a new send");
       await answer("Continue explicitly after the external conversation was lost.");
+      t.assertions.assert(!(await snapshot(session)).summary.inputSummary?.error,
+        "explicit continuation retained the obsolete failure cause");
       t.assertions.assert(latestNative() !== oldNative, "explicit continuation reused the lost external conversation");
     }
     const validNative = latestNative();
