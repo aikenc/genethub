@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from types import SimpleNamespace
 from .runtime import get_runtime, json_value, check_decision
 from .api import TeamConfigurationError
@@ -18,6 +19,9 @@ from . import resources, quality_events
 # minutes before even asking. The operation lock and executor fence still
 # protect an in-progress retry, an existing Session, and another writer.
 PREPARE_SETTLE_AFTER_MS = 120_000
+CONCLUSION_POLICY = {'version':'task-settlement/2','successRequiresSupports':True,
+                     'nonSuccessPreservesUnresolvedSupports':True,
+                     'allOutcomesRequireDeliveredInputsRead':True}
 
 
 def identity(value):
@@ -347,7 +351,8 @@ def command(t, args, root=None, sender=None):
         from .quality_live import current
         try:live_quality=current(root)
         except (OSError,ValueError,KeyError,TypeError):live_quality={'unknown':[{'rule':'live-alerts-unavailable'}]}
-        print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId']),liveQuality=live_quality), ensure_ascii=False)); return
+        print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId']),liveQuality=live_quality,
+                              conclusionPolicy=CONCLUSION_POLICY), ensure_ascii=False)); return
     if action in ('support', 'finish', 'bind-directory', 'job') and sid != (task.get('owner') or {}).get('sessionId'):
         # A collaborator can finish its own bounded work, but cannot finish another owner's task.
         mine = next((x for x in task.get('collaborators', []) if x['sessionId'] == sid), None)
@@ -450,6 +455,71 @@ def require_results_read(t, root, sid, require_supports=True):
     return dict(pending=[{k: x.get(k) for k in ('operationId', 'sessionId', 'taskId', 'machine')}
                          for x in outstanding],
                 preparing=[{k: x.get(k) for k in ('operationId', 'state')} for x in preparing])
+
+
+def notify_settlement_changes(t, root):
+    """Surface a compatible completion contract when a real failure is stuck.
+
+    This is status, never a second result or permission to resume/release work.
+    Normal result publication runs first; only its unresolved debt qualifies.
+    """
+    deadline=time.monotonic()+4
+    def observe(sid,machine):
+        remaining=deadline-time.monotonic()
+        if remaining<=0.1:return None
+        return t.genet('session','get',sid,*t.machine_args(machine),timeout=min(2,remaining))['summary']
+    by_owner={}
+    for child in records(t,root,'pending'):
+        if (child.get('done') or {}).get('outcome')=='failed' and not (child.get('resultDelivery') or {}).get('queued'):
+            by_owner.setdefault(child.get('requester'),[]).append(child)
+    count=0
+    for snapshot in records(t,root,'tasks'):
+        owner=snapshot.get('owner') or {};sid=owner.get('sessionId')
+        children=by_owner.get(sid,[])
+        if not children or snapshot.get('finished') or snapshot.get('state')!='active':continue
+        key=identity(CONCLUSION_POLICY['version']+':'+str(sid))
+        if (snapshot.get('settlementNotices',{}).get(key) or {}).get('state')=='inbox':continue
+        if count>=2 or time.monotonic()>=deadline:break
+        count+=1
+        try:
+            with t.inbox_lock(root,snapshot['taskId'],purpose='在途收尾状态提示'):
+                task=read_task(t,root,snapshot['taskId'])
+                if task.get('finished') or task.get('owner')!=owner:continue
+                current=observe(sid,owner.get('machine'))
+                if current is None:break
+                inputs=current.get('inputSummary') or {}
+                if (current.get('status')!='idle' or inputs.get('paused') or inputs.get('pendingMessageIds')
+                        or (current.get('interactionSummary') or {}).get('requests')):continue
+                failures=[]
+                for child in children[:8]:
+                    native=observe(child['sessionId'],child.get('machine'))
+                    if native is None:break
+                    state=native.get('inputSummary') or {}
+                    if native.get('status')=='failed' or state.get('paused') and t.TURN_FAILED_ERROR in (state.get('error') or ''):
+                        failures.append('ghref:session:'+child['sessionId'])
+                if not failures:continue
+                notices=task.setdefault('settlementNotices',{});notice=notices.get(key)
+                if not notice:
+                    text=('工具状态更新 '+CONCLUSION_POLICY['version']+'；任务 '+task['taskId']+'。\n'
+                          '支持会话有原生执行失败，原结果投递仍未闭环。可用收尾合同：成功须读入必需支持；'
+                          'blocked/failed 可如实结论并保留未完成支持，任何结论仍须读入已送达输入。'
+                          '请按实际业务判断继续或如实收尾。原目标、期限、输入和资源义务不变，'
+                          '这不是新用户要求、成功结果或用户验收。\n执行状态引用：'+', '.join(failures))
+                    notice={'version':CONCLUSION_POLICY['version'],'recipient':sid,'machine':owner.get('machine'),
+                            'text':text,'ref':', '.join(failures),'state':'prepared',
+                            'messageId':t.message_id(sid,'status',task['taskId'],CONCLUSION_POLICY['version'])}
+                    notices[key]=notice;t.write_json(task_path(t,root,task['taskId']),task)
+                # Persist locally without a blocking transport under the Task
+                # lock. The ordinary inbox dispatcher retains native receipts,
+                # pause and exact remote routing; local admission is not read-in.
+                t.push_session_inbox(root,sid,'status','system:task',notice['text'],
+                    ref=notice['ref'],machine=notice['machine'],delivery_id=notice['messageId'])
+                notice['state']='inbox';notice['enqueuedAtMs']=t.now_ms()
+                t.write_json(task_path(t,root,task['taskId']),task)
+                quality_events.emit(t,root,'settlement-contract-enqueued',notice['messageId'],
+                    taskId=task['taskId'],sessionId=sid,messageId=notice['messageId'],contract=notice['version'])
+        except (t.ExpertError,TeamConfigurationError,OSError,subprocess.TimeoutExpired) as error:
+            t.record_system_issue(root,'settlement-notice',str(error)[:300],snapshot['taskId'])
 
 
 def completion_view(task, sid, outcome):

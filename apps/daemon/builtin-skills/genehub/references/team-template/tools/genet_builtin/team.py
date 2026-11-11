@@ -1638,7 +1638,7 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
                 if not can_send and item.get('purpose') != 'result':
                     kept.append(item)
                     continue
-                if not force and _has_unfinished_children(root, session_id) and item.get("purpose") not in ("human", "patrol", "task", "question", "result"):
+                if not force and _has_unfinished_children(root, session_id) and item.get("purpose") not in ("human", "patrol", "task", "question", "result", "status"):
                     kept.append(item)
                     continue
                 _advance_parent_baseline(root, session_id, summary)
@@ -5093,6 +5093,7 @@ def cmd_hook(_args):
         team_tasks.reconcile_resources(sys.modules[__name__], root)
         team_tasks.publish(sys.modules[__name__], root)
         if not builtin_admin:
+            team_tasks.notify_settlement_changes(sys.modules[__name__],root)
             try:
                 from . import quality_live
                 quality_live.tick(sys.modules[__name__],root)

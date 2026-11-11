@@ -2,6 +2,7 @@
 
 - 定义源先保存当前提交、制品和原任务记录；运行副本不初始化 Git、不 snapshot、不直接编译。
 - 对已采用 Class 扩展的团队：从平台候选更新 `tools/genet_builtin/`、`skills/genet_builtin/` 及薄入口，保留 `agent-space.genet.json.team`、业务 tools/Skills、身份、数据和回执。比较 `tools/run.py describe` 的 Class、API 与 binding 版本；兼容更新无需改写业务源。
+- 区分定义源兼容更新与执行端运行替换：Class/API/binding/settings 和既有协议保持兼容的源端工具/说明修复，可保留在途目标先采用并核对实际行为；不要求所有业务目标先结束，也不因某个远端暂不能安装而把已验证兼容的源端修复全部搁置。远端继续用原回执与执行制品收尾，实际替换仍须通过原生安全检查；增加远端能力的变更须等相应执行端协议就绪，不能冒称两端都已采用。
 - 使用者仍可修改内置包，但这些修改是明确维护的补丁，升级需要三方核对，不是零成本覆盖。
 - 首次从旧版迁移：把已有业务差异提取为 `WorkflowPolicy` / `ResourcePolicy` / `ReflectionPolicy` / `BoardPresenter` / `TeamCommands` 子类；`team.class` 可选，不需要空壳包装。旧目录入口仅转发；移除替换内部函数、猴子补丁与重复锁。见 team-core `references/extensions.md`。
 - 不给在途旧任务补造新归属。先在原 Class/settings/binding 下结算或显式交接，再部署变更。Class/API/binding/settings 不匹配时保留记录并报错，不自动回退默认类。兼容修复可保留 binding_version；改变准备、释放或账本业务语义时升级版本并安排迁移。
