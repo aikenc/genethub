@@ -817,6 +817,41 @@ sys.exit(r.returncode)
     writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'prepared work must block upgrade'\n");
     const blockedPrepared=await script(["employee","sync"],builder);
     t.assertions.assert(blockedPrepared.code!==0&&JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256===upgradedDigest&&readFileSync(preparedFile,"utf8")===preparedBytes,"an actual prepared native Session was replaced as terminal work");
+    // Explicit parallel installation is a separate immutable runtime. The
+    // original native prepare and its exact old command remain obligations.
+    const retainedData=path.join(declaredRuntime,"datas/parallel-old-obligation.txt");
+    mkdirSync(path.dirname(retainedData),{recursive:true});writeFileSync(retainedData,"old work remains here");
+    const beforeParallelBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
+    const parallelInstall=await script(["employee","sync","--parallel"],builder);
+    t.assertions.assert(parallelInstall.code===0,"independent version install remained blocked by original prepared work: "+parallelInstall.stdout+parallelInstall.stderr);
+    const afterParallelBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
+    const parallelRoot=path.dirname(path.dirname(afterParallelBinding.command[1]));
+    t.assertions.assert(parallelRoot!==declaredRuntime&&afterParallelBinding.workspaceId!==beforeParallelBinding.workspaceId
+      &&parallelRoot.startsWith(declaredRuntime+".versions"+path.sep)
+      &&JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")).archiveSha256===upgradedDigest
+      &&readFileSync(preparedFile,"utf8")===preparedBytes&&readFileSync(retainedData,"utf8")==="old work remains here"
+      &&!existsSync(path.join(parallelRoot,"datas/parallel-old-obligation.txt"))
+      &&!existsSync(path.join(parallelRoot,"spaces/qa/.genethub/team/dispatch",path.basename(preparedFile))),
+      "parallel install replaced/copied the original runtime, receipt, data or execution workspace");
+    t.assertions.assert(readFileSync(path.join(parallelRoot,".genethub/open.env"),"utf8").includes("TEAM_AGENT=ctl-cli-command"),
+      "parallel runtime lost the existing target-local Agent selection");
+    const oldRetry=installedReceive(preparedForUpgrade);
+    t.assertions.assert(oldRetry.status===0&&JSON.parse(oldRetry.stdout.trim().split("\n").at(-1)!).sessionId===preparedSid
+      &&!(await inspectSession(preparedSid,true)).items.some((i:any)=>i.type==="assistantMessage"),
+      "new default binding replayed or activated the old prepared Session");
+    const newRequest={...preparedForUpgrade,id:"upgrade.parallel.new",workspaceId:afterParallelBinding.workspaceId};
+    const parallelReceive=(request:unknown)=>spawnSync(python,[path.join(parallelRoot,"tools/run.py"),"receive",JSON.stringify(request)],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    const newPrepared=parallelReceive(newRequest);
+    t.assertions.assert(newPrepared.status===0,"new independent runtime could not prepare work: "+newPrepared.stderr);
+    const newSid=JSON.parse(newPrepared.stdout.trim().split("\n").at(-1)!).sessionId;
+    t.assertions.assert(newSid!==preparedSid&&(await inspectSession(newSid,true)).summary.workspaceId===afterParallelBinding.workspaceId,
+      "new runtime reused the old Session or workspace identity");
+    const repeatParallel=await script(["employee","sync","--parallel"],builder);
+    const repeatedBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
+    t.assertions.assert(repeatParallel.code===0&&JSON.stringify(repeatedBinding)===JSON.stringify(afterParallelBinding)
+      &&readFileSync(preparedFile,"utf8")===preparedBytes,"same version parallel retry changed bindings or old obligations: "+JSON.stringify({code:repeatParallel.code,bindingChanged:JSON.stringify(repeatedBinding)!==JSON.stringify(afterParallelBinding),firstVersion:path.basename(parallelRoot),repeatVersion:path.basename(path.dirname(path.dirname(repeatedBinding.command[1]))),oldReceiptChanged:readFileSync(preparedFile,"utf8")!==preparedBytes}));
+    const newReleased=parallelReceive({id:newRequest.id,workspaceId:newRequest.workspaceId,role:"qa",operation:"release",sessionId:newSid});
+    t.assertions.assert(newReleased.status===0,"independent new preparation could not release its own receipt");
     const releasedPrepared=installedReceive({id:preparedForUpgrade.id,workspaceId:declaredBinding.workspaceId,role:"qa",operation:"release",sessionId:preparedSid});
     t.assertions.assert(releasedPrepared.status===0,"prepared release failed: "+releasedPrepared.stdout+releasedPrepared.stderr);
     const releasedUpgrade=await script(["employee","sync"],builder);
