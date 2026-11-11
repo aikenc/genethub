@@ -213,6 +213,10 @@ sys.exit(r.returncode)
     const targetReceipt = (id:string) => JSON.parse(readFileSync(path.join(targetDispatchDir,createHash("sha256").update(id).digest("hex")+".json"),"utf8"));
     const normalRelease = targetReceipt("one-task");
     t.assertions.assert(Number.isFinite(normalRelease.leaseReleasedAtMs) && normalRelease.leaseReleasedAtMs >= releaseStartedAt && normalRelease.leaseReleasedAtMs <= Date.now(),"actual executor unlink lacks an exact bounded release clock");
+    t.assertions.assert(Number.isFinite(normalRelease.resourceReleasedAtMs) && normalRelease.resourceReleasedAtMs >= normalRelease.leaseReleasedAtMs && normalRelease.resourceReleasedAtMs <= Date.now(), "remote release lacks contemporaneous process-and-lease proof");
+    const releaseEvents = () => readFileSync(path.join(sourceRoot,".genethub/team/events/events.jsonl"),"utf8").trim().split("\n").map(line=>JSON.parse(line));
+    const provenRelease = releaseEvents().filter(e=>e.kind==="resource-released"&&e.sessionId===record.sessionId);
+    t.assertions.assert(provenRelease.length===1 && provenRelease[0].atMs===normalRelease.resourceReleasedAtMs,"source lost or backdated executor resource proof before any hourly capture");
     const replayRelease = (id:string,sid:string) => {
       const request={id,workspaceId:qa.id,role:"qa",operation:"release",sessionId:sid};
       const r=spawnSync(python,["tools/team.py","receive",JSON.stringify(request)],{cwd:targetRoot,env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
@@ -220,6 +224,7 @@ sys.exit(r.returncode)
       return JSON.parse(r.stdout.trim().split("\n").at(-1)!);
     };
     t.assertions.assert(replayRelease("one-task",record.sessionId).leaseReleasedAtMs===normalRelease.leaseReleasedAtMs,"release replay changed an observed unlink clock");
+    t.assertions.assert(replayRelease("one-task",record.sessionId).resourceReleasedAtMs===normalRelease.resourceReleasedAtMs,"release replay changed the original resource observation");
     // A receiver that crashed before recording a session ID must never retry creation.
     const intentDir = path.join(sourceRoot, ".genethub/team/dispatch");
     const intent = readdirSync(intentDir).map(f => JSON.parse(readFileSync(path.join(intentDir, f), "utf8"))).find(v => v.request.id === "one-task");
@@ -240,7 +245,7 @@ sys.exit(r.returncode)
     t.assertions.assert(afterRelease.code !== 0 && afterRelease.stderr.includes("派单回执"), "send restarted a session after releasing its writer lease");
     // A new spawn without an explicit retry ID must not reuse yesterday's
     // completed result merely because its task wording is identical.
-    o.mock.script({ text: "Fresh first task." }, { text: "Fresh repeated task." });
+    o.mock.script({ tool: { name: "bash", arguments: { command: "sleep 60 > /dev/null 2>&1 & echo $! > release-child.pid" } } }, { text: "Fresh first task." }, { text: "Fresh repeated task." });
     const freshArgs = dispatch.filter(v => v !== "--request-id" && v !== "one-task");
     const freshSessions: string[] = [];
     for (let n = 0; n < 2; n++) {
@@ -256,16 +261,36 @@ sys.exit(r.returncode)
       freshSessions.push(task.sessionId);
       await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).summary; return s.status === "idle" && !!s.latestReply; }, 30000)
         .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).summary)); });
+      if(n===0) {
+        const childPid=Number(readFileSync(path.join(targetRoot,"spaces/qa/release-child.pid"),"utf8").trim());
+        process.kill(childPid,0);
+        const inventory=await o.client.call({type:"process.list"});
+        t.assertions.assert(inventory?.type==="processes" && inventory.data.some(p=>p.pid===childPid&&p.sessionId===task.sessionId),"fixture did not retain an actual owned remote process");
+        try {
+          const held=await script(["hook"]);
+          t.assertions.assert(held.code===0 && existsSync(path.join(pendingDir,taskFile!)) && existsSync(lock) && !targetReceipt(dispatchId!).released,"remote release ignored an owned live process");
+          t.assertions.assert(!releaseEvents().some(e=>e.kind==="resource-released"&&e.sessionId===task.sessionId),"live process was falsely recorded as returned");
+        } finally {
+          await o.client.call({type:"process.killAll",payload:{sessionId:task.sessionId}});
+        }
+        await t.tools.waitUntil(async()=>{const r=await o.client.call({type:"process.list"});return r?.type==="processes"&&!r.data.some(p=>p.sessionId===task.sessionId);},10000);
+      }
       // Real OS fault: a prior actor removed this completed task's marker.
       // Absence proves at most an upper bound, not when this receiver unlinked it.
       if(n===1) unlinkSync(lock);
+      const observedAfter=Date.now();
       const finished = await script(["hook"]);
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
       const released=targetReceipt(dispatchId!);
-      if(n===0) t.assertions.assert(Number.isFinite(released.leaseReleasedAtMs),"ordinary fresh release omitted its observed unlink clock");
+      if(n===0) {
+        t.assertions.assert(Number.isFinite(released.leaseReleasedAtMs),"ordinary fresh release omitted its observed unlink clock");
+        t.assertions.assert(Number.isFinite(released.resourceReleasedAtMs) && released.resourceReleasedAtMs>=observedAfter && released.resourceReleasedAtMs<=Date.now(),"resource return was not bounded by this actual release check");
+      }
       else {
         t.assertions.assert(released.leaseReleasedAtMs==null,"pre-existing lease absence invented an exact release time");
         t.assertions.assert(replayRelease(dispatchId!,task.sessionId).leaseReleasedAtMs==null,"release replay manufactured a missing unlink clock");
+        t.assertions.assert(released.resourceReleasedAtMs==null && replayRelease(dispatchId!,task.sessionId).resourceReleasedAtMs==null,"prior marker absence manufactured a complete historical resource proof");
+        t.assertions.assert(!releaseEvents().some(e=>e.kind==="resource-released"&&e.sessionId===task.sessionId),"source made up a resource event for an already-absent marker");
       }
     }
     t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 3, "same-worded new task reused an old session");
