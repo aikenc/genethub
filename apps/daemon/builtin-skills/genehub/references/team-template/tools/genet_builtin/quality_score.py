@@ -320,4 +320,6 @@ def score(facts):
         result['redLines']['R6']['basis'] = 'task-agent-hours/1'
         result['effectiveInFlight']['basis'] = 'eligible-task-weighted-summary/1'
         result['streakCompatibilityKey'] = model
+    from .quality_attribution import attach
+    attach(result, facts)
     return result

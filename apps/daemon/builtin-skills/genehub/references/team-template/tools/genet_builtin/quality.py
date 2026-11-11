@@ -567,7 +567,10 @@ def capture(team, root, end, cutoff):
         baseline={'schema':'team-quality-baseline/1','workItemIds':[i['id'] for i in first],
                   'executionMsPerAdopted':sum(i['executionMs'] for i in first)/20,'frozenAtMs':cutoff}
         team.write_json(str(store/'baseline.json'),baseline)
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents),
+    from .quality_attribution import context as attribution_context
+    attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                                      hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents),
             'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
             'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
@@ -694,6 +697,8 @@ def briefing(root,now):
                '卡：'+latest['card'], '事实：'+latest['snapshot'],
                '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
                '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
+        if value.get('attribution'):
+            lines.append('失分归因（全部计分，责任来源不等于已证实根因）：'+canonical(value['attribution']).strip())
         lines.append('有效在途小时均值（已确认下界/可能上界）：'+canonical(value.get('effectiveInFlight')).strip())
         if value.get('model')=='tq/2':
             lines.append('R6：按任务树实际Agent工时/有效墙钟；累计至少30分钟且本小时至少15分钟才考核，低于2触发；没有合格任务为不适用。只连续计算同一口径的卡。')
