@@ -621,6 +621,54 @@ def records(t, root, area):
     return values
 
 
+def recover_concluded_archives(t, root):
+    """Recover an old missing result subscription, never rerun its business.
+
+    Older timers could archive an explicit conclusion after advancing the
+    reply baseline. A completed result payload, explicit controls or a newer
+    subscription are not this migration and must remain untouched.
+    """
+    for saved in records(t, root, 'done'):
+        sid, task_id, operation = saved.get('sessionId'), saved.get('taskId'), saved.get('operationId')
+        if not (sid and t.SESSION_ID.fullmatch(sid) and task_id and operation
+                and re.fullmatch(r'taskop\.[0-9a-f]{64}', operation)):
+            continue
+        if not saved.get('taskConclusion') or saved.get('done') or not saved.get('requester'):
+            continue
+        if any(saved.get(k) for k in ('quiet', 'superseded', 'taskCanceled', 'stopReason', 'resumeRequestId')):
+            continue
+        with t.inbox_lock(root, task_id, purpose='结论交付恢复'):
+            try:
+                task = read_task(t, root, task_id)
+            except (t.ExpertError, TeamConfigurationError) as error:
+                t.record_system_issue(root, 'result-recovery', str(error), operation)
+                continue
+            if task.get('state') in ('paused', 'pausing', 'canceling', 'canceled') or (task.get('control') and not task['control'].get('complete')):
+                continue
+            owner = (task.get('owner') or {}).get('sessionId') == sid
+            participant = next((x for x in task.get('collaborators', [])
+                                if x.get('sessionId') == sid and x.get('operationId') == operation), {})
+            conclusion = task.get('finished') if owner else participant.get('finished')
+            if conclusion != saved['taskConclusion']:
+                continue
+            intent = t.read_dispatch_record(t.state_dir(root, 'task-dispatch', operation + '.json')) or {}
+            request = intent.get('request') or {}
+            if (intent.get('state') != 'created' or intent.get('sessionId') != sid
+                    or request.get('taskId') != task_id or request.get('requester') != saved['requester']
+                    or request.get('machine') != saved.get('machine')):
+                continue
+            if owner and operation != 'taskop.' + identity(task_id + ':owner'):
+                continue
+            pending = t.state_dir(root, 'pending', sid + '.json')
+            with t.inbox_lock(root, 'pending-' + sid, purpose='恢复原结果订阅'):
+                # Recheck after the lock: explicit continuation may have
+                # installed a new subscription while this scan was running.
+                current = t.read_dispatch_record(t.state_dir(root, 'done', sid + '.json'))
+                if os.path.exists(pending) or current != saved:
+                    continue
+                t.write_json(pending, saved)
+
+
 
 def release_local(t, root, record):
     if record.get('machine') or not record.get('lock'):

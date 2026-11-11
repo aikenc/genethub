@@ -4310,6 +4310,7 @@ def leader_watchdog(root, name, mine):
 
 
 def reconcile(root, name, mine):
+    team_tasks.recover_concluded_archives(sys.modules[__name__], root)
     front, front_checked = None, False
     pending_dir = state_dir(root, "pending")
     entries = sorted(os.listdir(pending_dir)) if os.path.isdir(pending_dir) else []
@@ -4456,7 +4457,11 @@ def reconcile(root, name, mine):
                 elif record.get("kind") in ("reflect", "team-reflect") or age > giveup_after:
                     finish()
                 continue
-            if status == "idle" and reply and reply != record.get("baseline"):
+            # The explicit task conclusion is a result even if an earlier
+            # observation already advanced the conversational reply baseline.
+            # An explicit continuation owns a separate result generation.
+            concluded = record.get("taskConclusion") and not record.get("resumeRequestId")
+            if status == "idle" and reply and (reply != record.get("baseline") or concluded):
                 if has_children:
                     record["baseline"] = reply
                     record.pop("done", None)
