@@ -63,18 +63,28 @@ defineSpecialty({
     writeFileSync(old.pending, JSON.stringify(old.record));
     mkdirSync(path.dirname(old.done), { recursive: true }); renameSync(old.pending, old.done);
     writeFileSync(old.taskPath, JSON.stringify({ ...old.state, state: "delivered" }));
+    await r.send(old.sid, JSON.stringify({ argv: ["/bin/echo", "UNRELATED_LATER_REPLY"], cwd: r.root }));
+    await idle(old.sid);
+    await r.client.call({ type: "session.interrupt", payload: { sessionId: old.sid } });
     await r.client.call({ type: "session.interrupt", payload: { sessionId: front } });
     r.ok(["tick"]);
     t.assertions.assert((await r.snapshot(front)).summary.inputSummary?.paused,
       "historical conclusion recovery lifted the requester's Human pause");
     const recovered = JSON.parse(readFileSync(old.done, "utf8"));
     t.assertions.assert(recovered.done?.text.includes("DECLARED_CONCLUSION_LEGACY")
-      && recovered.taskConclusion.atMs === old.state.finished.atMs,
+      && !recovered.done.text.includes("UNRELATED_LATER_REPLY")
+      && recovered.taskConclusion.atMs === old.state.finished.atMs
+      && (await r.snapshot(old.sid)).summary.inputSummary?.paused,
       "legacy recovery lost its evidence or rewrote the original conclusion time");
     await r.send(front, "Collect the queued result without redoing the check"); await idle(front);
     r.ok(["tick"]); await idle(front);
     t.assertions.assert((await copies("DECLARED_CONCLUSION_LEGACY")).length === 1,
       "legacy result did not arrive once after explicit continuation");
+    const facts = JSON.parse(r.ok(["quality", "facts"]));
+    const delivered = facts.workItems.find((x: any) => x.sessionId === old.sid);
+    t.assertions.assert(delivered.deliveryCoverageKnown && typeof delivered.deliveredAtMs === "number"
+      && delivered.deliveredAtMs >= old.state.finished.atMs,
+      "native collector lost the recovered conclusion's real delivery receipt");
     const originalReply = (await r.snapshot(old.sid)).summary.latestReply!.itemId;
     r.ok(["tick"]); await idle(front);
     t.assertions.assert((await copies("DECLARED_CONCLUSION_CURRENT")).length === 1
