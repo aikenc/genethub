@@ -13,6 +13,12 @@ from .runtime import get_runtime, json_value, check_decision
 from .api import TeamConfigurationError
 from . import resources, quality_events
 
+# remote_receive bounds a prepare call to 120 seconds. After that horizon,
+# reconcile its original outcome on the next hook instead of waiting ten
+# minutes before even asking. The operation lock and executor fence still
+# protect an in-progress retry, an existing Session, and another writer.
+PREPARE_SETTLE_AFTER_MS = 120_000
+
 
 def identity(value):
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
@@ -749,7 +755,7 @@ def reconcile_withdrawals(t, root):
                   if x.get('state') == 'creating' and not x.get('sessionId')
                   and (x.get('request', {}).get('taskId') in concluded or
                        (x.get('request', {}).get('taskId') in active and x.get('recoverable')
-                        and x.get('createAttempted') and x.get('createdAtMs', t.now_ms()) + 600_000 <= t.now_ms()))
+                        and x.get('createAttempted') and x.get('createdAtMs', t.now_ms()) + PREPARE_SETTLE_AFTER_MS <= t.now_ms()))
                   and x.get('request', {}).get('machine') and x.get('target')
                   and not x.get('lock') and not x.get('resourceBinding')
                   and x.get('withdrawRetryAtMs', 0) <= t.now_ms()]
@@ -767,7 +773,7 @@ def reconcile_withdrawals(t, root):
             if settling and (task.get('state') != 'active' or
                              (task.get('control') and not task['control'].get('complete')) or
                              not intent.get('recoverable') or not intent.get('createAttempted') or
-                             intent.get('createdAtMs', t.now_ms()) + 600_000 > t.now_ms()):
+                             intent.get('createdAtMs', t.now_ms()) + PREPARE_SETTLE_AFTER_MS > t.now_ms()):
                 continue
             request, target = intent['request'], intent['target']
             # Reconstruct the exact original target-side prepare envelope.
