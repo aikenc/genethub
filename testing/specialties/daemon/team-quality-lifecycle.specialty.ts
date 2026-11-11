@@ -93,6 +93,7 @@ defineSpecialty({
     const idleReadback=r.command(["quality","facts"]);
     t.assertions.assert(idleReadback.code===0,"public collector rejected bounded observation fixture: "+idleReadback.err);
     const idleFacts=JSON.parse(idleReadback.out);
+    t.assertions.assert(idleFacts.attributionContext?.schema==="team-quality-attribution-context/1" && idleFacts.attributionContext.dispatch==="builtin-task/1", "native capture lacks attribution provenance for automatic dispatch/result/resource obligations");
     t.assertions.assert(idleFacts.coverage.resources===true,
       "work without a conclusion manufactured an unknown overdue resource obligation");
     const idleItem=idleFacts.workItems.find((x:any)=>x.id===original);
@@ -224,6 +225,10 @@ defineSpecialty({
     const history=await ok(owner,["quality","history"]);
     t.assertions.assert(history.cards.length===1 && history.cards[0].factsSha256===JSON.parse(savedCard).factsSha256,
       "hour history did not retain its frozen facts identity");
+    r.ok(["reflect","now","--model","fixture","Inspect current measured quality losses"],{TEAM_AGENT:"ctl-normal",GENEHUB_SESSION_ID:front});
+    const briefings=readdirSync(r.state("briefings")).filter(x=>x.endsWith(".md")).sort();
+    const brief=readFileSync(r.state("briefings",briefings.at(-1)!),"utf8");
+    t.assertions.assert(brief.includes("失分归因（全部计分")&&brief.includes("team-quality-loss-attribution/1")&&brief.includes('"allLossesCount":true'),"actual native reflection briefing dropped attribution totals or their all-losses policy");
     const pointer=r.state("quality","latest.json"),pointerBefore=readFileSync(pointer);
     const ready=path.join(r.root,"capture-lock-ready");
     const lockScript=`import os,pathlib,sys
