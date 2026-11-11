@@ -118,6 +118,8 @@ export interface ScriptAgentControl {
   chunkIntervalMs?: number;
   /** Non-secret expected text in a resumed public conversation question. */
   expectedResume?: string;
+  /** Hold the external invalidation until the case releases its disk fault. */
+  holdPersist?: boolean;
   questionCount?: number;
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; llmRounds: number; tokenUsageStatus: "reported" | "partial" | "unavailable" };
   delayMs?: number;
@@ -137,6 +139,8 @@ export interface ScriptAgentControl {
 export type ScriptAgentProfile =
   /** Answers every turn with `chunks` chunks and turnCompleted. */
   | "normal"
+  /** Invalidates its resume handle immediately before a requested failure. */
+  | "terminal-persist"
   /** Calls the real public CLI with its Session controller identity, then stops. */
   | "cli-question"
   /** Executes a JSON argv/cwd request through a real Agent-bound child process. */

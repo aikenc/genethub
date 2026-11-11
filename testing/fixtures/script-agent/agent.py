@@ -44,6 +44,7 @@ from genehub_agent import rpc as _rpc
 
 PROFILES = (
     "normal",
+    "terminal-persist",
     "cli-question",
     "cli-command",
     "provider-cli",
@@ -310,6 +311,23 @@ class FixtureSession(Session):
         if DELAY_S > 0:
             await asyncio.sleep(DELAY_S)
         profile = PROFILE if fault_armed() else "normal"
+
+        latest_text = text
+        if profile == "terminal-persist":
+            _, marker, payload = text.partition("\nInputs:\n")
+            if marker:
+                inputs, _ = json.JSONDecoder().raw_decode(payload)
+                latest_text = inputs[-1]["text"]
+        if profile == "terminal-persist" and latest_text == "invalidate-resume":
+            if CONTROL.get("holdPersist"):
+                journal("awaiting-invalidation", sessionId=self.native)
+                while not os.path.exists(os.path.join(STATE, "release-invalidation")):
+                    await asyncio.sleep(0.02)
+            self.ctx.set_persist({})
+            self.pending = None
+            journal("resume-invalidated", sessionId=self.native)
+            self.ctx.emit(events.turn_failed(turn_id, "External conversation no longer exists", "upstream"))
+            return
 
         if profile == "cli-command":
             try:

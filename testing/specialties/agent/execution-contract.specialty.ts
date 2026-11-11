@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, renameSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import {
   defineSpecialty,
@@ -46,6 +47,104 @@ async function snapshot(session: Session) {
 }
 
 const completed = (session: Session) => session.events.filter((event) => event.type === "turnCompleted").length;
+
+contractCase(
+  "terminal-persist-invalidation-survives-restart",
+  "an external Agent invalidates its missing conversation just before failure; the same native Session continues with a fresh handle both immediately and after restart, while valid handles and failed history survive",
+  ["retirement drops the adapter's last resume update", "one-second checkpoint resurrects a lost conversation", "clearing a handle erases native history or automatically replays a failed input"],
+  { profile: "terminal-persist", chunks: 1 },
+  async (t, session) => {
+    const meta = path.join(session.workspaceRoot, ".genethub", "sessions", session.sessionId, "meta.json");
+    const latestNative = () => session.journal().filter((entry) => entry.event === "session-start").at(-1)?.sessionId;
+    const waitSaved = async (native: unknown) => t.tools.waitUntil(() => {
+      const value = JSON.parse(readFileSync(meta, "utf8")) as { persist?: { value?: { native?: string } } };
+      return value.persist?.value?.native === native;
+    }, 5_000);
+    const restart = async () => {
+      const before = session.resyncs();
+      session.daemon.stop();
+      await t.tools.waitUntil(() => session.client.connectionState !== "ready", 5_000);
+      const started = runGenet(session.daemon.genet, ["daemon", "start"], session.daemon.env);
+      t.assertions.assert(started.code === 0, `restart failed: ${started.stderr}`);
+      await t.tools.waitUntil(() => session.client.connectionState === "ready" && session.resyncs() > before, 30_000);
+    };
+    const answer = async (text: string) => {
+      const before = session.journal().filter((entry) => entry.event === "answered").length;
+      await t.flows.main.sendPrompt(session.client, session.sessionId, text, null, "u_" + randomBytes(16).toString("hex"));
+      await t.tools.waitUntil(async () => session.journal().filter((entry) => entry.event === "answered").length > before
+        && await session.daemonStatus() === "idle", 15_000);
+    };
+    await answer("Keep the original native conversation history.");
+    for (const reboot of [false, true]) {
+      const oldNative = latestNative();
+      t.assertions.assert(typeof oldNative === "string", "the Agent never opened a real external conversation");
+      await waitSaved(oldNative);
+      const beforeFailed = session.events.filter((event) => event.type === "turnFailed").length;
+      await t.flows.main.sendPrompt(session.client, session.sessionId, "invalidate-resume", null, "u_" + randomBytes(16).toString("hex"));
+      await t.tools.waitUntil(() => session.events.filter((event) => event.type === "turnFailed").length > beforeFailed, 15_000);
+      const cleared = JSON.parse(readFileSync(meta, "utf8")) as { persist?: { value?: unknown } };
+      t.assertions.assert(JSON.stringify(cleared.persist?.value) === "{}", "terminal retirement retained the invalidated external conversation");
+      const prompts = session.journal().filter((entry) => entry.event === "prompt").length;
+      if (reboot) await restart();
+      const stopped = await snapshot(session);
+      t.assertions.assert(stopped.summary.inputSummary?.paused === true, "a failed input was automatically unpaused");
+      t.assertions.assert(session.journal().filter((entry) => entry.event === "prompt").length === prompts, "failure or restart replayed the input without a new send");
+      await answer("Continue explicitly after the external conversation was lost.");
+      t.assertions.assert(latestNative() !== oldNative, "explicit continuation reused the lost external conversation");
+    }
+    const validNative = latestNative();
+    await waitSaved(validNative);
+    await restart();
+    await answer("Continue with the valid conversation after restart.");
+    t.assertions.assert(latestNative() === validNative, "a valid resume handle was discarded during retirement");
+    const history = JSON.stringify((await snapshot(session)).items);
+    const rounds = await session.client.call({ type: "session.rounds", payload: { sessionId: session.sessionId, throughRoundId: null, cursor: null, limit: 100 } });
+    t.assertions.assert(history.includes("Keep the original native conversation history.")
+      && rounds?.type === "sessionRounds" && rounds.data.rounds.filter((round) => round.outcome === "failed").length === 2,
+    "recovery erased the original conversation or its failed outcomes");
+  },
+);
+
+contractCase(
+  "terminal-persist-save-failure-keeps-execution-owned",
+  "a real metadata write failure while invalidating an external conversation retains execution ownership; restoring the file and explicitly stopping permits a fresh continuation without losing native history",
+  ["unsaved resume invalidation releases execution", "next send starts on stale state after a disk failure", "failed retirement cannot be retried"],
+  { profile: "terminal-persist", chunks: 1, holdPersist: true },
+  async (t, session) => {
+    const meta = path.join(session.workspaceRoot, ".genethub", "sessions", session.sessionId, "meta.json");
+    const backup = meta + ".before-fault";
+    let obstructed = false;
+    try {
+      await t.flows.main.sendPrompt(session.client, session.sessionId, "Remember this history.");
+      await session.waitForTerminal();
+      const native = session.journal().find((entry) => entry.event === "session-start")?.sessionId;
+      await t.tools.waitUntil(() => JSON.stringify(JSON.parse(readFileSync(meta, "utf8")).persist).includes(String(native)), 5_000);
+      await t.flows.main.sendPrompt(session.client, session.sessionId, "invalidate-resume");
+      await t.tools.waitUntil(() => session.journal().some((entry) => entry.event === "awaiting-invalidation"), 5_000);
+      renameSync(meta, backup); mkdirSync(meta); obstructed = true;
+      writeFileSync(path.join(session.agent.stateDir, "release-invalidation"), "release");
+      await t.tools.waitUntil(() => session.events.some((event) => event.type === "item"
+        && JSON.stringify(event.raw).includes("saving Agent resume state")), 10_000);
+      t.assertions.assert(await session.daemonStatus() === "running", "unsaved retirement released execution ownership");
+      let rejected = false;
+      try { await t.flows.main.sendPrompt(session.client, session.sessionId, "Must not execute while state is unsaved."); }
+      catch { rejected = true; }
+      t.assertions.assert(rejected && session.journal().filter((entry) => entry.event === "prompt").length === 2, "a new execution entered after persistence failed");
+      rmdirSync(meta); renameSync(backup, meta); obstructed = false;
+      await session.client.call({ type: "session.interrupt", payload: { sessionId: session.sessionId } });
+      await t.tools.waitUntil(async () => await session.daemonStatus() === "idle", 10_000);
+      t.assertions.assert(JSON.stringify(JSON.parse(readFileSync(meta, "utf8")).persist?.value) === "{}", "retry did not persist the original invalidation");
+      const before = session.journal().filter((entry) => entry.event === "answered").length;
+      await t.flows.main.sendPrompt(session.client, session.sessionId, "Continue after storage recovery.");
+      await t.tools.waitUntil(() => session.journal().filter((entry) => entry.event === "answered").length > before, 10_000);
+      t.assertions.assert(session.journal().filter((entry) => entry.event === "session-start").at(-1)?.sessionId !== native,
+        "storage recovery reused the invalidated external conversation");
+      t.assertions.assert(JSON.stringify((await snapshot(session)).items).includes("Remember this history."), "storage recovery lost native history");
+    } finally {
+      if (obstructed) { rmdirSync(meta); renameSync(backup, meta); }
+    }
+  },
+);
 
 contractCase(
   "reconnect-resets-even-when-daemon-sequences-overlap",
