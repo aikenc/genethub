@@ -8,7 +8,7 @@ DS原远程派单虽已记录准确的协议缺失原因，但任务状态、反
 
 非本项目的真实双daemon/relay/CLI夹具，从公开 `notes ls` 验证错误可见、重复检查记录ID不变、普通错误不混入、原意图和目标写者/会话数不变，并覆盖后续正常结算与显式暂停恢复。原失败 `261111-1157-protocol-visibility-red-8faa` 精确报缺少诊断记录；隔离后 `261111-1206-protocol-visibility-isolated-4650` 和精确提交 `261111-1214-protocol-visibility-committed-53a6` 均2/2、dev-feedback qualified、无输入漂移。lint/governance通过。只运行必要定向范围，未执行完整dev/merge/Beta/Stable门禁。
 
-`261111-1200-protocol-visibility-fixed-aef6` 行为2/2通过，但有其他开发会话写入预览代码造成inputDrift，不计候选合格。已由该任务所属Agent移走其改动，我们保留本候选并重新验证；没有覆盖他人改动或将预览代码混入发布。
+`261111-1200-protocol-visibility-fixed-aef6` 行为2/2通过，但有其他开发会话写入预览代码造成inputDrift，不计候选合格。与所属Agent协调后，观察到那些改动已移出当前工作树；具体迁移操作未单独核实。我们保留本候选并重新验证；没有覆盖他人改动或将预览代码混入发布。
 
 ## 提交与真实发布
 
