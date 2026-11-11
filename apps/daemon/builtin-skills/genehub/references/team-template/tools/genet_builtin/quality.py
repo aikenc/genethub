@@ -125,6 +125,35 @@ def union_intervals(intervals):
     return [{'startAtMs': a, 'endAtMs': b} for a,b in out]
 
 
+def work_activity(samples, rounds, begin, stop):
+    """Bound effective work by native execution and fresh pause/wait samples.
+
+    An observation expires after the same 125s used for minute coverage.
+    Missing spans stay unknown; a real Round overrides a stale pause sample.
+    """
+    if stop <= begin:
+        return {'basis':'native-minute-and-rounds/1', 'active':[], 'excluded':[]}
+    points = [x for x in samples if begin-125000 <= x['atMs'] < stop]
+    busy = [(max(begin, x['startedAtMs']), min(stop, x['endedAtMs']
+             if x.get('outcome') != 'running' and number(x.get('endedAtMs')) else stop))
+            for x in rounds if number(x.get('startedAtMs')) and x['startedAtMs'] < stop]
+    busy = [(a,b) for a,b in busy if b > a]
+    boundaries = sorted({begin, stop, *[t for a,b in busy for t in (a,b)],
+                         *[min(stop,max(begin,t)) for x in points for t in (x['atMs'],x['atMs']+125000)]})
+    active, excluded = [], []
+    for left,right in zip(boundaries,boundaries[1:]):
+        if any(a <= left < b for a,b in busy):
+            active.append((left,right))
+            continue
+        sample = next((x for x in reversed(points) if x['atMs'] <= left), None)
+        if (sample is None or left >= sample['atMs']+125000 or
+                type(sample.get('paused')) is not bool or type(sample.get('waitingForUser')) is not bool):
+            continue
+        (excluded if sample['paused'] or sample['waitingForUser'] else active).append((left,right))
+    return {'basis':'native-minute-and-rounds/1', 'active':union_intervals(active),
+            'excluded':union_intervals(excluded)}
+
+
 def idle_periods(samples, rounds, children, begin, stop):
     """Sampled idle episodes split by actual execution or a live dependency."""
     busy = [(max(begin, x['startedAtMs']), min(stop, x['endedAtMs'] if number(x.get('endedAtMs')) else stop))
@@ -302,6 +331,8 @@ def capture(team, root, end, cutoff):
         if not number(begun):
             begun=incoming.get('deliveredAtMs')
         item['startedAtMs']=begun if number(begun) and begun <= cutoff else None
+        if number(item['startedAtMs']):
+            item['workActivity']=work_activity(samples,own.get('rounds',[]),max(start,begun),stop)
         if item['confirmedAtMs'] is None and number(begun) and begun < start:
             item['confirmedAtMs']=begun  # acknowledged no later than actual activation, before this window
         matching=[x for x in deliveries if item.get('sessionId') and any(

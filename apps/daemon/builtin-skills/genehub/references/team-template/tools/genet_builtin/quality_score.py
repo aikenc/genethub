@@ -50,6 +50,23 @@ def intersection(a, b, c, d):
     return max(0, min(b, d) - max(a, c))
 
 
+def activity_intervals(value):
+    if not isinstance(value, dict) or value.get('basis') != 'native-minute-and-rounds/1':
+        raise ValueError('unsupported work activity basis')
+    groups = []
+    for key in ('active','excluded'):
+        rows = value.get(key)
+        if not isinstance(rows, list) or any(not isinstance(x,dict) or
+                not number(x.get('startAtMs')) or not number(x.get('endAtMs')) or
+                x['endAtMs'] <= x['startAtMs'] for x in rows):
+            raise ValueError('invalid work activity interval')
+        groups.append(sorted(rows,key=lambda x:x['startAtMs']))
+    merged = sorted(groups[0]+groups[1],key=lambda x:x['startAtMs'])
+    if any(a['endAtMs'] > b['startAtMs'] for a,b in zip(merged,merged[1:])):
+        raise ValueError('work activity intervals must be disjoint')
+    return groups
+
+
 def score(facts):
     if facts.get('schema') != 'team-quality-facts/1':
         raise ValueError('unsupported quality facts schema')
@@ -149,9 +166,20 @@ def score(facts):
             continue
         stop = min(concluded, end) if number(concluded) else end
         area = sum(intersection(max(start, begun), stop, s['startAtMs'], s['endAtMs']) for s in active)
-        upper_area += area
+        known_area, possible_area = area, area
+        if 'workActivity' in item:
+            observed_active, excluded = activity_intervals(item['workActivity'])
+            def measured(intervals):
+                return sum(intersection(max(start,begun,s['startAtMs']),min(stop,s['endAtMs']),
+                                        x['startAtMs'],x['endAtMs']) for s in active for x in intervals)
+            known_area = measured(observed_active)
+            possible_area -= measured(excluded)
+        # Old frozen snapshots keep their original arithmetic. New captures
+        # expose activity bounds: unknown gaps cannot inflate the lower bound
+        # or erase possible work, and pause/wait cannot inflate either bound.
+        upper_area += possible_area
         if number(concluded) and concluded <= cutoff:
-            lower_area += area
+            lower_area += known_area
     parallel = None if not active_ms else lower_area / active_ms
     possible_parallel = None if not active_ms else upper_area / active_ms
     r6_known = coverage.get('goals') is True and coverage.get('starts') is True and bool(active_ms)
