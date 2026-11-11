@@ -68,8 +68,14 @@ defineSpecialty({
       "new evidence coverage basis or preserved failure gap missing");
     const file=join(r.root,"external-coverage-facts.json");writeFileSync(file,JSON.stringify(facts));
     const card=JSON.parse(r.ok(["quality","card","--snapshot",file]));
-    t.assertions.assert(card.measurementVersion==="tq/2+dispatch-resource-obligation/2+per-source-failure-domain/1"&&card.streakCompatibilityKey===card.measurementVersion,
-      "changed coverage was stitched to an old measurement");
+    const coverageVersion="tq/2+dispatch-resource-obligation/2+per-source-failure-domain/1";
+    t.assertions.assert(card.measurementVersion===coverageVersion+"+verified-repair-adoption/1"
+      &&card.streakCompatibilityKey===card.measurementVersion+":epoch:initial",
+      "current native coverage lost its repair/adoption measurement policy");
+    const legacyFacts=structuredClone(facts);delete legacyFacts.redlineLifecycle;writeFileSync(file,JSON.stringify(legacyFacts));
+    const legacyCard=JSON.parse(r.ok(["quality","card","--snapshot",file]));
+    t.assertions.assert(legacyCard.measurementVersion===coverageVersion&&legacyCard.streakCompatibilityKey!==card.streakCompatibilityKey,
+      "pre-adoption legacy coverage stitched into a new epoch measurement");
     const unknownFailure=r.state("events","failures",Date.now()+"-restored-unknown");
     writeFileSync(unknownFailure,JSON.stringify({kind:"legacy-unclassified",error:"explicit-restored-unknown-failure"}));
     const unknown=JSON.parse(r.ok(["quality","facts"]));

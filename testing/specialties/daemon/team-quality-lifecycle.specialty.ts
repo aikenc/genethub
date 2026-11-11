@@ -213,6 +213,8 @@ defineSpecialty({
     // remain untouched; this is explicitly not historical native timer proof.
     const legacyEvents=readFileSync(eventFile,"utf8").trim().split("\n").map(x=>JSON.parse(x));
     writeFileSync(eventFile,legacyEvents.filter(x=>!(x.kind==="resource-released" && x.operationId===original)).map(x=>JSON.stringify(x)).join("\n")+"\n");
+    const boundFile=r.state("quality","resource-checks",original+".json");
+    const priorBound=existsSync(boundFile)?JSON.parse(readFileSync(boundFile,"utf8")).legacyReleaseObservedAtMs:null;
     const beforeLegacyCapture=Date.now();
     const facts=await ok(owner,["quality","facts"]);
     t.assertions.assert(readFileSync(taskPath).equals(businessBefore),"diagnostic capture rewrote the actual task record");
@@ -220,9 +222,14 @@ defineSpecialty({
     t.assertions.assert(observed.sessionId===first.collaborator && typeof observed.startedAtMs==="number"
       && typeof observed.deliveredAtMs==="number" && typeof observed.consumedAtMs==="number",
       "public capture did not match actual native start/delivery/read-in facts: "+JSON.stringify(observed));
+    const absence=JSON.parse(readFileSync(boundFile,"utf8"));
     t.assertions.assert(observed.legacyReleaseStateKnown===true && typeof observed.releasedAtMs==="number"
-      && observed.releaseTimeBasis==="observed-absence-upper-bound" && observed.releasedAtMs>=beforeLegacyCapture,
-      "legacy durable release was ignored or a historical exact timestamp was invented: "+JSON.stringify(observed));
+      && observed.releaseTimeBasis==="observed-absence-upper-bound"
+      && observed.releasedAtMs===absence.legacyReleaseObservedAtMs
+      && absence.firstAbsentAtMs<=observed.releasedAtMs
+      && (typeof priorBound==="number"?observed.releasedAtMs===priorBound:observed.releasedAtMs>=beforeLegacyCapture)
+      &&observed.releasedAtMs<=Date.now(),
+      "legacy release did not retain its actual observed absence upper bound: "+JSON.stringify(observed));
     const repeatedFacts=await ok(owner,["quality","facts"]);
     t.assertions.assert(repeatedFacts.workItems.find((x:any)=>x.id===original).releasedAtMs===observed.releasedAtMs,
       "repeated capture moved the first-observed legacy absence upper bound");
