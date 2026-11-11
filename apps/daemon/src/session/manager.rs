@@ -6742,6 +6742,27 @@ async fn retire_execution(
 async fn close_current_agent(live: &Arc<Live>) -> Result<()> {
     let agent = live.agent().await;
     if let Some(agent) = agent {
+        // A terminal event can follow a resume update within one checkpoint
+        // interval. Save it before closing/forgetting the adapter: in particular
+        // an explicit empty handle must not resurrect a lost conversation on
+        // the next send. None still means the adapter has not learned a handle.
+        if let Some(handle) = agent.persistence() {
+            let saved = {
+                let mut meta = live.meta.lock().await;
+                if meta.persist.as_ref() == Some(&handle) {
+                    Ok(())
+                } else {
+                    let mut next = meta.clone();
+                    next.persist = Some(handle);
+                    live.store.save_meta(&next).map(|()| *meta = next)
+                }
+            };
+            if let Err(error) = saved {
+                let error = error.context("saving Agent resume state before retirement");
+                report_cleanup_failure(live, &error).await;
+                return Err(error);
+            }
+        }
         if let Err(error) = tokio::time::timeout(Duration::from_secs(8), agent.close())
             .await
             .unwrap_or_else(|_| Err(anyhow!("agent close timed out")))
