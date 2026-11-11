@@ -8,6 +8,7 @@ a target never builds author sources. `OUTPUT ROLE MACHINE ABSOLUTE_TARGET` rema
 the legacy build post hook for teams that have not migrated yet.
 """
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -146,17 +147,36 @@ def accept(config):
             if not old_lock and not configured_only:
                 raise RuntimeError('existing runtime lacks ownership receipt; migration requires a separate target')
             old_owned = {str(Path(x['member'])/x['target']) for x in (old_lock or {}).get('artifacts',[])} | {'.spacebuilder/output-lock.json'}
-            # Preserve only runtime configuration/data. Author inputs can never
-            # be silently adopted by an artifact upgrade.
+            # Preserve local runtime data, including the standard business
+            # worktree directory. Author inputs cannot be silently adopted.
             for child in target.rglob('*'):
                 rel = child.relative_to(target)
+                data = rel.parts[0] in ('datas', 'temp', 'worktrees')
+                runtime = data or '.genethub' in rel.parts
+                dest = stage/rel
                 if child.is_symlink():
-                    raise RuntimeError('runtime symlink requires explicit source maintenance: '+str(rel))
+                    # Data aliases are opaque: never follow them into another
+                    # tree. Artifact/control paths must still be real files.
+                    if not data or str(rel) in old_owned:
+                        raise RuntimeError('runtime symlink requires explicit source maintenance: '+str(rel))
+                    if os.path.lexists(dest): raise RuntimeError('runtime data conflicts with new artifact: '+str(rel))
+                    dest.parent.mkdir(parents=True,exist_ok=True)
+                    os.symlink(os.readlink(child),dest,target_is_directory=child.is_dir())
+                    continue
+                if child.is_dir() and runtime:
+                    dest.mkdir(parents=True,exist_ok=True)
                 if child.is_file() and str(rel) not in old_owned:
-                    if not (rel.parts[0] in ('.genethub','datas','temp') or '.genethub' in rel.parts):
+                    # Only discard reproducible bytecode of an owned source.
+                    # The previous installation backup retains the old cache.
+                    if not runtime and rel.parent.name == '__pycache__' and rel.suffix == '.pyc':
+                        try: source = Path(importlib.util.source_from_cache(str(rel)))
+                        except (ValueError, NotImplementedError): source = None
+                        if (source is not None and str(source) in old_owned
+                                and (target/source).is_file() and not (target/source).is_symlink()):
+                            continue
+                    if not runtime:
                         raise RuntimeError('unowned runtime file retained; source maintenance required: '+str(rel))
-                    dest = stage/rel
-                    if dest.exists(): raise RuntimeError('runtime data conflicts with new artifact: '+str(rel))
+                    if os.path.lexists(dest): raise RuntimeError('runtime data conflicts with new artifact: '+str(rel))
                     dest.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(child,dest)
         # Configuration is target-local. Never carry the source's absolute
         # runtime paths or credentials into the output.
