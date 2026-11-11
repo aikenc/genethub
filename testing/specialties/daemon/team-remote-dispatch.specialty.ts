@@ -734,12 +734,38 @@ sys.exit(r.returncode)
     const danglingLink=path.join(declaredRuntime,"temp/future-output");symlinkSync("not-created-yet",danglingLink);
     const afterCopyFailure=await script(["employee","sync"],builder);
     t.assertions.assert(afterCopyFailure.code===0,"normal runtime data blocked upgrade: "+afterCopyFailure.stdout+afterCopyFailure.stderr);
+    const archiveReceipt=readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8");
+    const archiveDigest=JSON.parse(archiveReceipt).archiveSha256;
+    const archive=path.join(sourceRoot,"temp/artifacts",archiveDigest+".zip");
+    const archiveBytes=readFileSync(archive),archiveBefore=lstatSync(archive);
     const repeatedInstall=await script(["employee","sync"],builder);
     t.assertions.assert(afterCopyFailure.code===0&&repeatedInstall.code===0
       &&JSON.stringify(incomingDirectories())===retainedStages
       &&readFileSync(path.join(olderStage,"evidence.txt"),"utf8")==="not created by this install"
       &&readFileSync(preservedData).equals(Buffer.alloc(1024*1024,19)),
       "successful retry or idempotent installation retained an extra runtime copy");
+    const archiveAfter=lstatSync(archive);
+    t.assertions.assert(archiveAfter.ino===archiveBefore.ino&&archiveAfter.dev===archiveBefore.dev
+      &&archiveAfter.mtimeMs===archiveBefore.mtimeMs&&readFileSync(archive).equals(archiveBytes),
+      "identical install retry replaced the source archive and invalidated active readers");
+    // A hash-named artifact must never silently replace corrupted evidence or
+    // follow an alias, even when the remote already has that same build.
+    writeFileSync(archive,"corrupted retained archive");
+    const corruptArchive=await script(["employee","sync"],builder);
+    const corruptRetained=readFileSync(archive,"utf8")==="corrupted retained archive";
+    writeFileSync(archive,archiveBytes);
+    t.assertions.assert(corruptArchive.code!==0&&corruptArchive.stderr.includes("existing content-addressed archive")
+      &&corruptRetained&&readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")===archiveReceipt,
+      "corrupt archive was overwritten or remote installation changed before refusal");
+    const archiveTarget=path.join(t.env.root,"retained-archive.zip");writeFileSync(archiveTarget,archiveBytes);
+    unlinkSync(archive);symlinkSync(archiveTarget,archive);
+    const aliasArchive=await script(["employee","sync"],builder);
+    const aliasRetained=lstatSync(archive).isSymbolicLink();
+    unlinkSync(archive);writeFileSync(archive,archiveBytes);
+    t.assertions.assert(aliasArchive.code!==0&&aliasArchive.stderr.includes("existing content-addressed archive")
+      &&aliasRetained&&readFileSync(archiveTarget).equals(archiveBytes)
+      &&readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8")===archiveReceipt,
+      "archive alias was followed/replaced or changed its external target/remote receipt");
     t.assertions.assert(git(businessTree,"rev-parse","HEAD")===businessHead
       &&git(businessRepo,"worktree","list","--porcelain").includes("worktree "+businessTree)
       &&readFileSync(path.join(businessTree,"scene.txt"),"utf8")==="unfinished scene edit\n"
