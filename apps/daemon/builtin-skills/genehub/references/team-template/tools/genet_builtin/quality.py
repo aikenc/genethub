@@ -321,6 +321,12 @@ def capture(team, root, end, cutoff):
         release = next((x for x in rows if x['kind']=='resource-released'), None)
         lease = next((x for x in rows if x['kind']=='lease-released' and x.get('timeBasis')=='executor-unlink'), None)
         if release: item['releasedAtMs']=release['atMs'];item['releaseTimeBasis']='verified-release'
+        else:
+            bound=next((x for x in rows if x['kind']=='resource-release-observed'
+                        and x.get('sessionId')==sid and x.get('timeBasis')=='observed-absence-upper-bound'
+                        and x.get('proof')=='remote-ack-idle-process-check'), None)
+            if bound:
+                item['releasedAtMs']=bound['atMs'];item['releaseTimeBasis']='observed-absence-upper-bound'
         if lease: item['leaseReleasedAtMs']=lease['atMs']
         if sid: wanted[sid]=request.get('machine')
         if request.get('requester') and request['requester'] not in wanted: wanted[request['requester']]=None
@@ -454,7 +460,9 @@ def capture(team, root, end, cutoff):
                     team.write_json(str(check),first)
                 legacy_bound=first['legacyReleaseObservedAtMs']
             if item.get('releaseTimeBasis') != 'verified-release' and (not item['resourceRequired'] or number(lease) or number(legacy_bound)):
-                item['releasedAtMs']=max(lease or 0,legacy_bound or first['firstAbsentAtMs'])
+                current_bound=max(lease or 0,legacy_bound or first['firstAbsentAtMs'])
+                prior_bound=item.get('releasedAtMs')
+                item['releasedAtMs']=min(prior_bound,current_bound) if number(prior_bound) else current_bound
                 item['releaseTimeBasis']='observed-absence-upper-bound'
                 if item['resourceRequired'] and item['conclusionAtMs']+600000 < min(end,item['releasedAtMs']) and item['releasedAtMs'] >= start:
                     resources_complete=False

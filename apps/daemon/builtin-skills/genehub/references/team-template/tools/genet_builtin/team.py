@@ -4714,14 +4714,35 @@ def release_remote(root, path, record):
                             taskId=record.get('taskId'), operationId=record.get('operationId'),
                             sessionId=record['sessionId'], machine=record.get('machine'),
                             timeBasis='executor-unlink' if released.get('leaseReleasedAtMs') is not None else 'ack-upper-bound')
-        # Old receivers and already-absent markers have no contemporaneous
-        # process-and-lease proof. Keep that uncertainty instead of backdating.
+        # Exact executor proof and a current source observation are distinct.
+        # Old receivers cannot supply a historical release clock.
         if released.get('resourceReleasedAtMs') is not None:
             quality_events.emit(sys.modules[__name__], root, 'resource-released', record.get('operationId') or record['sessionId'],
                                 at_ms=released['resourceReleasedAtMs'],
                                 taskId=record.get('taskId'), operationId=record.get('operationId'),
                                 sessionId=record['sessionId'], machine=record.get('machine'),
                                 proof='remote-idle-process-and-lease-check')
+        else:
+            # Observe now, while the release ACK is fresh. Hourly collection
+            # may run much later. This diagnostic never delays task settlement
+            # beyond two bounded reads or turns a failed read into absence.
+            try:
+                args = machine_args(target['machineId'])
+                summary = genet('session', 'get', record['sessionId'], *args, timeout=5)['summary']
+                processes = genet('process', 'list', *args, timeout=5).get('processes')
+                inputs = summary.get('inputSummary') or {}
+                if (released.get('released') is True and summary.get('status') in ('idle','failed')
+                        and not inputs.get('paused') and not inputs.get('pendingMessageIds')
+                        and isinstance(processes, list)
+                        and not any(x.get('sessionId') == record['sessionId'] for x in processes)):
+                    quality_events.emit(sys.modules[__name__], root, 'resource-release-observed',
+                                        record.get('operationId') or record['sessionId'],
+                                        taskId=record.get('taskId'), operationId=record.get('operationId'),
+                                        sessionId=record['sessionId'], machine=record.get('machine'),
+                                        timeBasis='observed-absence-upper-bound',
+                                        proof='remote-ack-idle-process-check')
+            except Exception:  # diagnostic failure cannot undo an acknowledged release
+                pass
         update_pending(root, path, record)
     return True
 
