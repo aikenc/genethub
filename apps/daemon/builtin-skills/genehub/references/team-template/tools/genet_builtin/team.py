@@ -2664,7 +2664,7 @@ def cmd_employee(args):
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         try:
-            installer.sync(root)
+            installer.sync(root, parallel=getattr(args, "parallel", False))
         except RuntimeError as error:
             raise ExpertError("岗位安装没有完成: %s" % str(error)[-600:], "已安装的旧版本与原绑定保留", "按提示补齐目标机配置后重新运行 employee sync") from error
         return
@@ -5204,7 +5204,8 @@ def main(argv):
         emp_add.add_argument("--branch", help="optional branch name when cutting worktree from --repo")
         emp_add.add_argument("--no-worktree", action="store_true", help="do not auto-cut a worktree slot")
         emp_sub.add_parser("ls")
-        emp_sub.add_parser("sync", help="install every role whose open.env declares TEAM_MACHINE on that machine")
+        emp_sync = emp_sub.add_parser("sync", help="install every role whose open.env declares TEAM_MACHINE on that machine")
+        emp_sync.add_argument("--parallel", action="store_true", help="install an independent immutable runtime version; preserve old in-flight executors and receipts")
         for ret_name in ("retire", "standby"):
             emp_ret = emp_sub.add_parser(ret_name)
             emp_ret.add_argument("name")

@@ -42,6 +42,21 @@ def owned(root):
     return verify_output_artifact(root, exact=True)
 
 
+
+def runtime_content_key(root):
+    """Execution identity, after artifact verification; source bindings are provenance.
+
+    Source-only member registration changes the builder's manifestDigest but
+    not a single deployed byte. Hash all artifact/role/builder facts while
+    keeping that source digest in the original immutable archive receipt.
+    """
+    value=read(Path(root)/'.spacebuilder/output-lock.json')
+    content={'schema':'team-runtime-content/1','builder':value['builder'],
+             'members':[{k:v for k,v in item.items() if k!='manifestDigest'} for item in value['members']],
+             'artifacts':value['artifacts']}
+    return hashlib.sha256(json.dumps(content,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
 def cli(*args):
     command = os.environ.get('GENEHUB_CLI')
     if not command or not os.path.isabs(command):
@@ -69,6 +84,13 @@ BOOTSTRAP = r'''
 import hashlib,json,os,pathlib,subprocess,sys,zipfile,tempfile,shutil
 c=json.loads(sys.argv[1])
 base=pathlib.Path(c['target']) if c.get('target') else pathlib.Path.home()/'.genehub-teams'/c['source']
+if c.get('parallel'):
+ if c.get('target') or c.get('parallel') is not True or not c.get('roles'): raise RuntimeError('parallel install requires managed roles and no explicit target')
+ c['settingsSource']=str(base)
+ role_key=hashlib.sha256(json.dumps(sorted(c['roles']),separators=(',',':')).encode()).hexdigest()[:12]
+ if not isinstance(c.get('contentKey'),str) or len(c['contentKey'])!=64 or any(x not in '0123456789abcdef' for x in c['contentKey']): raise RuntimeError('invalid runtime content identity')
+ base=base.parent/(base.name+'.versions')/(c['contentKey']+'-'+role_key)
+ if base.parent.is_symlink() or base.resolve()!=base: raise RuntimeError('parallel runtime path must not contain aliases')
 c['target']=str(base); base.parent.mkdir(parents=True,exist_ok=True)
 archive=base.parent/('.'+base.name+'.'+c['digest'][:16]+'.zip')
 if not archive.exists():
@@ -108,6 +130,8 @@ def accept(config):
     if not requested_target.is_absolute() or requested_target.is_symlink() or target.is_symlink() or stage == target:
         raise RuntimeError('target must be a separate absolute runtime directory')
     owned(stage)
+    if config.get('parallel') and runtime_content_key(stage)!=config.get('contentKey'):
+        raise RuntimeError('parallel runtime content identity mismatch')
     roles = config.get('roles') or [config['role']]
     for role in roles:
         if not (stage/'spaces'/role/'agent-space.genet.json').is_file():
@@ -117,12 +141,46 @@ def accept(config):
     with team.inbox_lock(str(target.parent), 'install-' + hashlib.sha256(str(target).encode()).hexdigest(), purpose='岗位产物安装'):
         previous = read(target/'.genethub/task-source.json')
         installed = read(target/'.genethub/install-receipt.json') or {}
-        if (installed.get('source') == config['source'] and installed.get('archiveSha256') == config['digest']
+        same_version = (installed.get('archiveSha256') == config['digest'] or config.get('parallel')
+                        and installed.get('contentKey') == config.get('contentKey'))
+        if (installed.get('source') == config['source'] and same_version
                 and sorted(m.get('name') for m in installed_members(installed)) == sorted(roles)):
             from genet_builtin.runtime import verify_output_artifact
             verify_output_artifact(target)
+            if config.get('parallel') and runtime_content_key(target)!=config['contentKey']:
+                raise RuntimeError('installed parallel content differs from its verified version')
             members = installed_members(installed)
-            print(json.dumps(members if config.get('roles') else members[0], ensure_ascii=False)); return
+            answer = ({'members':members,'archiveSha256':installed['archiveSha256'],'contentKey':config['contentKey']}
+                      if config.get('parallel') else members if config.get('roles') else members[0])
+            print(json.dumps(answer, ensure_ascii=False)); return
+        if config.get('parallel'):
+            # Version roots are immutable. An exact installed artifact returned
+            # above; any other existing content is uncertainty, not replaceable.
+            if target.exists():
+                raise RuntimeError('parallel version directory lacks an exact installation receipt; original bindings retained')
+            prior_root = Path(config['settingsSource'])
+            if prior_root.exists():
+                if prior_root.is_symlink() or prior_root.resolve()!=prior_root:
+                    raise RuntimeError('target-local settings source must be a real runtime directory')
+                source_route = read(prior_root/'.genethub/task-source.json')
+                prior_install = read(prior_root/'.genethub/install-receipt.json') or {}
+                configured_only = all(p.is_file() and p.relative_to(prior_root).as_posix().endswith('.genethub/open.env')
+                                      or p.is_dir() for p in prior_root.rglob('*'))
+                if not configured_only and (prior_install.get('source')!=config['source'] or not source_route
+                        or source_route.get('source')!=config['source']
+                        or any(source_route.get(k)!=config['returnTo'].get(k) for k in ('machineId','workspaceId'))):
+                    raise RuntimeError('target-local settings have no matching source ownership receipt')
+                # Transfer only opaque target-local preferences. Never clone
+                # Sessions, dispatches, business data, worktrees or old results.
+                for relative in [Path('.genethub/open.env')]+[Path('spaces')/role/'.genethub/open.env' for role in roles]:
+                    preference=prior_root/relative
+                    if preference.is_symlink():raise RuntimeError('target-local preference alias retained; no new runtime installed')
+                    if preference.exists():
+                        if not preference.is_file() or preference.stat().st_size>131072:
+                            raise RuntimeError('target-local preferences must be bounded regular files')
+                        destination=stage/relative
+                        if destination.exists():raise RuntimeError('artifact unexpectedly owns target-local preferences')
+                        destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(preference,destination)
         configured_only = target.exists() and all(p.is_file() and p.relative_to(target).as_posix().endswith('.genethub/open.env') or p.is_dir() for p in target.rglob('*'))
         if target.exists() and not configured_only and (not previous or previous.get('source') != config['source'] or any(previous.get(k) != config['returnTo'].get(k) for k in ('machineId','workspaceId'))):
             raise RuntimeError('target is already owned or has no install receipt; use a separate runtime directory')
@@ -181,7 +239,7 @@ def accept(config):
         # Configuration is target-local. Never carry the source's absolute
         # runtime paths or credentials into the output.
         settings = stage/'.genethub/open.env'
-        agent = team.open_env(str(target)).get('TEAM_AGENT') if target.exists() else None
+        agent = team.open_env(str(stage)).get('TEAM_AGENT') if settings.exists() else (team.open_env(str(target)).get('TEAM_AGENT') if target.exists() else None)
         agent = agent or os.environ.get('TEAM_AGENT')
         if not agent:
             agents = team.genet('agent','list').get('agents',[])
@@ -211,7 +269,8 @@ def accept(config):
                 wid = workspace.get('id')
                 if not wid: raise RuntimeError('registration did not return a workspace id')
                 results.append(dict(name=role,machineId=machine,workspaceId=wid,command=[sys.executable,str(target/'tools/run.py')]))
-            write(target/'.genethub/install-receipt.json',dict(source=config['source'],archiveSha256=config['digest'],members=results))
+            write(target/'.genethub/install-receipt.json',dict(source=config['source'],archiveSha256=config['digest'],members=results,
+                 **({'contentKey':config['contentKey']} if config.get('parallel') else {})))
         except BaseException:
             os.replace(target,stage)
             if backup.exists(): os.replace(backup,target)
@@ -221,7 +280,9 @@ def accept(config):
             if member.get('name') not in roles and member.get('workspaceId'):
                 try: team.genet('workspace','remove',member['workspaceId'])
                 except Exception: pass
-        print(json.dumps(results if config.get('roles') else results[0],ensure_ascii=False))
+        answer = ({'members':results,'archiveSha256':config['digest'],'contentKey':config['contentKey']}
+                  if config.get('parallel') else results if config.get('roles') else results[0])
+        print(json.dumps(answer,ensure_ascii=False))
 
 
 def retain_archive(temporary, zipped, digest):
@@ -236,7 +297,7 @@ def retain_archive(temporary, zipped, digest):
     temporary.unlink()
 
 
-def install(output, source, machine, roles, destination=None):
+def install(output, source, machine, roles, destination=None, parallel=False):
     """Transfer one verified complete Team output and install `roles` on `machine`."""
     from genet_builtin import team
     owned(output)
@@ -262,12 +323,20 @@ def install(output, source, machine, roles, destination=None):
         retain_archive(temporary,zipped,digest)
     config = dict(archive=str(zipped),digest=digest,target=destination,source=source_id,returnTo=route,
                   definitionSource=dict(machineId=route['machineId'],workspaceId=route['workspaceId'],sourcePath=str(source)))
+    if parallel:
+        if destination is not None:raise RuntimeError('parallel installation does not replace explicit legacy targets')
+        config['parallel']=True
+        config['contentKey']=runtime_content_key(output)
     if destination is None: config['roles'] = roles
     else: config['role'] = roles[0]
     workspaces = team.remote_workspaces(machine)
     if not workspaces: raise RuntimeError('target has no registered workspace for installation; open one once')
     workspaces.sort(key=lambda w: (not (destination or '').startswith(team.workspace_root(w) + os.sep),not w.get('builtin',False),w['id']))
     result = shell(machine,workspaces[0]['id'], ['/bin/sh','-c','exec "$GENEHUB_PYTHON" -c "$1" "$2"','genehub-build-post',BOOTSTRAP,json.dumps(config)])
+    if parallel:
+        if not isinstance(result,dict) or result.get('contentKey')!=config['contentKey'] or not isinstance(result.get('members'),list):
+            raise RuntimeError('parallel installation receipt could not be reconciled; previous bindings retained')
+        return result['members'],result['archiveSha256']
     return (result if isinstance(result, list) else [result]), digest
 
 
@@ -281,7 +350,7 @@ def write_members(source, replace, drop=()):
         write(descriptor,value)
 
 
-def sync(root):
+def sync(root, parallel=False):
     from genet_builtin import team
     source = Path(root).resolve()
     hooks = ((read(source/'agent-space.genet.json') or {}).get('buildHooks') or {}).get('post') or []
@@ -315,7 +384,7 @@ def sync(root):
             if built.returncode:
                 raise RuntimeError('independent Team output build failed: ' + (built.stdout + built.stderr)[-1500:])
             for machine, (declared, roles) in plan.items():
-                members, digest = install(output, source, machine, roles)
+                members, digest = install(output, source, machine, roles, parallel=parallel)
                 # The source addresses the executor by the ID its own machine directory returns.
                 members = [dict(m, machineId=machine) for m in members]
                 write_members(source, members)
