@@ -498,6 +498,18 @@ def remote_receive(target, request):
         output = "".join(f.get("data", {}).get("data", "") for f in frames
                          if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
+        required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
+                                          "--require-quality-metadata") if flag in argv), None)
+        if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
+            diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
+                                 if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
+            if re.search(r"(?m)^[^\n]*error: unrecognized arguments: " + re.escape(required) + r"[ \t]*$", diagnostic):
+                # Name only the known capability, never echo arbitrary remote
+                # stderr. This failure is not a negative creation receipt.
+                raise ExpertError("远端运行时不支持协议参数 %s，需同步升级" % required,
+                                  "原派单意图、回执与资源保持原状；不确认未创建，不自动重派",
+                                  "在团队定义源升级并用 employee sync 同步远端，再沿原操作编号对账",
+                                  code="REMOTE_PROTOCOL_UNSUPPORTED")
         receipt = json.loads(output)
         if not isinstance(receipt, dict):
             raise ValueError("invalid receiver envelope")
