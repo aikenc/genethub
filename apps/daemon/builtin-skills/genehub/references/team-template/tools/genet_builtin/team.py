@@ -4590,7 +4590,11 @@ def reconcile(root, name, mine):
             # An explicit continuation owns a separate result generation.
             concluded = record.get("taskConclusion") and not record.get("resumeRequestId")
             if status == "idle" and reply and (reply != record.get("baseline") or concluded):
-                if has_children:
+                # An explicit non-success conclusion truthfully retains its
+                # unfinished supports. Notify the requester of that conclusion
+                # now; each child and all resource release guards remain intact.
+                non_success = concluded and record["taskConclusion"]["outcome"] in ("blocked", "failed")
+                if has_children and not non_success:
                     record["baseline"] = reply
                     record.pop("done", None)
                     update_pending(root, path, record)
