@@ -86,6 +86,26 @@ def template_digest():
     return digest.hexdigest()
 
 
+def result_audience(team, item, record):
+    """Only a durable result generation can declare additional recipients."""
+    delivery = record.get('resultDelivery') or {}
+    done = record.get('done') or {}
+    sid, primary = item.get('sessionId'), item.get('requester')
+    ref, reply = delivery.get('ref'), done.get('reply')
+    watchers = record.get('watchers', [])
+    if (record.get('operationId') != item['id'] or record.get('sessionId') != sid
+            or not isinstance(sid, str) or not team.SESSION_ID.fullmatch(sid)
+            or not isinstance(primary, str) or not team.SESSION_ID.fullmatch(primary)
+            or delivery.get('recipient') != primary or not isinstance(reply, str) or len(reply) > 512
+            or delivery.get('generation') != [primary, reply] or done.get('ref') != ref
+            or ref not in ('ghref:item:'+str(sid)+':'+reply, 'ghref:session:'+str(sid))
+            or not isinstance(watchers, list) or len(watchers) > 64
+            or any(not isinstance(x, str) or not team.SESSION_ID.fullmatch(x) for x in watchers)):
+        return None  # No exemption from incomplete or unrelated metadata.
+    return {'operationId':item['id'], 'primary':primary, 'ref':ref,
+            'watchers':sorted(set(watchers)-{primary})}
+
+
 def native_snapshot(team, sid, machine, since, kernel, cache, budget):
     """Only existing public inspect/rounds/narrative commands; no transcript cache."""
     def call(*args):
@@ -447,6 +467,13 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                 'outcome':(conclusion or {}).get('outcome'),
                 'resourceRequired':resource_required, 'legacyReleaseStateKnown':legacy_released,
                 'withdrawnAtMs':intent.get('withdrawnAtMs') if intent.get('state')=='withdrawn' else None}
+        audience = result_audience(team, item, rec)
+        if audience is not None:
+            item['deliveryAudience'] = audience
+            # A source acceptance event alone cannot establish a native receipt.
+            # Observe each declared local watcher through the same public API.
+            for watcher in audience['watchers']:
+                wanted.setdefault(watcher, None)
         release = next((x for x in rows if x['kind']=='resource-released'), None)
         lease = next((x for x in rows if x['kind']=='lease-released' and x.get('timeBasis')=='executor-unlink'), None)
         if release: item['releasedAtMs']=release['atMs'];item['releaseTimeBasis']='verified-release'
@@ -571,9 +598,10 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
         bounded=[x for x in matching if not number(accepted_at(x))
                  and number(x.get('acceptedUpperBoundMs')) and x['acceptedUpperBoundMs']<=cutoff]
         item['deliveryBounds']=[{'messageId':x['messageId'],'recipient':x['sessionId'],
-                                'acceptedUpperBoundMs':x['acceptedUpperBoundMs']} for x in bounded]
+                                'acceptedUpperBoundMs':x['acceptedUpperBoundMs'], 'ref':x.get('ref')} for x in bounded]
         item['deliveryMessageIds']=sorted({x['messageId'] for x in proven+bounded})
-        item['deliveryEvents']=[{'messageId':x['messageId'],'recipient':x['sessionId'],'acceptedAtMs':accepted_at(x)} for x in proven]
+        item['deliveryEvents']=[{'messageId':x['messageId'],'recipient':x['sessionId'],'acceptedAtMs':accepted_at(x),
+                                'ref':x.get('ref')} for x in proven]
         correct=[x for x in proven if x['sessionId']==item.get('requester')]
         if proven:item['recipient']=proven[0]['sessionId']
         if correct:
@@ -690,7 +718,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
             'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
                               'backgroundBasis':'registered-native-process-runtime/1',
                               'backgroundRunsAppliedToScore':False,

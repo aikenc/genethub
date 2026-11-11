@@ -78,6 +78,9 @@ def score(facts):
     coverage_basis = facts.get('evidenceCoverageBasis')
     if coverage_basis not in (None, 'per-source-failure-domain/1'):
         raise ValueError('unsupported evidence coverage basis')
+    audience_basis = facts.get('resultAudienceBasis')
+    if audience_basis not in (None, 'source-result-generation/1'):
+        raise ValueError('unsupported result audience basis')
     start, end = facts['window']['startAtMs'], facts['window']['endAtMs']
     cutoff = facts['capturedAtMs']
     if not all(number(x) for x in (start, end, cutoff)) or not start < end <= cutoff:
@@ -100,6 +103,15 @@ def score(facts):
 
     delivery_uncertain, idle_uncertain, resource_uncertain = False, False, False
     for item in relevant:
+        audience = item.get('deliveryAudience') if audience_basis is not None else None
+        if audience is not None and (not isinstance(audience, dict)
+                or audience.get('operationId') != item['id']
+                or audience.get('primary') != item.get('requester')
+                or not isinstance(audience.get('ref'), str)
+                or not isinstance(audience.get('watchers'), list)
+                or len(audience['watchers']) > 64
+                or any(not isinstance(x, str) for x in audience['watchers'])):
+            raise ValueError('invalid source result audience')
         dispatched = item['dispatchAtMs']
         confirmed = item.get('confirmedAtMs')
         terminal = item.get('withdrawnAtMs')
@@ -137,14 +149,20 @@ def score(facts):
             correct += [at for at in correct_bounds if at<start]
             for delivery in deliveries:
                 if delivery['recipient'] == item.get('requester'):continue
+                if (audience is not None and delivery.get('ref') == audience['ref']
+                        and delivery['recipient'] in audience['watchers']):
+                    continue
                 at=delivery['acceptedAtMs']
                 # A later correct delivery closes the wrong-route obligation.
                 # A misroute after success is an occurrence in its own hour.
                 resolved = at if any(t <= at for t in correct) else min(correct,default=None)
                 breach('R3',item,at-1,resolved,'wrong-recipient')
             for index,delivery in enumerate(deliveries):
-                prior_bound=any(x['acceptedUpperBoundMs']<=delivery['acceptedAtMs'] for x in bounds)
-                if (index>0 or prior_bound) and start <= delivery['acceptedAtMs'] < end:
+                prior_bound=any(x['acceptedUpperBoundMs']<=delivery['acceptedAtMs']
+                                and (audience_basis is None or x['recipient']==delivery['recipient']) for x in bounds)
+                prior = index > 0 if audience_basis is None else any(
+                    x['recipient']==delivery['recipient'] for x in deliveries[:index])
+                if (prior or prior_bound) and start <= delivery['acceptedAtMs'] < end:
                     instances['R3'].append({'workItemId':item['id'],'reason':'duplicate-result',
                                             'atMs':delivery['acceptedAtMs']})
         else:
@@ -338,8 +356,9 @@ def score(facts):
         result['streakCompatibilityKey'] = model
     if resource_basis is not None:result['resourceObligationBasis'] = resource_basis
     if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
-    if resource_basis is not None or coverage_basis is not None:
-        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis) if x is not None])
+    if audience_basis is not None:result['resultAudienceBasis'] = audience_basis
+    if resource_basis is not None or coverage_basis is not None or audience_basis is not None:
+        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis,audience_basis) if x is not None])
         result['streakCompatibilityKey'] = result['measurementVersion']
     if 'warnings' in facts:
         result['warnings']=facts['warnings']
