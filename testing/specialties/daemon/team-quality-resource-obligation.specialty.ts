@@ -81,8 +81,10 @@ defineSpecialty({
     const card = (v: any) => { writeFileSync(file, JSON.stringify(v)); return JSON.parse(r.ok(["quality", "card", "--snapshot", file])); };
     const freeCard = card(freeze(unbound)), heldCard = card(freeze(bound));
     t.assertions.assert(freeCard.officialCapture === false && freeCard.redLines.R5.triggered === false && heldCard.redLines.R5.triggered === true, "eleven-minute external boundary weakened R5 or charged an unbound runtime");
-    t.assertions.assert(facts.resourceObligationBasis === "dispatch-resource-obligation/2" && freeCard.measurementVersion === "tq/2+dispatch-resource-obligation/2" && freeCard.streakCompatibilityKey === freeCard.measurementVersion, "measurement version or streak boundary missing");
-    const old = freeze(unbound); delete old.resourceObligationBasis;
+    t.assertions.assert(facts.resourceObligationBasis === "dispatch-resource-obligation/2" && freeCard.measurementVersion === "tq/2+dispatch-resource-obligation/2+per-source-failure-domain/1" && freeCard.streakCompatibilityKey === freeCard.measurementVersion, "measurement version or streak boundary missing");
+    const resourceOnly = freeze(unbound); delete resourceOnly.evidenceCoverageBasis;
+    t.assertions.assert(card(resourceOnly).measurementVersion === "tq/2+dispatch-resource-obligation/2", "previous resource-only measurement was retagged");
+    const old = freeze(unbound); delete old.resourceObligationBasis; delete old.evidenceCoverageBasis;
     const oldCard = card(old);
     t.assertions.assert(oldCard.streakCompatibilityKey === "tq/2" && !oldCard.measurementVersion, "historical facts were silently retagged");
     old.resourceObligationBasis = "unknown-resource-basis"; writeFileSync(file, JSON.stringify(old));
