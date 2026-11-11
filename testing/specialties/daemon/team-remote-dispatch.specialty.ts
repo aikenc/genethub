@@ -75,7 +75,18 @@ defineSpecialty({
     // The real receiver and all durable effects run unchanged.
     const wrapper = path.join(targetRoot, "lose-one-reply.py"), dropped = path.join(targetRoot, "reply-dropped");
     const correctionMarker = path.join(targetRoot, "correct-before-release");
-    writeFileSync(wrapper, `import json,os,pathlib,subprocess,sys,time
+    const compatibilityMarker = path.join(targetRoot, "old-receiver-grammar");
+    writeFileSync(wrapper, `import argparse,json,os,pathlib,subprocess,sys,time
+compat=pathlib.Path(${JSON.stringify(compatibilityMarker)})
+if compat.exists():
+ if compat.read_text()=='unrelated':
+  print('receiver: error: unrecognized arguments: --unrelated fixture-stderr-must-not-leak',file=sys.stderr)
+  sys.exit(2)
+ # External old CLI grammar: reject unknown mandatory flags before delegating
+ # to the unchanged real receiver. No canned successful reply or state write.
+ parser=argparse.ArgumentParser()
+ parser.add_argument('entry');parser.add_argument('operation');parser.add_argument('payload')
+ parser.parse_args(sys.argv[1:])
 payload=sys.argv[sys.argv.index('receive')+1]
 body=sys.stdin.read() if payload=='-' else None
 q=json.loads(body if body is not None else payload); race=pathlib.Path(${JSON.stringify(correctionMarker)})
@@ -451,6 +462,26 @@ sys.exit(r.returncode)
     const countBeforeSettlement = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length;
     await cliJson(["session", "interrupt", callerSid]);
     await t.tools.waitUntil(async () => (await cliJson(["session", "get", callerSid])).summary.inputSummary?.paused, 10000);
+    // The real shell must carry the old process's stderr and exit status.
+    // Neither generic failure nor a missing protocol may settle/replay work.
+    for(const mode of ["unrelated","legacy"]) {
+      writeFileSync(compatibilityMarker,mode);
+      try {
+        const diagnostic=await script(["hook"]);
+        const retained=JSON.parse(readFileSync(refusedPath,"utf8"));
+        t.assertions.assert(diagnostic.code===0 && retained.state==="creating" && !retained.sessionId
+          && !existsSync(path.join(targetDispatchDir,createHash("sha256").update(refusedIntent.operationId).digest("hex")+".json"))
+          && readFileSync(boundReply.lock).equals(originalLease),"compatibility failure settled work or disturbed an existing writer");
+        if(mode==="unrelated") t.assertions.assert(retained.withdrawError.includes("未确认")
+          && !retained.withdrawError.includes("fixture-stderr-must-not-leak"),"unrelated stderr became a capability claim or leaked raw text");
+        else t.assertions.assert(retained.withdrawError.includes("--require-prepare-settlement") && retained.withdrawError.includes("同步"),
+          "old receiver protocol failure lost its actionable diagnostic: "+retained.withdrawError);
+        t.assertions.assert((await cliJson(["session","list","--workspace",qa.id,"--limit","100"],true)).sessions.length===countBeforeSettlement,
+          "unsupported receiver command created another native execution");
+        retained.withdrawRetryAtMs=0; // isolated due-retry fixture, original operation stays intact
+        writeFileSync(refusedPath,JSON.stringify(retained));
+      } finally {unlinkSync(compatibilityMarker);}
+    }
     const settled = await script(["hook"]);
     const negative = JSON.parse(readFileSync(refusedPath, "utf8"));
     t.assertions.assert(settled.code === 0 && negative.state === "withdrawn" && negative.withdrawnAtMs >= refusedIntent.createdAtMs + 600000,
