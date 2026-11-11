@@ -344,7 +344,10 @@ def command(t, args, root=None, sender=None):
     task = read_task(t, root, args.task_id)
     path = task_path(t, root, args.task_id)
     if action == 'status':
-        print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId'])), ensure_ascii=False)); return
+        from .quality_live import current
+        try:live_quality=current(root)
+        except (OSError,ValueError,KeyError,TypeError):live_quality={'unknown':[{'rule':'live-alerts-unavailable'}]}
+        print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId']),liveQuality=live_quality), ensure_ascii=False)); return
     if action in ('support', 'finish', 'bind-directory', 'job') and sid != (task.get('owner') or {}).get('sessionId'):
         # A collaborator can finish its own bounded work, but cannot finish another owner's task.
         mine = next((x for x in task.get('collaborators', []) if x['sessionId'] == sid), None)

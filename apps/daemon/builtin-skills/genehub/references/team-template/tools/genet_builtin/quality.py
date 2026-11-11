@@ -59,7 +59,9 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget):
         return team.genet(*args, *team.machine_args(machine), timeout=min(15, max(1, budget-time.monotonic())))
     summary = call('session', 'get', sid)['summary']
     old = read(cache)
-    stable = summary.get('status') in ('idle','failed') and not (summary.get('inputSummary') or {}).get('pendingMessageIds') and not (summary.get('interactionSummary') or {}).get('requests')
+    inputs=summary.get('inputSummary') or {}
+    stable = (summary.get('status') in ('idle','failed') and (inputs.get('paused') or not inputs.get('pendingMessageIds'))
+              and not (summary.get('interactionSummary') or {}).get('requests'))
     if stable and old and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('kernel') == kernel and old.get('updatedAtMs') == summary.get('updatedAtMs') and old.get('sinceAtMs', since+1) <= since:
         return old
     inspection = call('session', 'inspect', sid)['inspection']
@@ -296,7 +298,7 @@ def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
     return result
 
 
-def capture(team, root, end, cutoff):
+def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     state = Path(root)/'.genethub/team'
     store = state/'quality'
     start = end-HOUR
@@ -307,10 +309,14 @@ def capture(team, root, end, cutoff):
     intents = records(state/'task-dispatch')
     pending = {v['sessionId']: v for area in ['pending', 'done'] for v in records(state/area)}
     issues, work, wanted = [], [], {}
-    budget = time.monotonic()+100
+    budget = time.monotonic()+budget_seconds
+    def capture_call(*args):
+        remaining=budget-time.monotonic()
+        if remaining<=0:raise TimeoutError("quality capture budget exhausted")
+        return team.genet(*args,timeout=min(15,max(0.1,remaining)))
     root_workspaces = set()
     try:
-        catalog=team.genet('workspace','list',timeout=15)['workspaces']
+        catalog=capture_call('workspace','list')['workspaces']
         root_workspaces={w['id'] for w in catalog if isinstance(w.get('root'),str) and Path(w['root']).resolve()==Path(root).resolve()}
         if not root_workspaces:raise ValueError('Team root workspace unavailable')
     except Exception as error:
@@ -405,14 +411,19 @@ def capture(team, root, end, cutoff):
     for sid in reflect_ids:
         wanted.setdefault(sid, pending[sid].get('machine'))
     native, platforms, processes = {}, {}, {}
-    for machine in set(wanted.values()):
+    for machine in sorted(set(wanted.values()),key=lambda x:x or ""):
         try:
-            ctx=team.genet('context',*team.machine_args(machine),timeout=15)['daemon']
+            ctx=capture_call('context',*team.machine_args(machine))['daemon']
             platforms[machine]={'version':ctx['version'],'machineId':ctx['machineId']}
-            processes[machine]=team.genet('process','list',*team.machine_args(machine),timeout=15)['processes']
+            processes[machine]=capture_call('process','list',*team.machine_args(machine))['processes']
         except Exception as error:
             issues.append({'kind':'machine-facts-unavailable','machine':machine,'error':type(error).__name__})
-    for sid,machine in wanted.items():
+    order=list(wanted.items())
+    if live:
+        active={x["sessionId"] for x in records(state/"pending") if x.get("sessionId")}
+        critical=active|{i["requester"] for i in work if i.get("sessionId") in active and i.get("requester")}
+        order.sort(key=lambda x:(x[0] not in critical,(store/"native"/(x[0]+".json")).exists()))
+    for sid,machine in order:
         try:
             if not team.SESSION_ID.fullmatch(sid): raise ValueError('invalid native session identity')
             native[sid]=native_snapshot(team,sid,machine,metric_start,platforms.get(machine),store/'native'/ (sid+'.json'),budget)
@@ -639,11 +650,19 @@ def register(sub):
     c=a.add_parser('execution',help='read-only versioned dispatch/background-work projection; never saves a quality card')
     c.add_argument('--snapshot',required=True)
     a.add_parser('history');a.add_parser('describe');a.add_parser('facts')
+    c=a.add_parser('alerts',help='current open redlines or read-only external alert replay');c.add_argument('--snapshot')
+    c=a.add_parser('triage',help='record redline attribution without closing a repair');c.add_argument('incident')
+    c.add_argument('--attribution',required=True,choices=['team','platform-template','kernel','provider','unknown'])
+    c.add_argument('--evidence',required=True)
 
 
 def _command(team,args):
     root=team.find_root();store=Path(root)/'.genethub/team/quality'
     action=args.quality_action
+    if action in ('alerts','triage'):
+        from . import quality_live
+        value=(quality_live.replay(read(Path(args.snapshot))) if args.snapshot else quality_live.current(root)) if action=='alerts' else quality_live.triage(team,root,args)
+        print(canonical(value),end='');return
     if action=='execution':
         from .execution_facts import view
         print(canonical(view(read(Path(args.snapshot)))),end='');return
@@ -669,6 +688,10 @@ def _command(team,args):
         try:
             cutoff=team.now_ms();offset=[0,1,0,2][cutoff//300000 % 4];end=(cutoff//HOUR-offset)*HOUR
             facts=capture(team,root,end,cutoff);facts['captureKind']='native-hour'
+            from .quality_live import current
+            live=current(root)
+            facts['warnings']=live['warnings']
+            facts['liveWarningsAsOfMs']=live['asOfMs']
             encoded=canonical(facts);key=str(end)+'-'+hashlib.sha256(encoded.encode()).hexdigest()
             target=store/'snapshots'/(key+'.json');target.parent.mkdir(parents=True,exist_ok=True)
             if not target.exists():team.write_json(str(target),facts)
@@ -733,12 +756,14 @@ def command(team,args):
 
 def briefing(root,now):
     try:
+        from .quality_live import briefing as live_briefing
+        live_lines=live_briefing(root)
         store=Path(root)/'.genethub/team/quality'
         latest=read(store/'latest.json')
-        if not latest:return ['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
+        if not latest:return live_lines+['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
         value=read(Path(root)/latest['card'])
         stale=value['window']['endAtMs'] < now//HOUR*HOUR
-        lines=['','## 团队工作质量（'+value.get('measurementVersion',value.get('model','tq/1'))+'）',
+        lines=live_lines+['','## 团队工作质量（'+value.get('measurementVersion',value.get('model','tq/1'))+'）',
                '卡：'+latest['card'], '事实：'+latest['snapshot'],
                '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
                '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]

@@ -7,6 +7,7 @@ description: 承接团队 Task Owner、专业协作与验收任务；自己实�
 
 开工确认目标、taskId、当前会话与验收标准。命令以 `"$GENEHUB_PYTHON" <团队根>/tools/run.py` 开头；详见 team-core `references/task-owner.md`。
 
+- 每回合先读 `quality alerts` 的本队未关闭红线简报；沿反思给出的调整继续工作，未知保持未知，归档留言不等于修复已采用。
 - Space 提供身份与能力，会话承载任务。独立目标用独立会话，同 Space 可以并行，但不能抢写同一实际目录或超过团队预算。
 - 使用派单固定的机器、业务目录、分支与基线。原生启动 cwd 可能是岗位 Space；每次文件操作或 shell 明确目标目录，不通过修改公共 open.env 给在途任务换项目。
 - 未认领项目写目录时先准备独立工位并 `task bind-directory <taskId> --directory <绝对目录>`，然后在其中工作。只协调可不绑定项目，报告放本任务的独立输出位置。

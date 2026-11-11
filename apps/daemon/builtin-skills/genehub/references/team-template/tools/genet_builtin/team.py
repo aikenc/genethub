@@ -4099,7 +4099,7 @@ def cmd_reflect(args):
     print(start_reflect(root, name, mine, "用户要求立刻反思", request, os.environ.get("GENEHUB_SESSION_ID") or front_session(root, mine["spaces"]), args.tier, args.model))
 
 
-URGENT_NOTE_KINDS = ("unhappy", "anomaly", "upgrade")
+URGENT_NOTE_KINDS = ("unhappy", "anomaly", "upgrade", "redline")
 
 
 def wake(root, name, mine):
@@ -5092,6 +5092,12 @@ def cmd_hook(_args):
         reconcile(root, name, mine)
         team_tasks.reconcile_resources(sys.modules[__name__], root)
         team_tasks.publish(sys.modules[__name__], root)
+        if not builtin_admin:
+            try:
+                from . import quality_live
+                quality_live.tick(sys.modules[__name__],root)
+            except Exception as error:
+                quality_live.failed(sys.modules[__name__],root,error)
         healthy = health(root, name, mine)
         if not builtin_admin:
             wake(root, name, mine)

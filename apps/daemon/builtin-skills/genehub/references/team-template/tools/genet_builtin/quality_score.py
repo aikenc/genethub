@@ -331,6 +331,9 @@ def score(facts):
     if resource_basis is not None or coverage_basis is not None:
         result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis) if x is not None])
         result['streakCompatibilityKey'] = result['measurementVersion']
+    if 'warnings' in facts:
+        result['warnings']=facts['warnings']
+        result['liveWarningsAsOfMs']=facts.get('liveWarningsAsOfMs')
     from .quality_attribution import attach
     attach(result, facts)
     return result
