@@ -1124,6 +1124,23 @@ export type PreviewAnnotationSource = { root: PreviewAnnotationRoot, relativePat
  */
 export type PreviewAnnotationTarget = { "kind": "markdownLines", startLine: number, endLine: number, excerpt: string, } | { "kind": "htmlElement", selector: string, tag: string, excerpt: string, domFingerprint: string, } | { "kind": "imageRect", x: number, y: number, width: number, height: number, naturalWidth: number, naturalHeight: number, };
 
+/**
+ * One project-pinned entry shown in the Workbench entry strip.
+ */
+export type PreviewEntryInfo = { id: string, title: string, 
+/**
+ * Path relative to the first project folder.
+ */
+entry: string, 
+/**
+ * `fullscreen` (whole-page expanded preview) or `float`.
+ */
+openMode: string, 
+/**
+ * `file` or `service`.
+ */
+kind: string, };
+
 export type PreviewFeedbackDraft = { id: string, source: PreviewSourceInfo, review: PreviewReviewDraft, bundles: Array<SessionArtifactBundle>, receipt: PreviewFeedbackRecord | null, };
 
 export type PreviewFeedbackOperation = { "kind": "source", path: string, } | { "kind": "share", path: string, ttlSeconds: number, resources: Array<string>, } | { "kind": "revoke", shareId: string, } | { "kind": "open", path: string, version: string, draftId: string | null, } | { "kind": "draft", id: string, } | { "kind": "upsert", id: string, annotation: PreviewAnnotation, expectedRevision: number, } | { "kind": "remove", id: string, ids: Array<string>, expectedRevision: number, } | { "kind": "beginArtifact", id: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } | { "kind": "chunk", id: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } | { "kind": "finishArtifact", id: string, uploadId: string, } | { "kind": "abortArtifact", id: string, uploadId: string, } | { "kind": "submit", id: string, description: string, annotationIds: Array<string>, bundlePaths: Array<string>, } | { "kind": "read", id: string, };
@@ -2346,7 +2363,11 @@ builtin?: boolean, id: string, name: string,
 /**
  * The first folder and Agent working directory.
  */
-root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, 
+root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, 
+/**
+ * Project-pinned entries. Absent for projects that never pinned one.
+ */
+previewEntries?: Array<PreviewEntryInfo>, workspaceFile?: string, 
 /**
  * The registered component set and tree position. Absent for an ordinary
  * folder that has never been registered as an AgentSpace.

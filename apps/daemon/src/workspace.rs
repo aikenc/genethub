@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     AgentSpaceHealth, AgentSpaceOperation, DirectoryEntry, DirectoryListing, FileNode,
-    WorkspaceFolderInfo, WorkspaceInfo,
+    PreviewEntryInfo, WorkspaceFolderInfo, WorkspaceInfo,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -933,6 +933,8 @@ impl Workspaces {
 
     fn describe_with_space(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
         let mut info = describe(entry);
+        let preview_entries = read_preview_entries(entry);
+        info.preview_entries = (!preview_entries.is_empty()).then_some(preview_entries);
         let builtin_root = self
             .config_path
             .parent()
@@ -1796,6 +1798,7 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
                 root_handle: folder.root_handle.clone(),
             })
             .collect(),
+        preview_entries: None,
         workspace_file: entry
             .workspace_file
             .as_ref()
@@ -2209,6 +2212,96 @@ fn existing_project<'a>(
                 entry.id.as_str(),
             )
         })
+}
+
+const PREVIEW_ENTRIES_FILE: &str = "preview-entries.json";
+const MAX_PREVIEW_ENTRIES_FILE_BYTES: u64 = 64 * 1024;
+const MAX_PREVIEW_ENTRIES: usize = 32;
+
+#[derive(Deserialize)]
+struct PreviewEntriesFile {
+    #[serde(default)]
+    entries: Vec<PreviewEntryFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewEntryFile {
+    id: String,
+    title: String,
+    entry: String,
+    #[serde(default)]
+    open_mode: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Project-pinned entries are a small, project-owned list. Invalid entries are
+/// dropped rather than failing the whole workspace list: one broken pin must
+/// not hide every other project on the machine.
+fn read_preview_entries(entry: &WorkspaceEntry) -> Vec<PreviewEntryInfo> {
+    let path = project_directory(entry)
+        .join(".genethub")
+        .join(PREVIEW_ENTRIES_FILE);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Vec::new();
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_PREVIEW_ENTRIES_FILE_BYTES {
+        return Vec::new();
+    }
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(file) = serde_json::from_str::<PreviewEntriesFile>(&body) else {
+        return Vec::new();
+    };
+    let Some(folder) = entry.folders.first() else {
+        return Vec::new();
+    };
+    let Ok(root) = std::fs::canonicalize(&folder.root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in file.entries.into_iter().take(MAX_PREVIEW_ENTRIES) {
+        let id = item.id.trim();
+        let title = item.title.trim();
+        let relative = item.entry.trim().replace('\\', "/");
+        if id.is_empty()
+            || id.len() > 64
+            || title.is_empty()
+            || title.chars().count() > 120
+            || relative.is_empty()
+            || relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || relative.split('/').next() == Some(".genethub")
+        {
+            continue;
+        }
+        let Ok(canonical) = std::fs::canonicalize(root.join(&relative)) else {
+            continue;
+        };
+        if !canonical.starts_with(&root) || !canonical.is_file() {
+            continue;
+        }
+        let open_mode = match item.open_mode.as_deref() {
+            Some("float") => "float",
+            _ => "fullscreen",
+        };
+        let kind = match item.kind.as_deref() {
+            Some("service") => "service",
+            _ => "file",
+        };
+        out.push(PreviewEntryInfo {
+            id: id.to_string(),
+            title: title.to_string(),
+            entry: relative,
+            open_mode: open_mode.to_string(),
+            kind: kind.to_string(),
+        });
+    }
+    out
 }
 
 /// The directory that owns this project's conversations.

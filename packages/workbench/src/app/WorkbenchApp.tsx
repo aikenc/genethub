@@ -71,6 +71,7 @@ import { AgentRequestDialog } from "../agents/AgentRequestDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { PreviewEntryStrip } from "../workspace/PreviewEntryStrip";
 import type { SpeechInputProblem } from "../speech/useSpeechInput";
 import { canStartAgent } from "../presentation/catalog/resolve";
 
@@ -900,6 +901,12 @@ export function App({
   const workspace =
     workbench.workspaces.find((entry) => entry.id === workbench.activeWorkspaceId) ??
     workbench.workspaces[0];
+  const entryWorkspace = session
+    ? workbench.workspaces.find((entry) => entry.id === session.workspaceId) ?? workspace
+    : workspace;
+  const hasEntryStrip = Boolean(
+    entryWorkspace?.previewEntries?.length && entryWorkspace.folders[0] && workbench.client,
+  );
 
   const openOverview = (id: string, surface = "sessions", localId?: string) => {
     setDraftChooser(false);
@@ -1020,7 +1027,8 @@ export function App({
             )}
             <BackgroundBadge />
           </header>}
-          {showChat && !starting && session && <SessionCoordination key={`${sourceMachineId}:${session.id}`} session={session} />}
+          {!(showChat && starting) && <PreviewEntryStrip workspace={entryWorkspace} session={showChat && !starting ? session : undefined} />}
+          {!hasEntryStrip && showChat && !starting && session && <SessionCoordination key={`${sourceMachineId}:${session.id}`} session={session} />}
 
           {workbench.completionNotice ? (
             <p

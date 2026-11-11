@@ -120,6 +120,8 @@ export type PreviewFloatTarget = {
   path: string;
   /** Session that owned the link when Preview was opened; stable across tab changes. */
   sessionId: string | null;
+  /** Whole-page expanded (default) or the free-position float. */
+  initialMode?: "expanded" | "float";
 };
 
 export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
