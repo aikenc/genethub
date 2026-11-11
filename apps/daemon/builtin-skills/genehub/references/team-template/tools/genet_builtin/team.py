@@ -743,14 +743,22 @@ def _cmd_receive(args):
             print(json.dumps({"ok": True, "delivered": True}))
             return
         if operation == "release":
+            def require_process_absence():
+                processes = genet("process", "list").get("processes")
+                if not isinstance(processes, list) or any(x.get("sessionId") == old["sessionId"] for x in processes):
+                    raise ExpertError("远端会话仍有进程资源或无法确认已归还", "锁与原派单保留", "归还原会话的进程资源后重试原释放操作")
+
             if old.get("released"):
                 lock = old.get("lock")
                 holder = read_json(lock, {}) if lock else None
                 if holder and holder.get("requestId") == key and holder.get("session") == old["sessionId"]:
+                    require_process_absence()
                     os.remove(lock)
                     old.setdefault('leaseReleasedAtMs', now_ms())
+                    old['resourceReleasedAtMs'] = now_ms()
                     write_json(receipt_path, old)
-                print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs')}))
+                print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs'),
+                                  'resourceReleasedAtMs': old.get('resourceReleasedAtMs')}))
                 return
             try:
                 summary = session_summary(old["sessionId"])
@@ -768,6 +776,7 @@ def _cmd_receive(args):
             actual_reply = (summary.get("latestReply") or {}).get("itemId")
             if not canceled and not failed and actual_reply != request.get("expectedReply"):
                 raise ExpertError("回复在对账后发生变化", "锁与待办保留，没有用旧回复销账", "下次对账重新取得最新回复后再释放")
+            require_process_absence()
             lock = old.get("lock")
             if lock and os.path.exists(lock):
                 holder = read_json(lock, {}) or {}
@@ -781,8 +790,10 @@ def _cmd_receive(args):
             if lock and os.path.exists(lock):
                 os.remove(lock)
                 old['leaseReleasedAtMs'] = now_ms()
+                old['resourceReleasedAtMs'] = now_ms()
             write_json(receipt_path, old)
-            print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs')}))
+            print(json.dumps({"ok": True, "released": True, 'leaseReleasedAtMs': old.get('leaseReleasedAtMs'),
+                              'resourceReleasedAtMs': old.get('resourceReleasedAtMs')}))
             return
         if old is not None:
             if old.get("request") != request:
@@ -4701,6 +4712,14 @@ def release_remote(root, path, record):
                             taskId=record.get('taskId'), operationId=record.get('operationId'),
                             sessionId=record['sessionId'], machine=record.get('machine'),
                             timeBasis='executor-unlink' if released.get('leaseReleasedAtMs') is not None else 'ack-upper-bound')
+        # Old receivers and already-absent markers have no contemporaneous
+        # process-and-lease proof. Keep that uncertainty instead of backdating.
+        if released.get('resourceReleasedAtMs') is not None:
+            quality_events.emit(sys.modules[__name__], root, 'resource-released', record.get('operationId') or record['sessionId'],
+                                at_ms=released['resourceReleasedAtMs'],
+                                taskId=record.get('taskId'), operationId=record.get('operationId'),
+                                sessionId=record['sessionId'], machine=record.get('machine'),
+                                proof='remote-idle-process-and-lease-check')
         update_pending(root, path, record)
     return True
 
