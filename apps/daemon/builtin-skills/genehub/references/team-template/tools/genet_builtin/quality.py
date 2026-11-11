@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import time
 import tempfile
@@ -30,12 +31,46 @@ def records(base):
 
 def events(root, cutoff):
     path = Path(root)/'.genethub/team/events/events.jsonl'
-    if not path.is_file():
-        return []
-    if path.is_symlink() or path.stat().st_size > 64*1024*1024:
+    spool = path.parent/'spool'
+    if spool.is_symlink() or spool.exists() and not spool.is_dir():
+        raise ValueError('event spool must be a regular directory')
+    queued = sorted(spool.glob('*.json'))
+    if len(queued) > 10000:
+        raise ValueError('queued events exceed bounded read')
+    lines, queued_bytes = [], 0
+    for queued_path in queued:
+        try:
+            if queued_path.is_symlink():
+                raise ValueError('queued event alias')
+            with queued_path.open('rb') as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ValueError('queued event must be regular')
+                payload = handle.read(8193)
+        except FileNotFoundError:
+            # A producer folded it. Read the append log after the spool, so
+            # concurrent drain cannot leave the event between both reads.
+            continue
+        if len(payload) > 8192:
+            raise ValueError('queued event exceeds bounded read')
+        queued_bytes += len(payload)
+        value = json.loads(payload)
+        if value.get('eventId') != queued_path.stem:
+            raise ValueError('queued event identity mismatch')
+        lines.append(payload)
+    if path.is_symlink():
+        raise ValueError('event history alias')
+    if path.exists():
+        with path.open('rb') as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError('event history must be regular')
+            payload = handle.read(64*1024*1024+1)
+        if len(payload) + queued_bytes > 64*1024*1024:
+            raise ValueError('event history exceeds bounded read')
+        lines = payload.splitlines() + lines
+    elif queued_bytes > 64*1024*1024:
         raise ValueError('event history exceeds bounded read')
     found = {}
-    for line in path.read_text(encoding='utf-8').splitlines():
+    for line in lines:
         value = json.loads(line)
         if value.get('schema') != 'team-process-event/1':
             raise ValueError('unknown process event schema')

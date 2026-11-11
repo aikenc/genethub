@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 
 _TEMPLATE_SHA = None
 LEDGER_BASIS = 'task-and-note-ledger/1'
@@ -69,6 +70,61 @@ def observe_ledger(team, root):
          at_ms=at, basis=LEDGER_BASIS)
 
 
+def _append(base, payload, event_id):
+    marker = base / 'seen' / event_id
+    if marker.exists():
+        return
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(base / 'events.jsonl', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        if os.write(fd, payload) != len(payload):
+            raise OSError('incomplete event append')
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    marker.touch(exist_ok=True)
+
+
+def _spool(base, payload, event_id):
+    """Publish complete bytes atomically without reserving a missing event."""
+    if (base / 'seen' / event_id).exists():
+        return
+    spool = base / 'spool'
+    if spool.is_symlink() or spool.exists() and not spool.is_dir():
+        raise ValueError('event spool must be a regular directory')
+    spool.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=spool, prefix='.', suffix='.tmp', delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        # Link after fsync: readers see the complete first occurrence, never
+        # an empty identity reservation. A concurrent duplicate keeps it.
+        try: os.link(temporary, spool / (event_id + '.json'))
+        except FileExistsError: pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _drain(base):
+    spool = base / 'spool'
+    if spool.is_symlink() or spool.exists() and not spool.is_dir():
+        raise ValueError('event spool must be a regular directory')
+    for path in sorted(spool.glob('*.json'))[:64]:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
+            raise ValueError('queued event must be bounded and regular')
+        payload = path.read_bytes(); value = json.loads(payload)
+        if value.get('schema') != 'team-process-event/1' or value.get('eventId') != path.stem:
+            raise ValueError('queued event identity mismatch')
+        _append(base, payload, value['eventId'])
+        # Append, then marker, then unlink. Interrupted recovery may produce
+        # duplicate bytes, which the public collector deduplicates by eventId.
+        path.unlink()
+
+
 def emit(team, root, kind, identity, *, at_ms=None, **facts):
     """Best effort, bounded single append, under the normal nonblocking lock."""
     try:
@@ -80,7 +136,6 @@ def emit(team, root, kind, identity, *, at_ms=None, **facts):
             _TEMPLATE_SHA = digest.hexdigest()
         event_id = hashlib.sha256((kind + ':' + str(identity)).encode()).hexdigest()
         base = Path(team.state_dir(root, 'events'))
-        marker = base / 'seen' / event_id
         value = dict(facts, schema='team-process-event/1', eventId=event_id,
                      kind=kind, atMs=team.now_ms() if at_ms is None else at_ms,
                      recordedAtMs=team.now_ms(), templateSha256=_TEMPLATE_SHA)
@@ -88,20 +143,25 @@ def emit(team, root, kind, identity, *, at_ms=None, **facts):
                               separators=(',', ':'), allow_nan=False) + '\n').encode()
         if len(payload) > 8192:
             raise ValueError('event exceeds 8 KiB')
-        with team.inbox_lock(root, 'quality-events', purpose='过程事件'):
-            if marker.exists():
-                return True
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            # Append before marking: a crash can duplicate a stable event, but
-            # cannot reserve its identity while silently losing the event.
-            fd = os.open(base / 'events.jsonl', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                if os.write(fd, payload) != len(payload):
-                    raise OSError('incomplete event append')
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            marker.touch(exist_ok=True)
+        # Every producer first publishes its immutable event. In particular,
+        # a retry cannot append newer timestamps ahead of an undrained first
+        # occurrence with the same identity.
+        _spool(base, payload, event_id)
+        try:
+            with team.inbox_lock(root, 'quality-events', purpose='过程事件'):
+                _drain(base)
+        except team.ExpertError:
+            # Only the nonblocking append lock can raise this here. A busy
+            # producer is neither a missing event nor a business prerequisite.
+            # Durable publication already succeeded. Real write failures still
+            # reach the original gap marker rather than becoming success.
+            pass
+        except Exception as error:
+            # Append storage can be temporarily unavailable while the complete
+            # event remains readable in the spool. That is a pending archive,
+            # not a missing fact. Invalid queued data is still rejected by the
+            # collector; failure to publish the spool reaches the gap marker.
+            print('[quality] durable event awaits append: ' + type(error).__name__, file=sys.stderr)
         return True
     except Exception as error:
         # The scorer also checks required lifecycle facts against the durable
