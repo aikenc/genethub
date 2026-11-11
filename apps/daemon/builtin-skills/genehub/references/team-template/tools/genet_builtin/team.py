@@ -492,6 +492,8 @@ def remote_receive(target, request):
         argv.append('--require-quality-metadata')
     if request.get('operation') == 'task-operation' and operation.get('task_action') == 'job':
         argv.append('--require-background-jobs')
+    if request.get('operation') == 'task-operation' and operation.get('task_action') == 'budget':
+        argv.append('--require-task-budget')
     cause = ""
     try:
         done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=25 if withdrawing else 120)
@@ -503,7 +505,8 @@ def remote_receive(target, request):
                          if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
         required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
-                                          "--require-quality-metadata", "--require-background-jobs") if flag in argv), None)
+                                          "--require-quality-metadata", "--require-background-jobs",
+                                          "--require-task-budget") if flag in argv), None)
         if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
             diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
                                  if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
@@ -5305,6 +5308,7 @@ def main(argv):
     receive.add_argument("--require-prepare-settlement", action="store_true", help="require exact no-create acknowledgement; old receivers must reject before mutation")
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     receive.add_argument('--require-background-jobs', action='store_true', help='require bounded native background-work registration; old receivers reject before interpreting the operation')
+    receive.add_argument('--require-task-budget', action='store_true', help='require explicit Task capacity budget support; old receivers reject before interpreting the operation')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):

@@ -42,6 +42,90 @@ def read_task(t, root, task_id):
     return value
 
 
+def capacity_budget(t, root, task, intents=None):
+    """The dispatch capacity contract, independent of User scope or deadline."""
+    intents = records(t, root, 'task-dispatch') if intents is None else intents
+    stored = task.get('capacityBudget')
+    if stored is None:
+        maximum = int(t.setting(root, 'TEAM_TASK_MAX_SESSIONS', 32))
+        expires = task['createdAtMs'] + int(t.setting(root, 'TEAM_TASK_MAX_AGE_SECONDS', 7200) * 1000)
+        revision = 0
+    elif (not isinstance(stored, dict) or stored.get('schema') != 'team-task-capacity-budget/1'
+          or any(type(stored.get(k)) is not int or not 1 <= stored[k] <= 9007199254740991
+                 for k in ('maximumSessions', 'expiresAtMs', 'revision'))):
+        raise t.ExpertError('任务调度预算记录无效', '没有新增派单或覆盖预算', '核对原预算决策记录')
+    else:
+        maximum, expires, revision = stored['maximumSessions'], stored['expiresAtMs'], stored['revision']
+    global_maximum = int(t.setting(root, 'TEAM_MAX_ACTIVE_SESSIONS', 64))
+    active = sum(bool(x.get('state') in ('creating', 'prepared') or
+                     (x.get('sessionId') and os.path.exists(t.state_dir(root, 'pending', x['sessionId'] + '.json'))))
+                 for x in intents)
+    used = sum(x.get('request', {}).get('taskId') == task['taskId'] for x in intents)
+    blocked = []
+    if active >= global_maximum: blocked.append('team-active-session-limit')
+    if used >= maximum: blocked.append('task-session-limit')
+    if t.now_ms() > expires: blocked.append('task-age-limit')
+    if task.get('finished') or task.get('state') in ('delivered', 'canceled'): blocked.append('task-concluded')
+    return dict(schema='team-task-capacity-budget/1', taskId=task['taskId'], revision=revision,
+                taskCreatedAtMs=task['createdAtMs'],
+                limits=dict(taskMaximumSessions=maximum, taskExpiresAtMs=expires,
+                            teamMaximumActiveSessions=global_maximum),
+                usage=dict(taskIntentCount=used, teamReservedIntents=active),
+                remainingSessions=max(0, min(maximum-used, global_maximum-active)) if not blocked else 0,
+                blockedReasons=blocked, userScopeAndDeadlineChanged=False)
+
+
+def decide_capacity_budget(t, root, task, sid, args):
+    changing = args.max_sessions is not None or args.expires_at_ms is not None
+    if not changing:
+        if args.request_id or args.reason or args.expected_budget_revision is not None:
+            raise t.ExpertError('预算决策需要明确的新限额', '没有改变预算', '只查询时不带决策参数')
+        return capacity_budget(t, root, task)
+    if sid != task.get('front'):
+        raise t.ExpertError('任务调度预算由原前台明确决定', '原预算、会话与成果保留', '让原前台在用户既有预算内核对本任务预算；不换任务编号绕过')
+    reason = (args.reason or '').strip()
+    if (not args.request_id or len(args.request_id) > 128 or '\n' in args.request_id
+            or not reason or len(reason) > 2048 or '\n' in reason
+            or type(args.expected_budget_revision) is not int or args.expected_budget_revision < 0
+            or any(value is not None and (type(value) is not int or not 1 <= value <= 9007199254740991)
+                   for value in (args.max_sessions, args.expires_at_ms))):
+        raise t.ExpertError('预算决策参数不完整或无效', '原预算保留', '给出稳定request-id、查询所得预算revision、明确限额和单行理由；用户目标与期限不变')
+    requested = dict(maximumSessions=args.max_sessions, expiresAtMs=args.expires_at_ms,
+                     expectedRevision=args.expected_budget_revision, reason=reason, actorSessionId=sid)
+    # Same lock order as creation: Task relationship, then shared capacity.
+    with t.inbox_lock(root, task['taskId'], purpose='任务调度预算'):
+        with t.inbox_lock(root, 'task-capacity', purpose='任务共享预算'):
+            task = read_task(t, root, task['taskId'])
+            decisions = task.get('capacityBudgetDecisions', [])
+            if not isinstance(decisions, list) or len(decisions) > 64:
+                raise t.ExpertError('预算决策历史无法核对', '原预算保留', '保留原记录并反馈平台')
+            prior = next((x for x in decisions if x['requestId'] == args.request_id), None)
+            current = capacity_budget(t, root, task)
+            if prior:
+                if prior['request'] != requested:
+                    raise t.ExpertError('原预算决策编号对应不同参数', '没有覆盖或续配', '重试复用原参数；新决定使用新编号和当前预算revision')
+                return dict(current, decision=prior, replayed=True)
+            if len(decisions) >= 64 or task.get('finished') or task.get('state') not in ('active', 'paused'):
+                raise t.ExpertError('任务已结论、正在控制转换或决策历史已满', '原任务与预算保留', '查询原状态，不把预算操作当恢复或取消')
+            if current['revision'] != args.expected_budget_revision:
+                raise t.ExpertError('预算revision已变化', '没有覆盖新决定', '重新查询当前任务预算后明确决定')
+            after = dict(schema='team-task-capacity-budget/1', revision=current['revision']+1,
+                         maximumSessions=args.max_sessions if args.max_sessions is not None else current['limits']['taskMaximumSessions'],
+                         expiresAtMs=args.expires_at_ms if args.expires_at_ms is not None else current['limits']['taskExpiresAtMs'])
+            decision = dict(requestId=args.request_id, request=requested, atMs=t.now_ms(),
+                            before=dict(revision=current['revision'], **current['limits']), after=after,
+                            actorSessionId=sid, countsAsHumanApproval=False)
+            task['capacityBudget'] = after
+            task['capacityBudgetDecisions'] = decisions + [decision]
+            t.write_json(task_path(t, root, task['taskId']), task)
+            result = dict(capacity_budget(t, root, task), decision=decision, replayed=False)
+    quality_events.emit(t, root, 'ledger-changed', 'task-budget:'+task['taskId']+':'+args.request_id,
+                        at_ms=decision['atMs'], taskId=task['taskId'], sessionId=sid,
+                        changeKind='task-capacity-budget', budgetRevision=after['revision'],
+                        requestId=args.request_id, countsAsHumanApproval=False)
+    return result
+
+
 
 def parallelism(t, root, task_id):
     """Decision information from the task ledger, never a dispatch gate.
@@ -153,13 +237,11 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         if not old:
             with t.inbox_lock(root, 'task-capacity', purpose='任务共享预算'):
                 intents = records(t, root, 'task-dispatch')
-                active = [x for x in intents if x.get('state') in ('creating', 'prepared') or
-                          (x.get('sessionId') and os.path.exists(t.state_dir(root, 'pending', x['sessionId'] + '.json')))]
-                maximum = int(t.setting(root, 'TEAM_MAX_ACTIVE_SESSIONS', 64))
-                per_task = int(t.setting(root, 'TEAM_TASK_MAX_SESSIONS', 32))
-                deadline = t.setting(root, 'TEAM_TASK_MAX_AGE_SECONDS', 7200) * 1000
-                if len(active) >= maximum or sum(x.get('request', {}).get('taskId') == task['taskId'] for x in intents) >= per_task or t.now_ms() - task['createdAtMs'] > deadline:
-                    raise t.ExpertError('团队或任务共享预算已到限额', '没有创建额外会话', '保留任务成果，核对预算后明确决定')
+                budget = capacity_budget(t, root, read_task(t, root, task['taskId']), intents)
+                if budget['blockedReasons']:
+                    raise t.ExpertError('派单调度预算已到限额：'+','.join(budget['blockedReasons']),
+                                        '没有创建额外会话；原任务与累计用量保留',
+                                        '用 task budget '+task['taskId']+' 查询实际限额；仅原前台可在用户既有预算内明确调整，不换编号绕过')
                 old = dict(version=1, operationId=op_id, request=request, state='creating',
                            selection=None, lock=None, createdAtMs=t.now_ms(), recoverable=False, createAttempted=False)
                 t.write_json(path, old)
@@ -352,7 +434,9 @@ def command(t, args, root=None, sender=None):
         try:live_quality=current(root)
         except (OSError,ValueError,KeyError,TypeError):live_quality={'unknown':[{'rule':'live-alerts-unavailable'}]}
         print(json.dumps(dict(task, parallelism=parallelism(t, root, task['taskId']),liveQuality=live_quality,
-                              conclusionPolicy=CONCLUSION_POLICY), ensure_ascii=False)); return
+                              conclusionPolicy=CONCLUSION_POLICY, capacityBudgetView=capacity_budget(t, root, task)), ensure_ascii=False)); return
+    if action == 'budget':
+        print(json.dumps(decide_capacity_budget(t, root, task, sid, args), ensure_ascii=False)); return
     if action in ('support', 'finish', 'bind-directory', 'job') and sid != (task.get('owner') or {}).get('sessionId'):
         # A collaborator can finish its own bounded work, but cannot finish another owner's task.
         mine = next((x for x in task.get('collaborators', []) if x['sessionId'] == sid), None)
@@ -1230,6 +1314,9 @@ def parser(sub):
         p.add_argument('--request-id', required=True); p.add_argument('--machine'); p.add_argument('--directory')
         p.add_argument('--tier'); p.add_argument('--model'); p.add_argument('--parameters', help='business JSON object; normally supplied by a project command'); p.add_argument('words', nargs='+')
     p = actions.add_parser('status'); p.add_argument('task_id')
+    p = actions.add_parser('budget', help='inspect dispatch capacity or record an explicit original-front decision; never changes User scope/deadline')
+    p.add_argument('task_id'); p.add_argument('--max-sessions', type=int); p.add_argument('--expires-at-ms', type=int)
+    p.add_argument('--request-id'); p.add_argument('--expected-budget-revision', type=int); p.add_argument('--reason')
     p = actions.add_parser('send'); p.add_argument('task_id'); p.add_argument('--request-id', required=True); p.add_argument('words', nargs='+')
     p = actions.add_parser('finish'); p.add_argument('task_id'); p.add_argument('--outcome', choices=('success', 'failed', 'blocked'), required=True); p.add_argument('words', nargs='+')
     for action in ('pause', 'resume', 'cancel', 'handover'):

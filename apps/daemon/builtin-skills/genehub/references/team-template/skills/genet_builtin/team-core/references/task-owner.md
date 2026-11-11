@@ -37,7 +37,11 @@
 
 创建使用可协商的 `--creation-id` 和 `--prepare-only`：先准备 SID，源端保存归属和反向依赖，再投递第一条业务。丢回执只重试原准备身份，原生消息稳定编号去重；旧端不支持时保留意图且不开始业务。
 
-派单共享预算默认64个团队活动会话、单任务累计32个会话、任务年龄7200秒；对应 TEAM_MAX_ACTIVE_SESSIONS、TEAM_TASK_MAX_SESSIONS、TEAM_TASK_MAX_AGE_SECONDS。达到限额保存成果并报阻塞，不换编号绕过。
+派单调度预算默认64个团队活动会话、单任务累计32个会话、任务年龄7200秒；对应 TEAM_MAX_ACTIVE_SESSIONS、TEAM_TASK_MAX_SESSIONS、TEAM_TASK_MAX_AGE_SECONDS。`task budget TASK` 和 `task status` 显示派单实际采用的限额、累计用量及各自阻塞原因；完成的支持不退还累计用量。
+
+长目标到达任务限额时保留原编号和成果，由原前台在用户已给定的范围内明确决定，不自动增加限额或换编号绕过。原前台可用 `task budget TASK --max-sessions N --expires-at-ms MS --request-id ID --expected-budget-revision REV --reason "理由"` 显式调整本任务调度配额；按需只给一个限额。REV 取刚查询的预算 revision，与任务控制 revision 分开。重试复用原编号和参数；旧决定重放不续期，新决定必须核对当前 revision。
+
+这只调整本任务的新派单容量，不改变用户目标、用户预算或用户截止，也不提高全队活动上限；原创建时间、历史用量、未完成支持、暂停与租约均保留。原前台会话归属用于协作一致性，不是新的 OS 权限层；该决策不代表 Human 新批准。私有看板的旧推算不能替代派单实际采用的预算视图。
 
 机制故障默认记录供反思处理，真实成果/业务阻塞回原 Owner；恢复操作人不是结果接收方。原 operation 已释放的旧工位不得再碰新租约，未知冲突只阻塞对应项。
 
