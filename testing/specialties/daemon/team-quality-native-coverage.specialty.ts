@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-native-coverage",
   title: "A ledger observation gap cannot invalidate independently read native executions",
-  oracle: "Real system inputs execute a no-op and two note commands around a real event-file filesystem fault. Native turns/inputs remain covered; the missing ledger mutation remains unknown, independent bounded no-op and later genuine change remain known. An explicitly restored unknown failure retains conservative lifecycle coverage.",
+  oracle: "Real system inputs execute a no-op and two note commands around a real filesystem fault of both event persistence sinks (append and durable spool). Native turns/inputs remain covered; the actually missing ledger mutation remains unknown, independent bounded no-op and later genuine change remain known. An explicitly restored unknown failure retains conservative lifecycle coverage.",
   catches: ["one ledger failure erases every evidence domain", "missing ledger mutation scored as idle", "old gap invalidates all later positive work", "unknown legacy event failure ignored"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py note", "tools/run.py quality facts", "session.send", "session.inspect"],
@@ -47,10 +47,14 @@ defineSpecialty({
     r.ok(["tick"]);
     const eventFile=r.state("events","events.jsonl"),saved=eventFile+".before-fault";
     renameSync(eventFile,saved);mkdirSync(eventFile);
+    // An append-only fault is now recoverable from the durable spool. Preserve
+    // this case's missing-data oracle by faulting both actual storage sinks.
+    const spool=r.state("events","spool"),savedSpool=spool+".before-fault";
+    renameSync(spool,savedSpool);writeFileSync(spool,"case-owned unavailable spool destination");
     let failedMutation: Awaited<ReturnType<typeof command>>;
     try {
       failedMutation=await command(owner,["note","--kind","idea","--quote","independent evidence","--context","real filesystem append fault","Keep the actual note"],true);
-    } finally {rmdirSync(eventFile);renameSync(saved,eventFile);}
+    } finally {unlinkSync(spool);renameSync(savedSpool,spool);rmdirSync(eventFile);renameSync(saved,eventFile);}
     const failureFiles=readdirSync(r.state("events","failures"));
     t.assertions.assert(failureFiles.length>0&&failureFiles.every(f=>JSON.parse(readFileSync(r.state("events","failures",f),"utf8")).kind==="ledger-changed"),"fixture failed a different evidence source");
     t.assertions.assert(readdirSync(r.state("notes")).some(f=>readFileSync(r.state("notes",f),"utf8").includes("Keep the actual note")),"business note disappeared with its optional event");

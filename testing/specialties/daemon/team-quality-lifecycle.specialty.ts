@@ -6,7 +6,7 @@ import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public
 defineSpecialty({
   id: "specialty.daemon.team-quality-lifecycle",
   title: "Real task commands preserve optional quality metadata and business completion when the event destination fails",
-  oracle: "A real Agent caller dispatches supports, replays follows/standing once, binds a native writer lease and finishes through a filesystem event fault; public diagnostic capture then matches native handoff IDs/timestamps without changing business records.",
+  oracle: "A real Agent caller dispatches supports, replays follows/standing once, binds a native writer lease and finishes through a filesystem fault of both event persistence sinks; public diagnostic capture then matches native handoff IDs/timestamps without changing business records.",
   catches: ["new default fields invalidate old operations", "follows points outside the Team ledger", "optional metadata changes under retry", "diagnostic write failure prevents actual conclusion", "quality capture invents a read-in or mutates business"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "genet-cli", "session.inspect"],
@@ -197,8 +197,16 @@ defineSpecialty({
     // Explicit real filesystem fault, after the first genuine conclusion.
     const saved=eventFile+".preserved";
     renameSync(eventFile,saved);mkdirSync(eventFile);
-    await ok(second.collaborator,["task","finish",task.taskId,"--outcome","success","Business conclusion survives event append failure"]);
-    rmdirSync(eventFile);renameSync(saved,eventFile);
+    // Append alone is recoverable. Fault both actual persistence sinks to
+    // keep this case's genuine missing-event and conservative coverage oracle.
+    const eventSpool=r.state("events","spool"),savedSpool=eventSpool+".preserved";
+    renameSync(eventSpool,savedSpool);writeFileSync(eventSpool,"case-owned unavailable spool destination");
+    try {
+      await ok(second.collaborator,["task","finish",task.taskId,"--outcome","success","Business conclusion survives event storage failure"]);
+    } finally {
+      unlinkSync(eventSpool);renameSync(savedSpool,eventSpool);
+      rmdirSync(eventFile);renameSync(saved,eventFile);
+    }
     r.ok(["tick"]);await idle(owner);
     const rows=readFileSync(eventFile,"utf8").trim().split("\n").map(x=>JSON.parse(x));
     t.assertions.assert(new Set(rows.map(x=>x.eventId)).size===rows.length,"stable process event identities duplicated under retry");
