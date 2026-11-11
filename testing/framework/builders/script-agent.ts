@@ -129,6 +129,10 @@ export interface ScriptAgentControl {
   /** Space flood events over time instead of one synchronous output burst. */
   floodIntervalMs?: number;
   processTree?: boolean;
+  /** External SDK declares its two persistent runtime children, retaining the real work grandchild. */
+  managedRuntimePids?: boolean;
+  /** The external work child exits naturally when this marker appears. */
+  runtimeWorkExitFile?: string;
   /** cli-command reports its actual running argv child through the public SDK PID event. */
   commandProcess?: boolean;
   /** Native SDK terminal code, with no product state or error-text injection. */

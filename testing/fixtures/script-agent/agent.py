@@ -195,9 +195,18 @@ ROOT = ("import subprocess, sys, time\n"
         "while True: time.sleep(60)\n") % LOOP
 quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for line in sys.stdin:
-    if line.strip() == "tree":
+    command, _, payload = line.strip().partition(" ")
+    if command == "tree":
+        source = ROOT
+        if payload:
+            marker = json.loads(payload)
+            work = "import os,sys,time\nwhile not os.path.exists(sys.argv[1]): time.sleep(.02)"
+            source = ("import subprocess,sys,time,signal\n"
+                      "signal.signal(signal.SIGCHLD,signal.SIG_IGN)\n"
+                      "leaf=subprocess.Popen([sys.executable,'-I','-c',%r,%r],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                      "print(leaf.pid,flush=True)\nwhile True: time.sleep(60)\n") % (work,marker)
         sibling = subprocess.Popen([sys.executable, "-I", "-c", LOOP], **quiet)
-        root = subprocess.Popen([sys.executable, "-I", "-c", ROOT], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        root = subprocess.Popen([sys.executable, "-I", "-c", source], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         leaf = int(root.stdout.readline())
         print(json.dumps({"rootPid": root.pid, "leafPid": leaf, "siblingPid": sibling.pid}), flush=True)
 """
@@ -225,8 +234,8 @@ class FakeCli:
     def pid(self) -> int:
         return self.proc.pid
 
-    async def tree(self) -> dict:
-        self.proc.stdin.write(b"tree\n")
+    async def tree(self, exit_file: Optional[str] = None) -> dict:
+        self.proc.stdin.write(("tree"+(" "+json.dumps(exit_file) if exit_file else "")+"\n").encode())
         await self.proc.stdin.drain()
         return json.loads(await self.proc.stdout.readline())
 
@@ -268,6 +277,7 @@ class FixtureSession(Session):
             self.native = "native-%d-%d" % (os.getpid(), FixtureSession.counter)
         ctx.set_persist({"native": self.native})
         self.cli = cli
+        self.runtime_ids: List[int] = []
         ctx.set_pid(self.cli.pid)
         journal("session-start", sessionId=self.native, genehubSession=ctx.session_id, cliPid=self.cli.pid)
         self.pending: Optional[str] = None
@@ -307,7 +317,12 @@ class FixtureSession(Session):
             )))
         if CONTROL.get("processTree") and not self.agent.tree_started:
             self.agent.tree_started = True
-            tree = await self.cli.tree()
+            tree = await self.cli.tree(CONTROL.get("runtimeWorkExitFile"))
+            self.runtime_ids = [tree["rootPid"], tree["siblingPid"]]
+            if CONTROL.get("managedRuntimePids"):
+                # The SDK ancestor is deliberately unowned by this native CLI;
+                # its declaration cannot confer ownership or hide foreign work.
+                self.ctx.set_pid(self.cli.pid, runtime_pids=self.runtime_ids+[os.getpid()])
             journal("tree-created", **tree)
         if DELAY_S > 0:
             await asyncio.sleep(DELAY_S)
@@ -377,6 +392,8 @@ class FixtureSession(Session):
                 finally:
                     if track_process:
                         self.ctx.set_pid(self.cli.pid)
+                if CONTROL.get("managedRuntimePids") and request.get("runtimeAction") in ("declare", "clear"):
+                    self.ctx.set_pid(self.cli.pid, runtime_pids=(self.runtime_ids+[os.getpid()] if request["runtimeAction"]=="declare" else []))
                 journal("cli-command-returned", code=child.returncode, stdoutBytes=len(stdout), stderrBytes=len(stderr))
                 reply = {"code": child.returncode, "out": stdout.decode("utf-8", "replace")[-32768:],
                          "err": stderr.decode("utf-8", "replace")[-4096:]}
