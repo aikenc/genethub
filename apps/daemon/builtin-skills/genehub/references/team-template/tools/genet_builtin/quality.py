@@ -384,7 +384,7 @@ def capture(team, root, end, cutoff):
             if item.get('releaseTimeBasis') != 'verified-release' and (not item['resourceRequired'] or number(lease) or number(legacy_bound)):
                 item['releasedAtMs']=max(lease or 0,legacy_bound or first['firstAbsentAtMs'])
                 item['releaseTimeBasis']='observed-absence-upper-bound'
-                if item['conclusionAtMs']+600000 < min(end,item['releasedAtMs']) and item['releasedAtMs'] >= start:
+                if item['resourceRequired'] and item['conclusionAtMs']+600000 < min(end,item['releasedAtMs']) and item['releasedAtMs'] >= start:
                     resources_complete=False
         if item['resourceRequired'] and number(item.get('conclusionAtMs')) and item['conclusionAtMs']+600000 < end and not held and not number(item.get('releasedAtMs')):
             resources_complete=False
