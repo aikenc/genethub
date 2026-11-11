@@ -174,11 +174,13 @@ def read_json(path, default=None):
 
 
 def write_json(path, value):
+    ledger_before = quality_events.ledger_before(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = "%s.%d.tmp" % (path, os.getpid())
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=1)
     os.replace(temporary, path)
+    quality_events.ledger_after(sys.modules[__name__], ledger_before, value)
 
 
 def descriptor(directory):
@@ -4981,6 +4983,7 @@ def cmd_hook(_args):
     global SESSIONS_TTL
     SESSIONS_TTL = HOOK_SESSIONS_TTL  # 一轮钩子共用一份 session 快照；非钩子命令仍用 2s
     root = find_root()
+    quality_events.observe_ledger(sys.modules[__name__], root)
     _SYNC.update(root=root, wanted={}, fresh=set(), rows={}, covered={}, off=set())
     SYSTEM_ISSUES_SEEN.discard(root)
     name, mine = me(root)

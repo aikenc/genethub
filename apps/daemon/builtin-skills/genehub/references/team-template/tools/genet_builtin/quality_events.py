@@ -10,6 +10,63 @@ from pathlib import Path
 import sys
 
 _TEMPLATE_SHA = None
+LEDGER_BASIS = 'task-and-note-ledger/1'
+
+
+def ledger_before(path):
+    """Capture only semantic Team ledgers, never runtime heartbeats or secrets.
+
+    This diagnostic must not turn a readable/writable business file into a
+    prerequisite. An unreadable prior value becomes a gap, not 'no change'.
+    """
+    path = Path(path).absolute()
+    for parent in path.parents:
+        if parent.name != 'team' or parent.parent.name != '.genethub':
+            continue
+        relative = path.relative_to(parent)
+        if relative.parts[0] not in ('tasks', 'task-dispatch', 'task-inputs', 'notes', 'notes-done') or path.suffix != '.json':
+            return None
+        try:
+            if path.is_symlink() or path.exists() and path.stat().st_size > 8*1024*1024:
+                raise ValueError('unbounded ledger')
+            previous = ledger_hash(relative, json.loads(path.read_text())) if path.exists() else None
+            return (str(parent.parent.parent), str(relative), previous, False)
+        except Exception:
+            return (str(parent.parent.parent), str(relative), None, True)
+    return None
+
+
+def ledger_hash(relative, value):
+    if Path(relative).parts[0] == 'tasks' and isinstance(value, dict):
+        # A watchdog checking its own counters is not a work-ledger increment.
+        value = {k: v for k, v in value.items() if k != 'watchdog'}
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def ledger_after(team, before, value):
+    if before is None:
+        return
+    root, relative, prior, gap = before
+    try:
+        after = ledger_hash(relative, value)
+        if not gap and prior == after:
+            return
+        at = team.now_ms()
+        emit(team, root, 'ledger-gap' if gap else 'ledger-changed',
+             relative+':'+str(at)+':'+str(os.getpid())+':'+after,
+             at_ms=at, basis=LEDGER_BASIS, ledger=relative,
+             beforeSha256=prior, afterSha256=after)
+    except Exception:
+        # emit itself persists a failure marker if its destination fails.
+        emit(team, root, 'ledger-gap', relative+':'+str(team.now_ms()),
+             basis=LEDGER_BASIS, ledger=relative)
+
+
+def observe_ledger(team, root):
+    at = team.now_ms()
+    emit(team, root, 'ledger-observed', str(at)+':'+str(os.getpid()),
+         at_ms=at, basis=LEDGER_BASIS)
 
 
 def emit(team, root, kind, identity, *, at_ms=None, **facts):

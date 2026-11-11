@@ -182,6 +182,52 @@ def idle_periods(samples, rounds, children, begin, stop):
     return periods
 
 
+def wake_observations(native, machines, log, start, end, complete, failure_times):
+    """Observe ledger increments, not the meaning or usefulness of a reply.
+
+    Negative evidence requires uninterrupted instrumentation around the whole
+    native execution. Old windows and clocks on other machines stay unknown.
+    A delta is Team-wide temporal evidence, never causal/project acceptance.
+    """
+    basis = 'task-and-note-ledger/1'
+    samples = sorted(x['atMs'] for x in log if x['kind']=='ledger-observed' and x.get('basis')==basis)
+    changes = [x['atMs'] for x in log if x['kind']=='ledger-changed' and x.get('basis')==basis]
+    gaps = failure_times + [x['atMs'] for x in log if x['kind']=='ledger-gap' and x.get('basis')==basis]
+    result = []
+    for sid, snapshot in native.items():
+        receipts = {x['messageId']: x for x in snapshot.get('retainedInputs') or []}
+        human_turns = {x['turnId'] for x in receipts.values() if x.get('source')=='user' and x.get('turnId')}
+        for execution in snapshot.get('rounds', []):
+            a, b = execution.get('startedAtMs'), execution.get('endedAtMs')
+            if not number(a) or not number(b) or not a <= b or not start <= b < end:
+                continue
+            receipt = receipts.get(execution.get('userItemId'), {})
+            if receipt.get('source')=='user' or receipt.get('turnId') in human_turns:
+                continue
+            known = None
+            reason = 'native source, completed execution or continuous ledger observation missing'
+            if (complete and receipt.get('source') in ('agent','system','workflow')
+                    and execution.get('outcome') in ('completed','failed')):
+                if machines.get(sid) is not None:
+                    reason = 'remote execution clock is not a source-ledger clock'
+                elif any(a <= at <= b for at in changes):
+                    known = True
+                else:
+                    left = max((at for at in samples if at <= a), default=None)
+                    right = min((at for at in samples if at >= b), default=None)
+                    if left is not None and right is not None:
+                        covered = [at for at in samples if left <= at <= right]
+                        if (a-left <= 125000 and right-b <= 125000
+                                and all(y-x <= 125000 for x,y in zip(covered,covered[1:]))
+                                and not any(a <= at <= b for at in gaps)):
+                            known = False
+            result.append({'sessionId':sid, 'roundId':execution['roundId'],
+                           'messageId':execution.get('userItemId'), 'atMs':b,
+                           'startedAtMs':a, 'ledgerChanged':known, 'basis':basis,
+                           'reason':reason if known is None else None})
+    return sorted(result,key=lambda x:(x['atMs'],x['sessionId'],x['roundId']))
+
+
 def capture(team, root, end, cutoff):
     state = Path(root)/'.genethub/team'
     store = state/'quality'
@@ -279,6 +325,11 @@ def capture(team, root, end, cutoff):
         if sid: wanted[sid]=request.get('machine')
         if request.get('requester') and request['requester'] not in wanted: wanted[request['requester']]=None
         work.append(item)
+    reflect_ids = {sid for sid, record in pending.items()
+                   if record.get('kind') in ('reflect','team-reflect')
+                   and number(record.get('createdAtMs')) and record['createdAtMs'] >= metric_start}
+    for sid in reflect_ids:
+        wanted.setdefault(sid, pending[sid].get('machine'))
     native, platforms, processes = {}, {}, {}
     for machine in set(wanted.values()):
         try:
@@ -451,10 +502,12 @@ def capture(team, root, end, cutoff):
                     row['unsolicited']=False if mutation else None
                 all_inputs.append(row)
         for turn in session.get('turns',[]):
-            all_turns.append(dict(turn,sessionId=sid,coordination=sid in fronts or any(i['sessionId']==sid and i['role'] in ('reflect','team-reflect') for i in work)))
+            all_turns.append(dict(turn,sessionId=sid,coordination=sid in fronts or sid in reflect_ids or any(i['sessionId']==sid and i['role'] in ('reflect','team-reflect') for i in work)))
     failures=list((state/'events/failures').glob('*'))
-    logger_clean=not any(p.name.split('-')[0].isdigit() and start <= int(p.name.split('-')[0]) <= cutoff for p in failures)
+    failure_times=[int(p.name.split('-')[0]) for p in failures if p.name.split('-')[0].isdigit()]
+    logger_clean=not any(start <= at <= cutoff for at in failure_times)
     complete=not issues and logger_clean and before==template_digest()
+    wakes = wake_observations(native, wanted, log, metric_start, end, complete, failure_times)
     baseline=read(store/'baseline.json',{})
     adopted=[i for i in work if i.get('disposition')=='adopted-inferred' and number(i.get('executionMs'))]
     if not baseline and len(adopted)>=20:
@@ -467,7 +520,10 @@ def capture(team, root, end, cutoff):
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
             'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
             'workItems':work,'goalIntervals':union_intervals([(a,b) for task_id,a,b in goals if task_id in goal_tasks]),'stalls':stalls,
-            'inputs':all_inputs,'turns':all_turns,'wakes':[],'failures':[],'baseline':baseline,
+            'inputs':all_inputs,'turns':all_turns,'wakes':wakes,'failures':[],'baseline':baseline,
+            'wakeCoverage':{'basis':'native-nonhuman-rounds-task-ledger/1',
+                            'known':sum(type(x['ledgerChanged']) is bool for x in wakes),
+                            'unknown':sum(x['ledgerChanged'] is None for x in wakes)},
             'coverage':{'dispatches':complete and all(i['hasReceipt'] is False or number(i.get('confirmedAtMs')) for i in work),
                         'starts':complete and all(not i['hasReceipt'] or number(i.get('startedAtMs')) for i in work),
                         'deliveries':complete and all(s.get('retainedInputs') is not None for s in native.values()) and all(i['deliveryCoverageKnown'] for i in work if number(i.get('conclusionAtMs')) and i['conclusionAtMs'] < end),
