@@ -3805,14 +3805,7 @@ def platform_watch(root):
     digest = template_digest(template)
     if held is None:
         platform_commit(root, template)
-    elif held == digest:
-        for note in pending_notes(root):
-            if note.get("kind") == "upgrade":
-                source = os.path.join(notes_dir(root), note["id"] + ".json")
-                if os.path.isfile(source):
-                    write_json(os.path.join(notes_dir(root, True), note["id"] + ".json"), dict(note, handledAtMs=now_ms(), result="platform 已与模板一致"))
-                    os.remove(source)
-    else:
+    elif held != digest:
         record = {"kind": "upgrade", "session": None, "turn": None, "ref": None, "from": "platform", "quote": "无",
                   "context": "平台模板有新版本（%s，平台分支上是 %s）。升级由反思会话在 temp/ 里做：见 team-reflect。" % (digest, held),
                   "text": "template %s" % digest}
@@ -4363,6 +4356,60 @@ def leader_watchdog(root, name, mine):
     notice(leader_sid, "watchdog", "%s:watchdog" % name, prompt, leader_sid, "watchdog", fp, str(wakes), unpause=True)
 
 
+def migrate_result_delivery(root, record, recipient, machine, context):
+    """Reconcile old delivery metadata against original native input evidence.
+
+    An extension's hash or `queued` flag is not a native message identity. Never
+    replace an unknown old receipt with a fresh send. An exact current result
+    reference in a native input, or the original durable inbox envelope, lets us
+    retain its identity without replaying the conclusion under another ID.
+    """
+    old = record.get('resultDelivery') or {}
+    done = record['done']
+    expected = hashlib.sha256(json.dumps(done, sort_keys=True).encode()).hexdigest()
+    if old.get('state') != 'queued' or old.get('to') != recipient or old.get('resultHash') != expected:
+        raise ExpertError('旧结果回执无法核对当前结论', '保留原回执和结果，没有重新投递',
+                          '核对原请求方的原生输入及结论代次，不能把旧标记改成新回执')
+    for item in peek_session_inbox(root, recipient):
+        refs = re.split(r'[,\s]+', item.get('ref') or '')
+        if item.get('purpose') == 'result' and item.get('machine') == machine and done['ref'] in refs:
+            return dict(generation=[recipient, done['reply']], recipient=recipient,
+                        machine=machine, sender=item['sender'], text=item['text'], ref=item.get('ref'),
+                        messageId=_inbox_message_id(recipient, item), queued=False,
+                        legacyReceipt=old, migrationBasis='original-inbox-envelope')
+    deadline = context.setdefault('deadline', time.monotonic() + 5)
+    history = context.setdefault((recipient, machine), {'items': [], 'cursor': None, 'digest': None})
+    for _ in range(10):
+        for item in history['items']:
+            if item.get('type') != 'userMessage':
+                continue
+            header, _, body = item.get('text', '').partition('\n\n')
+            lines = header.splitlines()
+            refs = [ref for line in lines if line.startswith('ref: ')
+                    for ref in re.split(r'[,\s]+', line[5:])]
+            sender = next((line[5:] for line in lines if line.startswith('发送方: ')), None)
+            if header.startswith('用途: result\n') and done['ref'] in refs and sender and item.get('id'):
+                return dict(generation=[recipient, done['reply']], recipient=recipient,
+                            machine=machine, sender=sender, text=body, ref=done['ref'],
+                            messageId=item['id'], queued=True, legacyReceipt=old,
+                            migrationBasis='native-input-reference', historyDigest=history['digest'])
+        if history.get('ended') or time.monotonic() >= deadline:
+            break
+        args = ['session', 'narrative', recipient, '--limit', '100']
+        if history['cursor']:
+            args += ['--cursor', history['cursor']]
+        page = genet(*args, *machine_args(machine), timeout=max(1, deadline-time.monotonic()))['page']
+        current = page['source']['digest']
+        if history['digest'] is not None and current != history['digest']:
+            history['ended'] = True
+            break  # A moving history is unknown; never manufacture acceptance.
+        history.update(digest=current, cursor=page.get('nextCursor'))
+        history['items'].extend(page['items'])
+        history['ended'] = not history['cursor']
+    raise ExpertError('旧结果缺少可核对的原生送达证据', '保留原回执和结果，没有重新投递',
+                      '核对原请求方历史或原收件箱；历史超出读取范围时保持未知')
+
+
 def reconcile(root, name, mine):
     team_tasks.recover_concluded_archives(sys.modules[__name__], root)
     front, front_checked = None, False
@@ -4590,6 +4637,7 @@ def reconcile(root, name, mine):
             record_system_issue(root, "team-reconcile", str(error), record.get("sessionId"))
             continue
     ready_batches = {rec.get('batch') for _, rec in records if rec.get('done') and rec.get('batch')}
+    migration_context = {}  # Shared budget/cache, not five seconds per old child.
     for path, rec in records:
         if rec.get('batch') in ready_batches and not rec.get('done'):
             rec['siblingResultReady'] = True
@@ -4623,6 +4671,10 @@ def reconcile(root, name, mine):
             done = record['done']
             delivery = record.get('resultDelivery') or {}
             key = [to, done['reply']]
+            if delivery and 'generation' not in delivery:
+                delivery = migrate_result_delivery(root, record, to, parent_machine, migration_context)
+                record['resultDelivery'] = delivery
+                update_pending(root, path, record)
             if delivery.get('generation') != key:
                 wt = (' [工位: %s, 分支: %s]' % (record['worktree'], record.get('branch') or '-')) if record.get('worktree') else ''
                 sender = '%s（%s）%s' % (record['sessionId'], record['desc'], wt)
