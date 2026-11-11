@@ -60,3 +60,12 @@ R6按前台目标的Owner及全部支持会话树判断，前台会话不计。�
 需要让后台构建、测试、安装等有界作业进入执行证据时，任务内会话可用 `task job register <taskId> --job-id <稳定编号> --pid <PID> --kind build|test|install|work --max-seconds <1..86400>`。PID 取当前渠道 `genet process list` 的原生清单；隔离环境内的子进程 PID 可能属于不同 PID 命名空间，不能直接代入。登记只接受原生进程清单中属于当前会话的进程，排除预览服务；不启动或终止进程。相同编号重试保留原登记，参数变化拒绝。`task job status <taskId> --job-id <编号>` 回读并观测；进程退出后用 `task job finish <taskId> --job-id <编号> --exit-code <退出码>` 结算，进程仍在时拒绝结算。声明退出码不等于业务验收。
 
 定时器仅延续有原生 PID/运行年龄证据且未超出登记期限的区间。读取失败、进程不再出现或身份变化都不延长工时，不猜测最后退出时间；未登记的预览服务器不会自动算作工作。`quality execution --snapshot <文件>` 提供只读执行投影：同一会话的 Round 与登记作业取并集，任务暂停扣除，已证实的后台工作打断停滞区间。这个投影不保存正式卡；当前 tq/2 分数和历史卡原义保持，新正式口径另行发布。
+
+## 资源义务测量修正
+
+新采集事实标注 `resourceObligationBasis=dispatch-resource-obligation/2`，卡的
+`measurementVersion` 与 `streakCompatibilityKey` 为 `tq/2+dispatch-resource-obligation/2`。
+资源义务来自实际工位/写锁绑定或远端派单租约；没有租约的 Agent 常驻运行进程不产生归还义务。
+存在真实义务时，原生进程仍在则仍算占用，结论后 10 分钟未归还仍触发 R5；释放保护不变。
+旧事实缺少该标记时保留原始重算结果，不修改历史卡，不把新旧测量口径拼成连续达标。
+此修正仍是过渡口径，完整目标口径完成前不能作为本阶段目标完成证据。

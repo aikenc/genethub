@@ -491,7 +491,11 @@ def capture(team, root, end, cutoff):
         if own and number(item.get('conclusionAtMs')) and own.get('status')=='idle':
             item['executionMs']=sum(x['durationMs'] for x in turns if number(x.get('durationMs')))
         held=[x for x in processes.get(item['machine'], []) if x.get('sessionId')==item['sessionId']]
-        if held: item['resourceRequired']=True;item['resourceHeld']=True
+        if held:
+            # Native Agent runtimes can outlive a concluded task without ever
+            # acquiring a writer/remote lease. Presence proves holding only
+            # when dispatch/binding independently established the obligation.
+            if item['resourceRequired']:item['resourceHeld']=True
         elif item['machine'] in processes and own.get('status') in ('idle','failed') and number(item.get('conclusionAtMs')):
             check=store/'resource-checks'/(item['id']+'.json')
             first=read(check) or {'firstAbsentAtMs':team.now_ms()}
@@ -574,7 +578,7 @@ def capture(team, root, end, cutoff):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
             'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
                               'backgroundBasis':'registered-native-process-runtime/1',
                               'backgroundRunsAppliedToScore':False,
@@ -706,7 +710,7 @@ def briefing(root,now):
         if not latest:return ['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
         value=read(Path(root)/latest['card'])
         stale=value['window']['endAtMs'] < now//HOUR*HOUR
-        lines=['','## 团队工作质量（'+value.get('model','tq/1')+'）',
+        lines=['','## 团队工作质量（'+value.get('measurementVersion',value.get('model','tq/1'))+'）',
                '卡：'+latest['card'], '事实：'+latest['snapshot'],
                '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
                '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
