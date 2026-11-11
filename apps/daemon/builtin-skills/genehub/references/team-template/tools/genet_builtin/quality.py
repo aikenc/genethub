@@ -228,6 +228,50 @@ def wake_observations(native, machines, log, start, end, complete, failure_times
     return sorted(result,key=lambda x:(x['atMs'],x['sessionId'],x['roundId']))
 
 
+
+def task_trees(tasks, goal_tasks, controls, native, end, intents=()):
+    """Root Owner plus every support, using task controls and native rounds.
+
+    A task pause controls the goal wall; pausing one support only removes that
+    Session's actual execution. No minute-state interpolation or conclusion
+    requirement enters this measurement.
+    """
+    result=[]
+    starts={x['sessionId']:x.get('createdAtMs') for x in intents if x.get('sessionId')}
+    for task_id in sorted(goal_tasks):
+        task=tasks[task_id]
+        opened=task.get('createdAtMs')
+        finished=(task.get('finished') or {}).get('atMs')
+        if not number(opened) or opened >= end:continue
+        stopped=min(end,finished) if number(finished) else end
+        if stopped <= opened:continue
+        changes=sorted([(opened,'active')]+[(x['atMs'],x['state']) for x in controls
+                       if x.get('taskId')==task_id and opened <= x['atMs'] < stopped])
+        excluded=[]
+        for index,(at,state) in enumerate(changes):
+            until=changes[index+1][0] if index+1 < len(changes) else stopped
+            if state != 'active' and until > at:excluded.append((at,until))
+        people=([task['owner']] if task.get('owner') else [])+task.get('collaborators',[])+task.get('previousOwners',[])
+        sessions=[]
+        for sid in sorted({x['sessionId'] for x in people if x.get('sessionId')}):
+            own=native.get(sid)
+            runs=[]
+            if own:
+                for row in own.get('rounds',[]):
+                    a=row.get('startedAtMs')
+                    b=stopped if row.get('outcome')=='running' else row.get('endedAtMs')
+                    if number(a) and number(b) and min(b,stopped)>max(a,opened):
+                        runs.append((max(a,opened),min(b,stopped)))
+            joined=(own or {}).get('createdAtMs')
+            if not number(joined):joined=starts.get(sid)
+            person=dict(sessionId=sid,readable=own is not None,runs=union_intervals(runs))
+            if number(joined):person['openedAtMs']=joined
+            sessions.append(person)
+        result.append(dict(taskId=task_id,openedAtMs=opened,endedAtMs=stopped,
+                           excluded=union_intervals(excluded),sessions=sessions))
+    return result
+
+
 def capture(team, root, end, cutoff):
     state = Path(root)/'.genethub/team'
     store = state/'quality'
@@ -523,7 +567,8 @@ def capture(team, root, end, cutoff):
         baseline={'schema':'team-quality-baseline/1','workItemIds':[i['id'] for i in first],
                   'executionMsPerAdopted':sum(i['executionMs'] for i in first)/20,'frozenAtMs':cutoff}
         team.write_json(str(store/'baseline.json'),baseline)
-    return {'schema':'team-quality-facts/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents),
+            'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
             'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
             'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
@@ -556,7 +601,7 @@ def _command(team,args):
     action=args.quality_action
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
-        print(canonical({'model':'tq/1','weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
+        print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':{'basis':'task-agent-hours/1','minimumTotalEffectiveMs':1800000,'minimumHourEffectiveMs':900000,'required':2},'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
                          'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour and unresolved old instances; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
     if action=='history':
         latest={}
@@ -645,12 +690,16 @@ def briefing(root,now):
         if not latest:return ['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
         value=read(Path(root)/latest['card'])
         stale=value['window']['endAtMs'] < now//HOUR*HOUR
-        lines=['','## 团队工作质量（tq/1）',
+        lines=['','## 团队工作质量（'+value.get('model','tq/1')+'）',
                '卡：'+latest['card'], '事实：'+latest['snapshot'],
                '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
                '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
         lines.append('有效在途小时均值（已确认下界/可能上界）：'+canonical(value.get('effectiveInFlight')).strip())
-        lines.append('R6：有未完成用户目标期间，小时均值低于2触发；暂停/等用户不计。上下界间的不确定性不能算作达标。')
+        if value.get('model')=='tq/2':
+            lines.append('R6：按任务树实际Agent工时/有效墙钟；累计至少30分钟且本小时至少15分钟才考核，低于2触发；没有合格任务为不适用。只连续计算同一口径的卡。')
+            lines.append('任务并行：'+canonical(value.get('taskParallelism')).strip())
+        else:
+            lines.append('R6：有未完成用户目标期间，小时均值低于2触发；暂停/等用户不计。上下界间的不确定性不能算作达标。')
         if stale:lines.append('当前整点小时尚无卡；上卡不能替代本小时。')
         lines.append('失分与缺口（按卡内顺序）：')
         for loss in value['losses'][:16]:
@@ -659,7 +708,7 @@ def briefing(root,now):
                 # A valid goals/starts capture can still await conclusions or
                 # activity observations. Do not diagnose missing starts from
                 # the score's aggregate uncertainty label; keep the card intact.
-                detail['reason']='目标/开工覆盖、活动观测或后继结论尚不足以判定；核对小时均值上下界与事实快照。'
+                detail['reason']=('原生任务树会话执行区间读取缺失；核对各任务上下界及missingSessionIds。' if value.get('model')=='tq/2' else '目标/开工覆盖、活动观测或后继结论尚不足以判定；核对小时均值上下界与事实快照。')
             lines.append('- '+canonical(detail).strip())
         lines.append('按实际原因自主选择改进；没有新增流程、岗位或改进格式要求。')
         return lines

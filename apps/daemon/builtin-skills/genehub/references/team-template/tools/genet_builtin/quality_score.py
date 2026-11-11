@@ -70,6 +70,8 @@ def activity_intervals(value):
 def score(facts):
     if facts.get('schema') != 'team-quality-facts/1':
         raise ValueError('unsupported quality facts schema')
+    model = facts.get('scoringModel', 'tq/1')
+    if model not in ('tq/1', 'tq/2'):raise ValueError('unsupported scoring model')
     start, end = facts['window']['startAtMs'], facts['window']['endAtMs']
     cutoff = facts['capturedAtMs']
     if not all(number(x) for x in (start, end, cutoff)) or not start < end <= cutoff:
@@ -196,6 +198,21 @@ def score(facts):
     if r6_known and possible_parallel < 2:
         instances['R6'].append({'effectiveInFlightMean': round(parallel, 6), 'required': 2})
 
+    task_report = None
+    if model == 'tq/2':
+        from .task_hours import evaluate
+        task_report = evaluate(facts.get('taskTrees'), start, end)
+        eligible = [x for x in task_report if x['eligible']]
+        failed = [x for x in eligible if x['state']=='fail']
+        instances['R6'] = [dict(taskId=x['taskId'], effectiveParallelism=x['low'],
+                               possibleParallelism=x['high'], required=2,
+                               hourEffectiveMs=x['hourEffectiveMs']) for x in failed]
+        r6_known = bool(failed) or (facts.get('taskTreesSourceComplete') is True
+                                   and all(x['state']!='unknown' for x in eligible))
+        wall = sum(x['hourEffectiveMs'] for x in eligible)
+        parallel = sum(x['agentMs'] for x in eligible)/wall if wall else None
+        possible_parallel = sum(x['high']*x['hourEffectiveMs'] for x in eligible)/wall if wall else None
+
     required = {'R1': 'dispatches', 'R2': 'idleObligations' if 'idleObligations' in coverage else 'observations', 'R3': 'deliveries', 'R4': 'observations', 'R5': 'resources'}
     red = {}
     for key in instances:
@@ -272,7 +289,8 @@ def score(facts):
     for key in triggered:
         losses.append({'id': key, 'loss': 50, 'gapTo80': 50, 'route': route, 'instances': len(instances[key])})
     for key in unknown:
-        losses.append({'id':key,'loss':None,'gapTo80':None,'route':'pending','reason':'missing coverage: '+required.get(key,'goals/starts')})
+        losses.append({'id':key,'loss':None,'gapTo80':None,'route':'pending','reason':('unread native task-tree Session intervals' if key=='R6' and model=='tq/2'
+                                                                 else 'missing coverage: '+required.get(key,'goals/starts'))})
     for name, value in indicators.items():
         if value['score'] is None:
             losses.append({'id': name, 'loss': None, 'gapTo80': None, 'route': 'pending', 'reason': value['reason']})
@@ -281,7 +299,7 @@ def score(facts):
             losses.append({'id': name, 'loss': round(WEIGHTS[value['metric']]/weight/n*(100-value['score']), 3),
                            'gapTo80':round(WEIGHTS[value['metric']]/weight/n*max(0,80-value['score']),3), 'route': 'pending'})
     losses.sort(key=lambda x: (x['gapTo80'] is not None, -(x['gapTo80'] or 0), -(x['loss'] or 0), x['id']))
-    return {'schema': 'team-quality-card/1', 'model': 'tq/1', 'team': facts.get('team'),
+    result = {'schema': 'team-quality-card/1', 'model': model, 'team': facts.get('team'),
             'window': facts['window'], 'measurementWindow': facts.get('measurementWindow',facts['window']), 'capturedAtMs': cutoff, 'versions': facts.get('versions', {}),
             'factsSha256': hashlib.sha256(canonical(facts).encode()).hexdigest(),
             'score': round(provisional, 3) if formal and provisional is not None else None,
@@ -294,3 +312,12 @@ def score(facts):
             'inputSources': {k: sum(x.get('source')==k for x in inputs) for k in ['user', 'agent', 'system']},
             'adoptionBasis': 'inferred after native read-in without a follows rework; not confirmed project acceptance',
             'losses': losses}
+
+    if model == 'tq/2':
+        result['taskParallelism'] = task_report
+        result['redLines']['R6']['applicable'] = (
+            bool(eligible) if facts.get('taskTreesSourceComplete') is True or failed else None)
+        result['redLines']['R6']['basis'] = 'task-agent-hours/1'
+        result['effectiveInFlight']['basis'] = 'eligible-task-weighted-summary/1'
+        result['streakCompatibilityKey'] = model
+    return result
