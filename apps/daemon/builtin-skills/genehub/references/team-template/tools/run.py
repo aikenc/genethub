@@ -4,7 +4,14 @@ import sys
 sys.dont_write_bytecode = True
 
 from pathlib import Path
-from genet_builtin.cli import main
-
 if __name__ == "__main__":
-    raise SystemExit(main(root=str(Path(__file__).resolve().parent.parent)))
+    root = str(Path(__file__).resolve().parent.parent)
+    # The worker takes the exclusive side only after its isolated candidate
+    # passes. Ordinary commands cannot import a partially applied package.
+    if sys.argv[1:2] == ['upgrade'] and '--worker' in sys.argv[2:]:
+        from genet_builtin.cli import main
+        raise SystemExit(main(root=root))
+    from genet_builtin.update_gate import gate
+    with gate(root):
+        from genet_builtin.cli import main
+        raise SystemExit(main(root=root))

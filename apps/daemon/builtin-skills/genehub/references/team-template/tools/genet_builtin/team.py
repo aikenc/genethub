@@ -3786,76 +3786,20 @@ def ensure_git(root):
     return "initialized"
 
 
-def deployed_platform_watch(root):
-    """Read-only source check, with one deduplicated maintenance note in this runtime."""
-    marker = state_dir(root, "platform-check.json")
-    previous = read_json(marker, {}) or {}
-    if now_ms() - previous.get("atMs", 0) < PLATFORM_CHECK_S * 1000:
-        return
-    binding = read_json(os.path.join(root, ".genethub", "definition-source.json"), {}) or {}
-    source = binding.get("sourcePath")
-    if binding.get("machineId") and binding["machineId"] != (genet("context").get("daemon") or {}).get("machineId"):
-        write_json(marker, {"atMs":now_ms(), "status":"managedAtSource", "machineId":binding["machineId"], "workspaceId":binding.get("workspaceId")})
-        return
-    state = {"atMs": now_ms(), "sourcePath": source, "status": "unknown"}
-    if not source or not os.path.isfile(os.path.join(source, ROOT_DESCRIPTOR)):
-        state["reason"] = "definition source is unavailable; runtime was not initialized as a repository"
-        write_json(marker, state)
-        return
-    try:
-        template = template_dir(root)
-        def package_digest(base):
-            digest = hashlib.sha256()
-            files = []
-            for prefix in ("tools/genet_builtin", "skills/genet_builtin"):
-                files.extend((prefix + "/" + rel, contents)
-                             for rel, contents, _ in template_files(os.path.join(base, prefix)))
-            launcher = os.path.join(base, "tools", "run.py")
-            if os.path.isfile(launcher):
-                with open(launcher, "rb") as handle:
-                    files.append(("tools/run.py", handle.read()))
-            if not files:
-                raise ExpertError("定义源尚未采用 Class 包", "保留现有制品", "在定义源完成首次迁移")
-            for rel, contents in sorted(files):
-                digest.update(rel.encode() + b"\0" + contents + b"\0")
-            return digest.hexdigest()[:16]
-        held, available = package_digest(source), package_digest(template)
-        state.update(status="current" if held == available else "available", appliedDigest=held, availableDigest=available)
-        if held != available:
-            add_note(root, {"kind": "upgrade", "session": None, "turn": None, "ref": None, "from": "platform",
-                "quote": "无", "context": "平台包 %s 可用，定义源 %s 当前 %s；只在该唯一源维护、构建并安装，不在执行副本初始化Git。见 team-core references/extensions.md。" % (available, source, held),
-                "text": "template %s" % available}, "upgrade", available)
-    except ExpertError as error:
-        state["reason"] = error.what
-    write_json(marker, state)
-
-
 def platform_watch(root):
     """Discover an update; deployed copies never initialize or snapshot their source."""
     if is_deployed_output(root):
-        return deployed_platform_watch(root)
+        # The sole definition source owns automatic upgrades. Runtime copies
+        # keep their original tasks; they do not send upgrade messages.
+        return
     marker = state_dir(root, "platform-check.json")
     if has_repo(root) and now_ms() - (read_json(marker, {}) or {}).get("atMs", 0) < PLATFORM_CHECK_S * 1000:
         return
-    ensure_git(root)
+    if not has_repo(root):
+        ensure_git(root)
     write_json(marker, {"atMs": now_ms()})
-    try:
-        template = template_dir(root)
-    except ExpertError:
-        return
-    held = platform_digest(root)
-    digest = template_digest(template)
-    if held is None:
-        platform_commit(root, template)
-    elif held != digest:
-        record = {"kind": "upgrade", "session": None, "turn": None, "ref": None, "from": "platform", "quote": "无",
-                  "context": "平台模板有新版本（%s，平台分支上是 %s）。升级由反思会话在 temp/ 里做：见 team-reflect。" % (digest, held),
-                  "text": "template %s" % digest}
-        note_id = "n" + hashlib.sha1("\x1f".join(("upgrade", digest)).encode("utf-8")).hexdigest()[:12]
-        done_path = os.path.join(notes_dir(root, True), note_id + ".json")
-        if os.path.isfile(done_path):
-            os.remove(done_path)
-        add_note(root, record, "upgrade", digest)
+    from . import upgrade
+    upgrade.schedule(sys.modules[__name__], root)
 
 
 def drift_lines(root):
@@ -4141,7 +4085,7 @@ def cmd_reflect(args):
     print(start_reflect(root, name, mine, "用户要求立刻反思", request, os.environ.get("GENEHUB_SESSION_ID") or front_session(root, mine["spaces"]), args.tier, args.model))
 
 
-URGENT_NOTE_KINDS = ("unhappy", "anomaly", "upgrade", "redline")
+URGENT_NOTE_KINDS = ("unhappy", "anomaly", "upgrade", "upgrade-conflict", "upgrade-test-failure", "redline")
 
 
 def wake(root, name, mine):
@@ -5200,13 +5144,14 @@ def report(root, name, mine, text):
 
 
 def main(argv):
-    from . import feedback, quality
+    from . import feedback, quality, upgrade
     runtime = get_runtime(find_root())
     parser = argparse.ArgumentParser(prog="tools/run.py")
     sub = parser.add_subparsers(dest="command", required=True)
     team_tasks.parser(sub)
     feedback.register(sub)
     quality.register(sub)
+    upgrade.register(sub)
     send = sub.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
@@ -5362,14 +5307,14 @@ def main(argv):
         args.words.extend(remaining)
     else:
         args = parser.parse_args(argv)
-    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "quality": lambda a: quality.command(sys.modules[__name__], a), "feedback": lambda a: feedback.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
+    handlers = {"upgrade": lambda a: upgrade.command(sys.modules[__name__], a), "task": lambda a: team_tasks.command(sys.modules[__name__], a), "quality": lambda a: quality.command(sys.modules[__name__], a), "feedback": lambda a: feedback.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
                 "employee": cmd_employee, "member": cmd_employee, "worktree": cmd_worktree, "publish": cmd_publish, "board": cmd_board, "models": cmd_models,
                 "directory": cmd_directory, "mount": cmd_mount, "unmount": cmd_unmount, "path": cmd_path, "datas": cmd_datas, "temp": cmd_temp, "reset": cmd_reset, "sync-identity": cmd_sync_identity, "hook": cmd_hook,
                 "note": cmd_note, "notes": cmd_notes, "tell-user": cmd_tell_user, "reflect": cmd_reflect, "snapshot": cmd_snapshot, "drift": cmd_drift}
     handlers.update(business)
     try:
         try:
-            if args.command not in ("receive", "feedback", "quality"):
+            if args.command not in ("receive", "feedback", "quality", "upgrade"):
                 check_and_flush_self_inbox_inline(find_root(), args.command)
         except ExpertError:
             raise

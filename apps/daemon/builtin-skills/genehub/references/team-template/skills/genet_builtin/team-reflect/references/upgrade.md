@@ -1,5 +1,11 @@
 # 升级边界
 
+平台升级由 `python3 tools/run.py upgrade` 程序完成；timer 自动选择最新版，不逐版派单，也不需要升级通知消息。用 `upgrade --status` 查看结果：`adopted`（已采用）、`conflict`（有冲突）、`test-failure`（测试失败）、`waiting-safe-point`（等待安全点，含候选验证及执行端安装中）。
+
+程序先检查三方合并和本地内置补丁，在未注册的独立候选里跑本队回归、完整构建与 verify；源目录有未提交改动或验证期间变化时等待，不覆盖。兼容的远端安装复用独立版本目录，旧会话、执行目录与原回执继续保留。只有冲突和测试失败会唤醒反思，已采用或等待都不新增巡查报告。需要自定义回归时在 `agent-space.genet.json` 的 `team.settings.upgrade.regressionCommands` 写参数数组列表；默认运行已有的 `tools/tests/test_*.py`，并核对实际 Class/API/binding 和构建制品。
+
+反思只处理结果里的冲突文件或失败命令：平台机制问题反馈平台，业务规则提取到项目 Class / Skill；修正并提交后程序自动重试。采用只看自然卡的 `versions.teamTemplate`，不能把 platform 比较基线或 daemon 安装版本当作采用；自定义模板来源没有可验证的发布号时保留未知。以下内容仅在解决冲突、首次旧式迁移时按需查阅，不再每版手工执行。
+
 - 定义源先保存当前提交、制品和原任务记录；运行副本不初始化 Git、不 snapshot、不直接编译。
 - 对已采用 Class 扩展的团队：从平台候选更新 `tools/genet_builtin/`、`skills/genet_builtin/` 及薄入口，保留 `agent-space.genet.json.team`、业务 tools/Skills、身份、数据和回执。比较 `tools/run.py describe` 的 Class、API 与 binding 版本；兼容更新无需改写业务源。
 - 区分定义源兼容更新与执行端运行替换：Class/API/binding/settings 和既有协议保持兼容的源端工具/说明修复，可保留在途目标先采用并核对实际行为；不要求所有业务目标先结束，也不因某个远端暂不能安装而把已验证兼容的源端修复全部搁置。远端继续用原回执与执行制品收尾，实际替换仍须通过原生安全检查；增加远端能力的变更须等相应执行端协议就绪，不能冒称两端都已采用。
