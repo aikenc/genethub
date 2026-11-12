@@ -1,6 +1,6 @@
 ---
 name: genehub-preview
-description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静态：H5/HTML5 游戏、站点、相册、看板、内容创作阶段产物，涉及 index.html、相对资源、localStorage、fetch、图片、WASM，以及预览空白、缓慢、SecurityError。实时：影视剪辑与合成、DCC 建模/动画/仿真、游戏引擎、数字人的创作过程预览，需要本地 HTTP/WS 服务、原生 WebRTC、可信媒体面板或操作回传；用户说“搭建预览”“可预览”时先落地一条能点开的入口 HTML 链接，不要只写架构。
+description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静态：H5/HTML5 游戏、站点、相册、看板、内容创作阶段产物，涉及 index.html、相对资源、localStorage、fetch、图片、WASM，以及预览空白、缓慢、SecurityError。实时：影视剪辑与合成、DCC 建模/动画/仿真、游戏引擎、数字人的创作过程预览，需要本地 HTTP/WS 服务、原生 WebRTC、可信媒体面板或操作回传；用户说“搭建预览”“可预览”时先落地一条能点开的入口 HTML 链接，不要只写架构。用户要把常用体验/预览入口“固定”“常驻”在工作台上时，用 genet preview add 登记项目固定入口。
 ---
 
 # GeneHub 预览
@@ -30,6 +30,23 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 - 可预览的文件类型：HTML/HTM 入口、Markdown、png/jpg/gif/webp、mp4/webm，以及不含 NUL 的有效 UTF-8 文本。
   专有工程和仿真缓存不是可直接预览的格式，先输出实际可查看的阶段产物。
 - 区分阶段产物与实时画面、参考图案与实际内容、观看与操作、本机与跨网结果。静态截图不能冒充实时结果。
+
+## 固定常用入口
+
+用户要求把常用的体验、试玩或预览入口“固定给我”“常驻”“以后不用找”时，登记项目固定入口，不要只写一个
+导航页或在聊天里贴链接。登记后工作台会在该项目的会话区显示入口条，点开即用预览打开。
+
+```bash
+"$GENEHUB_CLI" preview add --title "最新试玩" --entry datas/releases/latest/index.html
+"$GENEHUB_CLI" preview add --title "看板" --entry datas/board/index.html --open float
+"$GENEHUB_CLI" preview list
+"$GENEHUB_CLI" preview remove <id>
+```
+
+- `--entry` 是相对项目首个目录的已存在文件；`--open` 默认整页，`float` 为浮窗。同一入口已固定时会报错，先 `list` 查看，需要改标题或打开方式就 `remove` 后重新登记。
+- 入口应指向随版本更新、路径稳定的文件（如 `latest/index.html`），不要固定某个具体版本目录。
+- 清单保存在项目 `.genethub/preview-entries.json`，只在当前机器执行，不能加 `--machine`。
+- 已有导航页也可以作为一个入口登记；回复用户时说明入口条的位置，不向用户展示命令。
 
 ## 引用资料
 
