@@ -1871,15 +1871,35 @@ def _send_explicit_resume(root, args, sender, machine):
         if not operation:
             if current and current.get("resumeAwaitingReceipt"):
                 raise ExpertError("原恢复操作尚未确认", "没有覆盖回执或发出另一恢复", "保留原操作 ID 和原文，先核对原接收状态")
-            if current and current.get("done"):
+            failed_notice = bool(current and current.get("taskId") and current.get("executionFailure")
+                                 and (current.get("done") or {}).get("outcome") == "failed"
+                                 and not current.get("taskConclusion"))
+            if current and current.get("done") and not failed_notice:
                 raise ExpertError("原派单已有待交付结果", "没有重开已有工作", "先采用原结果，再发送新的诉求")
+            if failed_notice and current.get("requester") != sender:
+                raise ExpertError("失败工作须由原请求方明确恢复", "没有投递或改变原暂停", "由原请求方核对已送达的失败通知后续接")
             if machine and (not current or current.get("machine") != machine or current.get("remoteReleased")):
                 raise ExpertError("远端原派单已释放或回执不匹配", "没有绕过远端工位或恢复会话", "核对原派单；已结束的远端新工作通过 spawn 取得新回执")
             if not machine and current and current.get("machine"):
                 raise ExpertError("原派单属于远端机器", "没有按本机会话处理", "沿用原回执中的 --machine")
-            summary = session_summary(target, machine)
+            summary = session_summary(target, machine, fresh=failed_notice)
             if not (summary.get("inputSummary") or {}).get("paused"):
                 raise ExpertError("目标当前没有暂停", "没有额外投递恢复消息", "未暂停的继续要求使用普通 team.py send，保留团队结果跟踪")
+            if failed_notice:
+                # A delivered execution failure is a notification, not a business
+                # conclusion. Its paused writer may still be needed by this same
+                # original requester. Keep the complete old generation in the
+                # durable resume receipt; never bypass an unsent or stale result.
+                delivery, done = current.get("resultDelivery") or {}, current["done"]
+                inputs = summary.get("inputSummary") or {}
+                native_failure = summary.get("status") == "failed" or TURN_FAILED_ERROR in (inputs.get("error") or "")
+                failure_round = (current.get("executionFailure") or {}).get("roundId")
+                if (not native_failure or (summary.get("interactionSummary") or {}).get("requests")
+                        or not failure_round or latest_round(target, machine) != failure_round
+                        or delivery.get("queued") is not True or not delivery.get("messageId")
+                        or delivery.get("recipient") != sender or delivery.get("generation") != [sender, done["reply"]]):
+                    raise ExpertError("原失败代次或通知送达尚未确认", "保留原失败、暂停和资源，没有恢复",
+                                      "先核对原失败通知和当前原生回合，再以同一恢复编号重试")
             previous = read_dispatch_record(state_dir(root, "done", target + ".json")) if not current else None
             record = dict(current or previous or {"sessionId": target, "requester": sender, "batch": target,
                                      "kind": "research", "desc": "用户明确继续原会话", "lock": None, "route": "explicit-resume"})
@@ -1891,6 +1911,9 @@ def _send_explicit_resume(root, args, sender, machine):
             record.update(baseline=(summary.get("latestReply") or {}).get("itemId"), notified=[], createdAtMs=now_ms(),
                           resumeRequestId=args.message_id, resumeAwaitingReceipt=True)
             record.pop("done", None)
+            if failed_notice:
+                for field in ("executionFailure", "resultDelivery", "resultValidation", "resultRecovery"):
+                    record.pop(field, None)
             operation = {"id": args.message_id, "digest": digest, "state": "prepared", "record": record,
                          "previousPending": current, "previousDone": read_json(state_dir(root, "done", target + ".json")),
                          "guidance": archive_guidance(root, "human", sender, target, body)}
