@@ -119,13 +119,70 @@ def result_audience(team, item, record):
             'watchers':sorted(set(watchers)-{primary})}
 
 
-def native_snapshot(team, sid, machine, since, kernel, cache, budget):
+def native_headers(team, wanted, platforms, store, budget):
+    """Fresh public directory rows are the same native metadata projection as get.
+
+    Cache metadata only hints at a query scope. Missing, incomplete or foreign
+    scope results never prove Session absence: the caller still performs get.
+    """
+    scopes, headers = {}, {}
+    for sid, machine in wanted.items():
+        try:
+            if not team.SESSION_ID.fullmatch(sid):
+                continue
+            old = read(store/'native'/(sid+'.json')) or {}
+            kernel = platforms.get(machine) or {}
+            workspace = old.get('workspaceId')
+            if (old.get('sessionId') == sid and isinstance(workspace, str) and workspace
+                    and kernel.get('machineId')
+                    and (old.get('kernel') or {}).get('machineId') == kernel['machineId']):
+                scopes.setdefault((machine, workspace), set()).add(sid)
+        except Exception:
+            continue  # A corrupt hint must not abort other native observations.
+    for (machine, workspace), members in sorted(scopes.items(), key=lambda x: -len(x[1])):
+        if len(members) < 2:
+            continue
+        cursor, seen, rows = None, set(), {}
+        try:
+            for _ in range(100):
+                remaining = budget-time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('quality header budget exhausted')
+                args = ['session', 'list', '--workspace', workspace, '--limit', '100', '--include-archived']
+                if cursor:
+                    args += ['--cursor', cursor]
+                page = team.genet(*args, *team.machine_args(machine), timeout=min(15, remaining))
+                if (page.get('machineId') != platforms[machine]['machineId']
+                        or page.get('workspaceId') != workspace
+                        or not isinstance(page.get('sessions'), list) or len(page['sessions']) > 100):
+                    raise ValueError('native header scope mismatch')
+                for row in page['sessions']:
+                    if not isinstance(row, dict) or row.get('workspaceId') != workspace:
+                        raise ValueError('native header row mismatch')
+                    if row.get('id') in members:
+                        rows[row['id']] = row
+                cursor = page.get('nextCursor')
+                if page.get('complete') is True and cursor is None:
+                    headers.update({(machine, sid): row for sid, row in rows.items()})
+                    break
+                if not isinstance(cursor, str) or not cursor or cursor in seen:
+                    raise ValueError('native header cursor did not advance')
+                seen.add(cursor)
+        except Exception:
+            # This is only a batching optimization; individual native reads
+            # remain authoritative and retain their own unavailable evidence.
+            continue
+    return headers
+
+
+def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=None):
     """Only existing public inspect/rounds/narrative commands; no transcript cache."""
     def call(*args):
         if time.monotonic() >= budget:
             raise TimeoutError('quality capture budget exhausted')
         return team.genet(*args, *team.machine_args(machine), timeout=min(15, max(1, budget-time.monotonic())))
-    summary = call('session', 'get', sid)['summary']
+    if summary is None:
+        summary = call('session', 'get', sid)['summary']
     old = read(cache)
     inputs=summary.get('inputSummary') or {}
     stable = (summary.get('status') in ('idle','failed') and (inputs.get('paused') or not inputs.get('pendingMessageIds'))
@@ -577,6 +634,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
             processes[machine]=capture_call('process','list',*team.machine_args(machine))['processes']
         except Exception as error:
             issues.append(read_issue('machine-facts-unavailable', error, budget, machine=machine))
+    headers = native_headers(team, wanted, platforms, store, budget)
     order=list(wanted.items())
     if live:
         active={x["sessionId"] for x in records(state/"pending") if x.get("sessionId")}
@@ -585,7 +643,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     for sid,machine in order:
         try:
             if not team.SESSION_ID.fullmatch(sid): raise ValueError('invalid native session identity')
-            native[sid]=native_snapshot(team,sid,machine,history_starts.get(sid,metric_start),platforms.get(machine),store/'native'/ (sid+'.json'),budget)
+            native[sid]=native_snapshot(team,sid,machine,history_starts.get(sid,metric_start),platforms.get(machine),store/'native'/ (sid+'.json'),budget,headers.get((machine,sid)))
         except Exception as error:
             issues.append(read_issue('native-read-unavailable', error, budget, sessionId=sid))
     # Tasks begun inside roles are work, but cannot by themselves manufacture
