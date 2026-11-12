@@ -193,7 +193,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     # the oldest evidence it contains. Legacy/partial caches keep the stricter
     # horizon guard, and every reuse still requires this fresh native summary.
     coverage = (old or {}).get('historyCoverage') or {}
-    full_history = (coverage.get('basis') == 'native-page-completion/1'
+    full_history = (coverage.get('basis') == 'native-page-completion/2'
                     and coverage.get('roundsComplete') is True
                     and coverage.get('narrativeComplete') is True)
     covered = old and (old.get('sinceAtMs', since+1) <= since or full_history)
@@ -205,7 +205,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     same_machine = (isinstance((kernel or {}).get('machineId'), str)
                     and bool(kernel['machineId']) and prior_kernel.get('machineId') == kernel['machineId'])
     compatible = same_machine and (prior_kernel == kernel or full_history)
-    if stable and covered and compatible and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
+    if stable and covered and compatible and old.get('integrationReferenceBasis')=='native-owner-use-reference/1' and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
         return old
     inspection = call('session', 'inspect', sid)['inspection']
     rounds, cursor, round_digest = [], None, None
@@ -227,7 +227,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     rounds.sort(key=lambda x: (x['startedAtMs'], x['roundId']))
     completed = [x for x in rounds if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
     anchor = completed[-1]['roundId'] if completed else None
-    turns, links, cursor, digest = [], [], None, None
+    turns, links, integration_items, cursor, digest = [], [], [], None, None
     narrative_complete = False
     if anchor:
         for _ in range(100):
@@ -242,6 +242,10 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
             batch = [x['stats'] for x in page['items'] if x.get('type') == 'turnSummary']
             turns.extend(batch)
             for item in page['items']:
+                if item.get('type') == 'assistantMessage':
+                    from .quality_outcomes import integration_references
+                    integration_items.extend(integration_references(item,rounds))
+                    if len(integration_items)>4096: raise ValueError('bounded native integration history exceeded')
                 if item.get('type') != 'userMessage': continue
                 header=item.get('text','').split('\n\n',1)[0]
                 if header.startswith('用途: result\n'):
@@ -259,7 +263,8 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
              'waitingForUser': bool((summary.get('interactionSummary') or {}).get('requests')),
              'retainedInputs': inspection.get('retainedInputs'), 'rounds': rounds,
              'turns': list({x['turnId']: x for x in turns}.values()), 'inputLinks':links,'historyDigest': digest,
-             'historyCoverage': {'basis':'native-page-completion/1','roundsComplete':rounds_complete,
+             'integrationReferenceBasis':'native-owner-use-reference/1','integrationReferences':integration_items,
+             'historyCoverage': {'basis':'native-page-completion/2','roundsComplete':rounds_complete,
                                  'narrativeComplete':narrative_complete}}
     team.write_json(str(cache), value)
     return value
@@ -474,7 +479,10 @@ def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
             joined=(own or {}).get('createdAtMs')
             if not number(joined):joined=starts.get(sid)
             from .background_jobs import intervals as job_intervals
-            person=dict(sessionId=sid,readable=own is not None,runs=union_intervals(runs),
+            person=dict(sessionId=sid,readable=own is not None,
+                        executionCoverageKnown=bool(own and ((own.get('historyCoverage') or {}).get('roundsComplete') is True
+                            or number(own.get('sinceAtMs')) and own['sinceAtMs'] <= opened)),
+                        runs=union_intervals(runs),
                         backgroundRuns=job_intervals(log,sid,task_id,stopped))
             if number(joined):person['openedAtMs']=joined
             sessions.append(person)
@@ -838,12 +846,6 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     complete=native_complete and lifecycle_clean
     wakes = wake_observations(native, wanted, log, metric_start, end, native_complete, failure_times,unplaced_gap)
     baseline=read(store/'baseline.json',{})
-    adopted=[i for i in work if i.get('disposition')=='adopted-inferred' and number(i.get('executionMs'))]
-    if not baseline and len(adopted)>=20:
-        first=sorted(adopted,key=lambda i:(i['conclusionAtMs'],i['id']))[:20]
-        baseline={'schema':'team-quality-baseline/1','workItemIds':[i['id'] for i in first],
-                  'executionMsPerAdopted':sum(i['executionMs'] for i in first)/20,'frozenAtMs':cutoff}
-        team.write_json(str(store/'baseline.json'),baseline)
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
@@ -854,7 +856,12 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     from .acceptance_units import collect as collect_units, BASIS as UNIT_BASIS
     from .execution_facts import SCORE_BASIS as EXECUTION_BASIS
     units = collect_units(tasks,intents,work,trees,native,end)
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':trees,
+    from .quality_outcomes import adoption, comparison, ADOPTION_BASIS, COST_BASIS, costs, baseline as unit_baseline
+    adoption(work,tasks,log,native,cutoff)
+    by_op={x['operationId']:x for x in intents}
+    for unit in units:
+        unit['costComparison']=comparison(by_op.get(unit['unitId'],{}).get('request',{}))
+    facts = {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':trees,
             'acceptanceUnits':units,'acceptanceUnitBasis':UNIT_BASIS,'executionBasis':EXECUTION_BASIS,
             'executionFacts':{'schema':'team-execution-facts/2','scoreMeaningChanged':True,
                               'backgroundBasis':'registered-native-process-runtime/1',
@@ -882,6 +889,19 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                         'teamTemplate':team_version,
                         'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
             'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
+    facts.update(adoptionBasis=ADOPTION_BASIS,costBasis=COST_BASIS)
+    from .execution_facts import project
+    facts['unitCosts']=costs(project(facts))
+    cost_path=store/'baselines'/'complete-acceptance-unit-time-v1.json'
+    prior=read(cost_path,{})
+    facts['costBaselines']=unit_baseline(facts['unitCosts'],prior,cutoff)
+    if facts['costBaselines'] != prior and facts['costBaselines']['groups']:
+        with team.inbox_lock(root,'quality-unit-time-baseline',purpose='冻结单元时间基线'):
+            latest=read(cost_path,{})
+            facts['costBaselines']=unit_baseline(facts['unitCosts'],latest,cutoff)
+            if facts['costBaselines'] != latest:
+                team.write_json(str(cost_path),facts['costBaselines'])
+    return facts
 
 
 def register(sub):
@@ -912,7 +932,7 @@ def _command(team,args):
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
         print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':r6_policy(),'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
-                         'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour native facts only; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
+                         'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour native facts only; indicators: rolling 24h','adoptionBasis':'native-owner-use-reference/1','costBasis':'complete-acceptance-unit-time/1','inference':'read and ten-minute inference are not confirmed adoption; optional task finish --uses gives bounded integration evidence'}),end='');return
     if action=='history':
         latest={}
         revisions={}

@@ -508,10 +508,15 @@ def command(t, args, root=None, sender=None):
     elif action == 'finish':
         with t.inbox_lock(root, task['taskId'], purpose='任务结论'):
             task = read_task(t, root, task['taskId'])
+            from .quality_outcomes import declared_uses
+            try: uses = declared_uses(t, root, task, sid, getattr(args, 'uses', None) or [])
+            except ValueError as error:
+                raise t.ExpertError(str(error), '原任务结论未改变', '只引用本会话已读的本任务子产物；不需要引用时省略 --uses') from error
             outcome = dict(outcome=args.outcome, evidence=' '.join(args.words), atMs=t.now_ms())
+            if uses: outcome['uses'] = uses
             prior = task.get('finished') if sid == task['owner']['sessionId'] else next((x.get('finished') for x in task['collaborators'] if x['sessionId'] == sid), None)
             if prior:
-                if prior.get('outcome') != args.outcome or prior.get('evidence') != outcome['evidence']:
+                if prior.get('outcome') != args.outcome or prior.get('evidence') != outcome['evidence'] or prior.get('uses', []) != uses:
                     raise t.ExpertError('原任务结论已记录', '没有覆盖结论', '新要求通过明确恢复继续原任务')
                 outcome = prior
             if not prior:
@@ -531,7 +536,7 @@ def command(t, args, root=None, sender=None):
             t.write_json(path, task)
         quality_events.emit(t, root, 'conclusion', task['taskId'] + ':' + sid + ':' + str(outcome['atMs']),
                             at_ms=outcome['atMs'], taskId=task['taskId'], sessionId=sid,
-                            outcome=outcome['outcome'])
+                            outcome=outcome['outcome'], uses=outcome.get('uses', []))
         print(json.dumps(dict(taskId=task['taskId'], recorded=True), ensure_ascii=False))
     elif action == 'send':
         if not args.request_id:
@@ -1356,7 +1361,7 @@ def parser(sub):
     p.add_argument('task_id'); p.add_argument('--max-sessions', type=int); p.add_argument('--expires-at-ms', type=int)
     p.add_argument('--request-id'); p.add_argument('--expected-budget-revision', type=int); p.add_argument('--reason')
     p = actions.add_parser('send'); p.add_argument('task_id'); p.add_argument('--request-id', required=True); p.add_argument('words', nargs='+')
-    p = actions.add_parser('finish'); p.add_argument('task_id'); p.add_argument('--outcome', choices=('success', 'failed', 'blocked'), required=True); p.add_argument('words', nargs='+')
+    p = actions.add_parser('finish'); p.add_argument('--uses', action='append', help='optional existing child operation integrated in this conclusion; repeatable, not project acceptance'); p.add_argument('task_id'); p.add_argument('--outcome', choices=('success', 'failed', 'blocked'), required=True); p.add_argument('words', nargs='+')
     for action in ('pause', 'resume', 'cancel', 'handover'):
         p = actions.add_parser(action); p.add_argument('task_id'); p.add_argument('--request-id', required=True); p.add_argument('--expected-revision', required=True, type=int)
         p.add_argument('--session'); p.add_argument('--machine'); p.add_argument('words', nargs='*')

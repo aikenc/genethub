@@ -9,7 +9,7 @@
 - `task status TASK`：核对当前 Owner、版本、协作与控制回执。
 - `task send TASK --request-id ID TEXT`：把追加要求投给该任务的精确 Owner。
 - `task bind-directory TASK --directory ABS`：当前 Owner 或协作者为自己的执行会话认领写工位，不独占整个 Space；远端路径由原接单回执指向的执行端认领，源端不创建同名目录。
-- `task finish TASK --outcome success|failed|blocked EVIDENCE`：提交本会话负责工作的明确结论；尚有未结算支持时不得宣称 success。
+- `task finish TASK --outcome success|failed|blocked EVIDENCE`：提交本会话负责工作的明确结论；尚有未结算支持时不得宣称 success。整合结论可重复加 `--uses <子派单operationId>` 引用本会话实际采用的已读产物；只能引用本任务中由自己请求且已结论的子项。可省略，不另做逐项审批；引用不是独立项目验收。长目标未结束时，可在已有整合回复单独写 `采用：ghref:item:...`（结果原引用），只声明实际采用的产物，不另发登记消息。
 - `task pause|resume|cancel TASK --request-id ID --expected-revision N [用户原话]`：前台转达明确用户要求，保留原操作与协作树。暂停/取消发送成功不等于全部执行已停止，查询实际回执。
 - `task handover TASK --session SID --request-id ID --expected-revision N`：原执行停止、资源核对后接手同一个任务；不重发已完成副作用。本版仅支持同机独立会话接手；跨机请求在中断旧Owner前拒绝，迁移需先显式交接产物和执行端资源。
 

@@ -280,10 +280,25 @@ def score(facts):
         measurements[key] = {'value': value if count >= 20 and number(value) else None,
                              'samples': count, 'reason': None if count >= 20 and number(value) else missing}
 
-    disposed = [i for i in finite if i.get('disposition') in ('adopted-inferred', 'rework', 'discarded')]
-    adopted = [i for i in disposed if i['disposition'] == 'adopted-inferred']
-    measure('firstPassAdoptionPct', disposed, value=100*len(adopted)/len(disposed) if disposed else None)
-    measure('reworkPct', disposed, value=100*sum(i['disposition']=='rework' for i in disposed)/len(disposed) if disposed else None)
+    adoption_basis, cost_basis = facts.get('adoptionBasis'), facts.get('costBasis')
+    if adoption_basis is not None:
+        from .quality_outcomes import ADOPTION_BASIS, evidenced, rework_unknown
+        if adoption_basis != ADOPTION_BASIS: raise ValueError('unsupported adoption basis')
+        # Adoption measures bounded support results; root Owner conclusions
+        # are goal boundaries, not another support consumed by this Owner.
+        adoption_items = [x for x in finite if not x.get('owner')]
+        reworked = {x['follows'] for x in items if x.get('follows')}
+        disposed = [x for x in adoption_items if evidenced(x,cutoff) and not rework_unknown(x,items) or x['id'] in reworked]
+        adopted = [x for x in disposed if evidenced(x,cutoff) and x['id'] not in reworked]
+        adoption_complete = bool(adoption_items) and len(disposed)==len(adoption_items)
+        missing = 'closed support results lack bounded integration or explicit rework evidence; read/inferred is not confirmed adoption'
+        measure('firstPassAdoptionPct', adoption_items, value=100*len(adopted)/len(disposed) if adoption_complete else None, missing=missing)
+        measure('reworkPct', adoption_items, value=100*sum(x['id'] in reworked for x in disposed)/len(disposed) if adoption_complete else None, missing=missing)
+    else:
+        disposed = [i for i in finite if i.get('disposition') in ('adopted-inferred', 'rework', 'discarded')]
+        adopted = [i for i in disposed if i['disposition'] == 'adopted-inferred']
+        measure('firstPassAdoptionPct', disposed, value=100*len(adopted)/len(disposed) if disposed else None)
+        measure('reworkPct', disposed, value=100*sum(i['disposition']=='rework' for i in disposed)/len(disposed) if disposed else None)
     for name, a, b in [('dispatchToStartP90Min', 'dispatchAtMs', 'startedAtMs'),
                        ('conclusionToDeliveryP90Min', 'conclusionAtMs', 'deliveredAtMs'),
                        ('deliveryToConsumeP90Min', 'deliveredAtMs', 'consumedAtMs')]:
@@ -298,12 +313,34 @@ def score(facts):
     measure('unsolicitedHumanInputsPerTaskDay', [], samples=len(closed) if classified else 0,
             value=sum(x['unsolicited'] for x in human)/days if classified and days else None,
             missing='native source/input classification or active task exposure missing')
-    costs = [i['executionMs'] for i in finite if number(i.get('executionMs'))]
-    baseline = facts.get('baseline', {})
-    ratio = None
-    if len(costs) == len(finite) and adopted and number(baseline.get('executionMsPerAdopted')) and baseline['executionMsPerAdopted'] > 0:
-        ratio = (sum(costs)/len(adopted)) / baseline['executionMsPerAdopted']
-    measure('costPerAdoptedVsBaseline', [], samples=len(finite), value=ratio, missing='frozen own-Team first20 baseline or complete native execution durations missing')
+    if cost_basis is not None:
+        from .quality_outcomes import COST_BASIS, costs as unit_costs
+        if cost_basis != COST_BASIS or execution_basis is None:
+            raise ValueError('complete unit time requires its formal execution basis')
+        cost_rows = unit_costs(facts)
+        completed_costs = [x for x in cost_rows if x['completed'] and metric_start <= x['endedAtMs'] < end]
+        baseline = facts.get('costBaselines', {})
+        if baseline and (baseline.get('schema') != 'team-unit-time-baselines/1' or baseline.get('basis') != COST_BASIS):
+            raise ValueError('incompatible unit time baseline')
+        ratios = []
+        for row in completed_costs:
+            scope = row.get('comparison')
+            frozen = baseline.get('groups', {}).get(scope['key'], {}) if scope else {}
+            if (row['complete'] and row['integrationEvidenced'] and scope
+                    and frozen.get('comparison') == scope and len(set(frozen.get('unitIds', []))) == 20
+                    and number(frozen.get('frozenAtMs')) and frozen['frozenAtMs'] <= cutoff
+                    and number(frozen.get('meanMs')) and frozen['meanMs'] > 0):
+                ratios.append(row['observedMs']/frozen['meanMs'])
+        measure('costPerAdoptedVsBaseline', [], samples=len(completed_costs),
+                value=sum(ratios)/len(ratios) if completed_costs and len(ratios)==len(completed_costs) else None,
+                missing='complete evidenced units with full execution history and twenty same-scope versioned baseline units required; totals are time, not money')
+    else:
+        costs = [i['executionMs'] for i in finite if number(i.get('executionMs'))]
+        baseline = facts.get('baseline', {})
+        ratio = None
+        if len(costs) == len(finite) and adopted and number(baseline.get('executionMsPerAdopted')) and baseline['executionMsPerAdopted'] > 0:
+            ratio = (sum(costs)/len(adopted)) / baseline['executionMsPerAdopted']
+        measure('costPerAdoptedVsBaseline', [], samples=len(finite), value=ratio, missing='frozen own-Team first20 baseline or complete native execution durations missing')
     turns = [x for x in facts.get('turns', []) if number(x.get('finishedAtMs')) and metric_start <= x['finishedAtMs'] < end]
     total_ms = sum(x.get('durationMs', 0) for x in turns if number(x.get('durationMs')))
     coordination = sum(x['durationMs'] for x in turns if x.get('coordination') is True and number(x.get('durationMs')))
@@ -364,6 +401,20 @@ def score(facts):
             'adoptionBasis': 'inferred after native read-in without a follows rework; not confirmed project acceptance',
             'losses': losses}
 
+    if adoption_basis is not None:
+        result['adoptionBasis'] = adoption_basis
+        result['adoptionEvidenceCoverage'] = dict(closedSupports=len(adoption_items),
+            evidenced=sum(x.get('adoptionEvidence',{}).get('state')=='evidenced' for x in adoption_items),
+            read=sum(x.get('adoptionEvidence',{}).get('state')=='read' for x in adoption_items),
+            inferred=sum(x.get('adoptionEvidence',{}).get('state')=='inferred' for x in adoption_items),
+            rework=sum(x['id'] in reworked for x in adoption_items),
+            unknown=len(adoption_items)-len(disposed), complete=adoption_complete,
+            meaning='requester integration references, not independent project acceptance')
+    if cost_basis is not None:
+        result['costBasis'] = cost_basis
+        result['unitTimeCost'] = dict(basis=cost_basis, unit='Agent-milliseconds', units=cost_rows,
+            completedUnits=len(completed_costs), observedCompletedMs=sum(x['observedMs'] for x in completed_costs),
+            meaning='full unit Session interval unions; incomplete totals are lower bounds, not money')
     if model == 'tq/2':
         result['taskParallelism'] = task_report
         result['redLines']['R6']['applicable'] = (
@@ -380,7 +431,7 @@ def score(facts):
         result['executionBasis'] = execution_basis
         result['acceptanceUnitBasis'] = facts.get('acceptanceUnitBasis')
         bases += [execution_basis]
-    bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis) if x is not None]
+    bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis,adoption_basis,cost_basis) if x is not None]
     if bases:
         result['measurementVersion'] = '+'.join([model]+bases)
         result['streakCompatibilityKey'] = result['measurementVersion']
