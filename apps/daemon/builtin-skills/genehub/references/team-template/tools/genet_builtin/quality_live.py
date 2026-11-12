@@ -5,7 +5,6 @@ Fresh complete native observations close an incident automatically; goal accepta
 """
 import hashlib
 from pathlib import Path
-from types import SimpleNamespace
 from .quality_score import canonical, number, score
 from . import quality
 
@@ -69,6 +68,13 @@ def same_occurrence(row, signal):
             and (row['rule']=='R6' or row.get('dueAtMs')==signal.get('dueAtMs')))
 
 
+def notification(row):
+    correction = (row.get('corrections') or [])[-1:]
+    component = correction[0]['attribution'] if correction else (row.get('attribution') or {}).get('component','unknown')
+    return {'target':'team' if component=='team' else 'platform-development',
+            'component':component, 'basis':'correction-note/1' if correction else 'automatic-attribution/1'}
+
+
 def advance(state, sample):
     """Shared production transition; supports a read-only chronological replay."""
     now = sample['asOfMs']
@@ -76,7 +82,7 @@ def advance(state, sample):
     if state.get('schema')!='team-quality-redline-state/1':raise ValueError('unknown redline state')
     if now < state.get('asOfMs',now):raise ValueError('redline samples must be chronological')
     state['asOfMs'] = now
-    new, escalated = [], []
+    new = []
     for signal in sample['redLines']:
         rule = signal['rule'];basis = signal['measurementVersion']
         key = identity([rule,signal['workItemId'],signal.get('reason'),
@@ -90,20 +96,15 @@ def advance(state, sample):
                 continue
             key=identity([key,closed['closedAtMs']])
         if row is None:
-            row = dict(signal,id=key,firstSeenAtMs=now,triageDueAtMs=now+900000,status='open')
+            row = dict(signal,id=key,firstSeenAtMs=now,status='open')
             if closed:row['previousClosedAtMs']=closed['closedAtMs']
             state['incidents'][key] = row;new.append(key)
         else:key=row['id']
         row['lastSeenAtMs'] = now
         if number(signal.get('resolvedAtMs')):
             row['symptomResolvedAtMs'] = max(row.get('symptomResolvedAtMs') or 0,signal['resolvedAtMs'])
-        if signal.get('officialHour'):
-            hour = signal['sourceWindowEndMs'];hour_key=rule+':'+basis
-            hours = state['hours'].setdefault(hour_key,[])
-            if hour not in hours:hours.append(hour);hours.sort();hours[:]=hours[-48:]
-            if hour-HOUR in hours and hour-HOUR>row.get('previousClosedAtMs',0) and not row.get('platformEscalation'):
-                row['platformEscalation'] = 'consecutive-hours';escalated.append(key)
-    # Historical hourly signals feed audit/escalation only. Closure needs the
+        row['notification'] = notification(row)
+    # Historical hourly signals feed audit only. Closure needs the
     # current complete native rule observation, never absence from a failed read.
     current = [x for x in sample['redLines'] if x.get('sourceWindowEndMs') == sample.get('windowEndMs')]
     for row in state['incidents'].values():
@@ -117,11 +118,7 @@ def advance(state, sample):
                    resolution={'basis':'native-hourly-facts/2', 'observedAtMs':now,
                                'nativeFactsSha256':sample.get('nativeFactsSha256'),
                                'ruleCoverageKnown':True})
-    for key,row in state['incidents'].items():
-        if (row['status']=='open' and (row.get('triage') or {}).get('attribution','unknown')=='unknown'
-                and now>=row['triageDueAtMs'] and not row.get('platformEscalation')):
-            row['platformEscalation']='triage-timeout';escalated.append(key)
-    return state,new,escalated
+    return state,new,[]
 
 
 def replay(value):
@@ -160,20 +157,27 @@ def _card_signals(root, started, now):
     return signals
 
 
-def platform_feedback(team, root, row):
-    if not row.get('platformEscalation') or row.get('feedbackId'):
-        return
-    from . import feedback
+def notify_team(team, root, row, facts):
+    """Platform redlines are already delivered in live-alerts; wake only Team work."""
+    route = notification(row);row['notification']=route
+    if route['target'] != 'team':return
     ident=row['id']
-    result=feedback.add(team,root,SimpleNamespace(kind='template',title='红线自动升级：'+row['rule'],
-        evidence=[row['evidence']['path']],ref=ident,fingerprint='quality-redline:'+ident,
-        workaround='红线已升级平台排查；具体根因以实例归因和原生证据为准',
-        request_id='redline-escalation.'+ident))
-    row['feedbackId']=result['id']
-    # One urgent redline note per episode; feedback is the platform's consumer.
-    # Do not generate another Team wake merely to repeat an escalation.
-    team.quality_events.emit(team,root,'redline-escalated',ident,rule=row['rule'],incidentId=ident,
-                             reason=row['platformEscalation'],feedbackId=result['id'])
+    context=canonical({k:row.get(k) for k in ('id','rule','workItemId','attribution','corrections','evidence')}).strip()
+    if not row.get('noteId'):
+        note,_=team.add_note(root,{'kind':'redline','from':'system:quality','text':'团队工作质量红线 '+row['rule'],
+            'quote':'按自动归因处理本队问题，下一张卡看结果；判断有误时可补更正备注。',
+            'context':context,'ref':row['evidence']['path']},'quality-redline',ident,'new')
+        row['noteId']=note
+    work=next((x for x in facts.get('workItems',[]) if x['id']==row['workItemId']),{})
+    task_id=work.get('taskId') or row['workItemId']
+    task=quality.read(Path(root)/'.genethub/team/tasks'/(task_id+'.json'),{})
+    owner=(task.get('owner') or {}).get('sessionId')
+    if owner and team.SESSION_ID.fullmatch(owner) and row.get('ownerNotified') != owner:
+        team.deliver_or_notice(root,owner,'report','system:quality',
+            '团队工作质量红线 '+row['rule']+'\n'+context,ref=row['evidence']['path'],
+            machine=(task.get('owner') or {}).get('machine'),
+            delivery_id='quality-redline.'+ident+'.'+owner)
+        row['ownerNotified']=owner
 
 
 def tick(team, root):
@@ -203,15 +207,12 @@ def tick(team, root):
                     resolvedAtMs=row['symptomResolvedAtMs'],repairAdoptionVerified=False)
                 row['resolutionRecorded']=True
             if row['status']!='open':continue
-            if not row.get('noteId'):
-                context=canonical({k:row.get(k) for k in ('id','rule','workItemId','attribution','evidence','triageDueAtMs')}).strip()
-                note,_=team.add_note(root,{'kind':'redline','from':'system:quality','text':'团队工作质量红线 '+row['rule'],
-                    'quote':row['rule']+'：15分钟内先判归因，平台原因留反馈，团队原因自主修正并复核。',
-                    'context':context,'ref':row['evidence']['path']},'quality-redline',ident,'new')
-                row['noteId']=note
-                team.quality_events.emit(team,root,'redline-opened',ident,rule=row['rule'],incidentId=ident,
-                                         workItemId=row['workItemId'],attribution=row['attribution'],evidence=row['evidence'])
-            platform_feedback(team,root,row)
+            if not row.get('openedRecorded'):
+                if not row.get('noteId'):  # Legacy Team notes already emitted this event.
+                    team.quality_events.emit(team,root,'redline-opened',ident,rule=row['rule'],incidentId=ident,
+                                             workItemId=row['workItemId'],attribution=row['attribution'],evidence=row['evidence'])
+                row['openedRecorded']=True
+            notify_team(team,root,row,facts)
         team.write_json(str(store/'redline-state.json'),state)
         # Current obligations plus unreadable unresolved instances remain live;
         # the immutable hourly cards never receive historical closure debt.
@@ -229,16 +230,15 @@ def triage(team, root, args):
     with team.inbox_lock(root,'quality-live',purpose='红线归因'):
         state=quality.read(store/'redline-state.json');row=state['incidents'][args.incident]
         evidence=str(args.evidence).strip()
-        if not evidence or len(evidence)>2048 or '\n' in evidence:raise ValueError('bounded triage evidence required')
+        if not evidence or len(evidence)>2048 or '\n' in evidence:raise ValueError('bounded correction evidence required')
         value={'attribution':args.attribution,'evidence':evidence}
-        old=row.get('triage')
-        if old and any(old.get(k)!=v for k,v in value.items()):raise ValueError('triage already recorded; preserve its original evidence')
-        row['triage']=old or dict(value,atMs=team.now_ms(),sessionId=__import__('os').environ.get('GENEHUB_SESSION_ID'))
-        if args.attribution in ('platform-template','kernel','provider'):
-            row.setdefault('platformEscalation','triaged-platform')
-            platform_feedback(team,root,row)
+        notes=row.setdefault('corrections',[])
+        if notes and all(notes[-1].get(k)==v for k,v in value.items()):return row
+        notes.append(dict(value,atMs=team.now_ms(),sessionId=__import__('os').environ.get('GENEHUB_SESSION_ID')))
+        row['notification']=notification(row)
         team.write_json(str(store/'redline-state.json'),state)
-        team.quality_events.emit(team,root,'redline-triaged',args.incident,incidentId=args.incident,**row['triage'])
+        team.quality_events.emit(team,root,'redline-attribution-corrected',args.incident+':'+str(len(notes)),
+                                 incidentId=args.incident,**notes[-1])
         return row
 
 
@@ -255,6 +255,6 @@ def briefing(root):
     value=current(root)
     return ['', '## 未关闭红线（按原生事实自动复核归档；未知保持未知）',
             '观测时间：'+str(value.get('asOfMs')),
-            *['- '+canonical({k:x.get(k) for k in ('id','rule','workItemId','attribution','evidence','triageDueAtMs','platformEscalation','triage')}).strip()
+            *['- '+canonical({k:x.get(k) for k in ('id','rule','workItemId','attribution','evidence','notification','corrections')}).strip()
               for x in value['redLines']],
             '未知：'+canonical(value['unknown']).strip()]

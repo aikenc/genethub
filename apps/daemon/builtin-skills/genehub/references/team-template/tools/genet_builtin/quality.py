@@ -800,7 +800,7 @@ def register(sub):
     c.add_argument('--snapshot',required=True)
     a.add_parser('history');a.add_parser('describe');a.add_parser('facts')
     c=a.add_parser('alerts',help='current open redlines or read-only external alert replay');c.add_argument('--snapshot')
-    c=a.add_parser('triage',help='record redline attribution without closing a repair');c.add_argument('incident')
+    c=a.add_parser('triage',help='optional correction note when automatic redline attribution is wrong');c.add_argument('incident')
     c.add_argument('--attribution',required=True,choices=['team','platform-template','kernel','provider','unknown'])
     c.add_argument('--evidence',required=True)
 
