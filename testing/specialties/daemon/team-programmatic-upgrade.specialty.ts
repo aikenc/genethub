@@ -4,6 +4,61 @@ import { join } from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
+  id: "specialty.daemon.team-upgrade-unrelated-history",
+  title: "An unrelated template history is one conflict across reflection-only commits",
+  oracle: "Real independent Git roots reproduce the DS/HY upgrade failure. The public upgrader preserves the source and reports conflict; subsequent memory and reflection-report commits keep the same failure generation and note count. A real tool change permits a fresh attempt without rewriting either history.",
+  catches: ["missing ancestor reported as test failure", "reflection report triggers another upgrade failure", "same failed cause repeatedly wakes reflection", "relevant source correction cannot retry"],
+  tags: ["core", "team-upgrade"], llm: { default: "none" },
+  requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
+  productInterfaces: ["tools/run.py upgrade", "tools/run.py snapshot", "filesystem", "git"],
+  surfaces: ["daemon", "team-template", "filesystem"],
+  resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 }, expectedDurationMs: 10000, timeoutMs: 90000,
+}, async t => {
+  const r = await openTeam(t, "upgrade-unrelated-history");
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", r.root, "-c", "user.name=Upgrade Case", "-c", "user.email=upgrade-case@example.invalid", ...args], { encoding: "utf8", timeout: 10000 });
+    t.assertions.assert(result.status === 0, result.stderr); return result.stdout.trim();
+  };
+  const platform = join(t.env.root, "platform-template"); cpSync(r.template, platform, { recursive: true });
+  const status = () => JSON.parse(r.ok(["upgrade", "--status"], { TEAM_TEMPLATE: platform }));
+  const settle = async () => {
+    let value: any;
+    await t.tools.waitUntil(async () => { value = status(); return !value.workerPid && value.status !== "waiting-safe-point"; }, 30000);
+    return value;
+  };
+  const notes = () => readdirSync(r.state("notes")).filter(x => x.endsWith(".json")).length;
+  try {
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    const originalHead = git("rev-parse", "HEAD"), originalTool = readFileSync(join(r.root, "tools/run.py"));
+    // Case-owned real Git history, matching the missing-ancestor relation;
+    // no fabricated merge-base result or production function replacement.
+    const orphan = git("commit-tree", "platform^{tree}", "-m", "fixture independent platform root");
+    git("update-ref", "refs/heads/platform", orphan);
+    mkdirSync(join(platform, "docs"), { recursive: true }); writeFileSync(join(platform, "docs/new-platform.txt"), "latest\n");
+    r.ok(["upgrade"], { TEAM_TEMPLATE: platform });
+    const failed = await settle(), noteCount = notes();
+    t.assertions.assert(failed.status === "conflict" && failed.reason.includes("no-common-ancestor")
+      && git("rev-parse", "HEAD") === originalHead && readFileSync(join(r.root, "tools/run.py")).equals(originalTool),
+      "unrelated history was changed or misclassified as a failed regression: " + JSON.stringify(failed));
+    writeFileSync(join(r.root, "memory.md"), readFileSync(join(r.root, "memory.md"), "utf8") + "\nRecorded the existing conflict.\n");
+    mkdirSync(join(r.root, "docs/reflection"), { recursive: true });
+    writeFileSync(join(r.root, "docs/reflection/existing-conflict.md"), "Same unresolved ancestry, no source correction.\n");
+    mkdirSync(join(r.root, "spaces/team-reflect"), { recursive: true });
+    writeFileSync(join(r.root, "spaces/team-reflect/index.md"), "Recorded the same unresolved conflict.\n");
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    r.ok(["upgrade"], { TEAM_TEMPLATE: platform }); const same = await settle();
+    t.assertions.assert(same.generation === failed.generation && notes() === noteCount,
+      "reflection-only commit created another upgrade generation or note");
+    writeFileSync(join(r.root, "tools/local-upgrade-check.py"), "# A real source correction warrants revalidation.\n");
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    r.ok(["upgrade"], { TEAM_TEMPLATE: platform }); const retried = await settle();
+    t.assertions.assert(retried.generation !== failed.generation && retried.status === "conflict"
+      && git("rev-parse", "platform~1") === orphan, "relevant source change was ignored or history was replaced");
+  } finally { await r.dispose(); }
+});
+
+defineSpecialty({
   id: "specialty.daemon.team-programmatic-upgrade",
   title: "Automatic upgrade validates one latest Git candidate, preserves local patches and wakes only on actionable failure",
   oracle: "Actual Team CLI upgrades a case-owned source from a real Git platform baseline after nine available template changes. Only the latest content reaches the source, with a verified portable output, no success reflection, and no invented release label for an explicit template override. A dirty source waits unchanged; a committed builtin patch overlapping a platform change produces a conflict and one real native reflection wake. No live Team or project is changed.",
@@ -206,5 +261,10 @@ defineSpecialty({
     const again = JSON.parse(r.ok(["upgrade", "--status"], { TEAM_TEMPLATE: platform }));
     t.assertions.assert(again.status === "test-failure" && !again.workerPid && JSON.stringify(again) === failure,
       "unchanged failing candidate started another worker or rewrote its durable result");
+    writeFileSync(join(r.root, "memory.md"), readFileSync(join(r.root, "memory.md"), "utf8") + "\nRecorded the rejected candidate.\n");
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform }); r.ok(["upgrade"], { TEAM_TEMPLATE: platform });
+    const afterMemory = JSON.parse(r.ok(["upgrade", "--status"], { TEAM_TEMPLATE: platform }));
+    t.assertions.assert(afterMemory.generation === again.generation && !afterMemory.workerPid,
+      "recording a real regression failure reran the same candidate");
   } finally { await r.dispose(); }
 });
