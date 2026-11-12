@@ -5047,6 +5047,47 @@ def is_builtin_admin(root):
     return os.path.basename(root) == "admin" and bool({"team-admin", "expert-admin"} & set(info.get("skills") or []))
 
 
+def observe_unfinished_task_sessions(root):
+    """Result subscription lifetime does not end a business obligation.
+
+    Reconcile observes pending work. Continue reading real native states for
+    unfinished Owners/supports whose failure notification was archived, or
+    whose explicit resume receipt is still uncertain. Never resume, reopen a
+    result subscription, or fill an old sampling gap.
+    """
+    deadline = time.monotonic() + 8
+    for task in team_tasks.records(sys.modules[__name__], root, 'tasks'):
+        people = ([] if task.get('finished') else [task.get('owner') or {}])
+        people += [p for p in task.get('collaborators', []) if not p.get('finished')]
+        for person in people:
+            if time.monotonic() >= deadline:
+                return  # already sampled identities are skipped on the next tick
+            sid = person.get('sessionId')
+            if not SESSION_ID.fullmatch(str(sid)):
+                continue
+            pending = read_dispatch_record(state_dir(root, 'pending', sid + '.json'))
+            if pending and not pending.get('resumeAwaitingReceipt'):
+                continue
+            at = now_ms()
+            event_id = hashlib.sha256(('session-observed:' + sid + ':' + str(at // 60000)).encode()).hexdigest()
+            if (os.path.isfile(state_dir(root, 'events', 'seen', event_id))
+                    or os.path.isfile(state_dir(root, 'events', 'spool', event_id + '.json'))):
+                continue
+            try:
+                summary = session_summary(sid, person.get('machine'), fresh=True)
+                inputs = summary.get('inputSummary') or {}
+                requests = (summary.get('interactionSummary') or {}).get('requests')
+                if type(inputs.get('paused')) is not bool or not isinstance(requests, list):
+                    continue  # missing native fields remain unknown
+                at = now_ms()
+                quality_events.emit(sys.modules[__name__], root, 'session-observed', sid + ':' + str(at // 60000),
+                                    at_ms=at, taskId=task['taskId'], operationId=person.get('operationId'), sessionId=sid,
+                                    status=summary['status'], paused=inputs['paused'], waitingForUser=bool(requests),
+                                    pendingMessageIds=inputs.get('pendingMessageIds') or [])
+            except (ExpertError, OSError, subprocess.TimeoutExpired):
+                continue  # absence of a real sample cannot become healthy coverage
+
+
 def cmd_hook(_args):
     global SESSIONS_TTL
     SESSIONS_TTL = HOOK_SESSIONS_TTL  # 一轮钩子共用一份 session 快照；非钩子命令仍用 2s
@@ -5080,6 +5121,8 @@ def cmd_hook(_args):
             pass
         team_tasks.reconcile_withdrawals(sys.modules[__name__], root)
         reconcile(root, name, mine)
+        if not builtin_admin:
+            observe_unfinished_task_sessions(root)
         team_tasks.reconcile_resources(sys.modules[__name__], root)
         team_tasks.publish(sys.modules[__name__], root)
         if not builtin_admin:
