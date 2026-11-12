@@ -9,6 +9,7 @@ import tempfile
 import sys
 
 from .quality_score import canonical, number, score
+from .task_hours import BASIS as R6_BASIS, policy as r6_policy
 
 HOUR = 3600000
 
@@ -852,7 +853,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                               'backgroundBasis':'registered-native-process-runtime/1',
                               'backgroundRunsAppliedToScore':False,
                               'note':'Measurement foundation; final versioned scoring model will consume timing segments and background runs'},
-            'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
+            'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','r6Basis':R6_BASIS,'team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
             'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},'redlineLifecycle':lifecycle,
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],
             'goalBasis':{'kind':'root-front-task','workspaceIds':sorted(root_workspaces),'taskIds':sorted(goal_tasks)},
@@ -903,7 +904,7 @@ def _command(team,args):
         print(canonical(view(read(Path(args.snapshot)))),end='');return
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
-        print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':{'basis':'task-agent-hours/1','minimumTotalEffectiveMs':1800000,'minimumHourEffectiveMs':900000,'required':2},'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
+        print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':r6_policy(),'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
                          'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour native facts only; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
     if action=='history':
         latest={}

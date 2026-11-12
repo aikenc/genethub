@@ -1,6 +1,17 @@
 """Task-tree Agent time over effective wall time, independent of conclusions."""
 import math
 
+LEGACY_BASIS = 'task-agent-hours/1'
+BASIS = 'task-agent-hours/2'
+TIERS = ((1800000, 0.75), (3600000, 1.5), (7200000, 2))
+
+
+def policy():
+    return dict(basis=BASIS, minimumTotalEffectiveMs=1800000,
+                minimumHourEffectiveMs=900000,
+                tiers=[dict(minimumTotalEffectiveMs=minimum, required=required)
+                       for minimum, required in TIERS])
+
 
 def numeric(value):
     return type(value) in (int, float) and math.isfinite(value)
@@ -51,7 +62,9 @@ def length(rows):
     return sum(b-a for a, b in rows)
 
 
-def evaluate(trees, start, end):
+def evaluate(trees, start, end, basis=LEGACY_BASIS):
+    if basis not in (LEGACY_BASIS, BASIS):
+        raise ValueError('unsupported task-hour basis')
     if not isinstance(trees, list):
         raise ValueError('task trees are required for tq/2')
     result, task_ids = [], set()
@@ -89,11 +102,18 @@ def evaluate(trees, start, end):
             agent_ms += sum(length(clipped(runs, a, b)) for a, b in member_wall)
         low = agent_ms/wall_ms if wall_ms else None
         high = low+missing_ms/wall_ms if wall_ms else None
+        required = 2
+        if basis == BASIS:
+            required = next((threshold for minimum, threshold in reversed(TIERS)
+                             if total_ms >= minimum), None)
         eligible = total_ms >= 1800000 and wall_ms >= 900000
         state = ('not-applicable' if not eligible else
-                 'pass' if low >= 2 else 'fail' if high < 2 else 'unknown')
-        result.append(dict(taskId=task_id, totalEffectiveMs=total_ms,
+                 'pass' if low >= required else 'fail' if high < required else 'unknown')
+        row = dict(taskId=task_id, totalEffectiveMs=total_ms,
                            hourEffectiveMs=wall_ms, agentMs=agent_ms,
                            low=low, high=high, missingSessionIds=sorted(missing),
-                           eligible=eligible, state=state))
+                           eligible=eligible, state=state)
+        if basis == BASIS:
+            row['required'] = required
+        result.append(row)
     return result

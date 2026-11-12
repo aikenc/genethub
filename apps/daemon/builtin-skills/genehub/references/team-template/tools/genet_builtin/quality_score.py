@@ -227,12 +227,13 @@ def score(facts):
 
     task_report = None
     if model == 'tq/2':
-        from .task_hours import evaluate
-        task_report = evaluate(facts.get('taskTrees'), start, end)
+        from .task_hours import evaluate, BASIS, LEGACY_BASIS
+        r6_basis = facts.get('r6Basis', LEGACY_BASIS)
+        task_report = evaluate(facts.get('taskTrees'), start, end, basis=r6_basis)
         eligible = [x for x in task_report if x['eligible']]
         failed = [x for x in eligible if x['state']=='fail']
         instances['R6'] = [dict(taskId=x['taskId'], effectiveParallelism=x['low'],
-                               possibleParallelism=x['high'], required=2,
+                               possibleParallelism=x['high'], required=x.get('required', 2),
                                hourEffectiveMs=x['hourEffectiveMs']) for x in failed]
         r6_known = bool(failed) or (facts.get('taskTreesSourceComplete') is True
                                    and all(x['state']!='unknown' for x in eligible))
@@ -354,15 +355,17 @@ def score(facts):
         result['taskParallelism'] = task_report
         result['redLines']['R6']['applicable'] = (
             bool(eligible) if facts.get('taskTreesSourceComplete') is True or failed else None)
-        result['redLines']['R6']['basis'] = 'task-agent-hours/1'
+        result['redLines']['R6']['basis'] = r6_basis
         result['effectiveInFlight']['basis'] = 'eligible-task-weighted-summary/1'
         result['streakCompatibilityKey'] = model
     if resource_basis is not None:result['resourceObligationBasis'] = resource_basis
     if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
     if audience_basis is not None:result['resultAudienceBasis'] = audience_basis
     if idle_basis is not None:result['idleObservationBasis'] = idle_basis
-    if any(x is not None for x in (resource_basis,coverage_basis,audience_basis,idle_basis)):
-        result['measurementVersion'] = '+'.join([model]+[x for x in (resource_basis,coverage_basis,audience_basis,idle_basis) if x is not None])
+    bases = ([r6_basis] if model == 'tq/2' and r6_basis == BASIS else [])
+    bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis) if x is not None]
+    if bases:
+        result['measurementVersion'] = '+'.join([model]+bases)
         result['streakCompatibilityKey'] = result['measurementVersion']
     if 'warnings' in facts:
         result['warnings']=facts['warnings']
