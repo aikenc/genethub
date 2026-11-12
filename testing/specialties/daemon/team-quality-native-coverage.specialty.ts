@@ -72,7 +72,7 @@ defineSpecialty({
       "new evidence coverage basis or preserved failure gap missing");
     const file=join(r.root,"external-coverage-facts.json");writeFileSync(file,JSON.stringify(facts));
     const card=JSON.parse(r.ok(["quality","card","--snapshot",file]));
-    const coverageVersion="tq/2+dispatch-resource-obligation/2+per-source-failure-domain/1+source-result-generation/1+native-minute-freshness/1";
+    const coverageVersion="tq/2+dispatch-resource-obligation/2+per-source-failure-domain/1+source-result-generation/1+native-minute-freshness/2";
     t.assertions.assert(card.measurementVersion===coverageVersion+"+native-hourly-facts/2"
       &&card.streakCompatibilityKey===card.measurementVersion,
       "current native coverage lost its hourly-native measurement policy");
