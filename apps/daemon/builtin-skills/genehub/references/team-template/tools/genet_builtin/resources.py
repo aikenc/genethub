@@ -21,6 +21,12 @@ def prepare(t, root, intent, req, path):
     context = runtime.for_operation(intent['operationId'])
     if req.machine and type(runtime.resource) is not ResourcePolicy:
         raise TeamConfigurationError("custom resource preparation must run in its installed execution Team; no source-side remote path guesses")
+    if req.machine:
+        # Executor paths belong to its OS and exact receive receipt. Never
+        # resolve or claim them on the source, even on a same-host test setup.
+        intent.setdefault('resourcePlan', None)
+        t.write_json(path, intent)
+        return None
     if 'resourcePlan' not in intent:
         plan = runtime.resource.plan_resource(context, req)
         if plan is not None and not isinstance(plan, ResourcePlan):
