@@ -1,0 +1,69 @@
+{
+  "schema": "historical-platform-upgrade-notifications/1",
+  "scope": "Frozen projection of nine real HY notifications from 2026-11-11 23:15 through 2026-11-12 06:44. Only original id/at/kind/from/text are retained. Restored test inputs are not a live notification, native receipt, original template-content replay or adoption claim.",
+  "notes": [
+    {
+      "id": "n9b6d75e42b2d",
+      "at": 1794410135353,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 7888cdfc90610ed5"
+    },
+    {
+      "id": "n0703237394b8",
+      "at": 1794411565112,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template b9ba7efe7aadef38"
+    },
+    {
+      "id": "n9704bbd13092",
+      "at": 1794413791375,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template ceba63c49f57e2ed"
+    },
+    {
+      "id": "n8bcaab10c6b0",
+      "at": 1794417384598,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template dd568562eaa173fc"
+    },
+    {
+      "id": "n4d9c822a7710",
+      "at": 1794419293688,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 571de8663af5dcb8"
+    },
+    {
+      "id": "nd1d19e39e582",
+      "at": 1794421504006,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 21bc3a8041c70882"
+    },
+    {
+      "id": "n91eb2d2fcec2",
+      "at": 1794424812411,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 8e8c07f2c9dd71f0"
+    },
+    {
+      "id": "n21d486f8fd29",
+      "at": 1794426839415,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 4afc045d248cdf96"
+    },
+    {
+      "id": "nbbcfcc4c9178",
+      "at": 1794432296651,
+      "kind": "upgrade",
+      "from": "platform",
+      "text": "template 5e0e2d7b7ff5f525"
+    }
+  ]
+}
