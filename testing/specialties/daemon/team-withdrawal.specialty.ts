@@ -147,12 +147,9 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
     const alerts = JSON.parse(r.ok(["quality", "alerts"]));
     const incident = alerts.redLines.find((x: any) => x.rule === "R1" && x.workItemId === operation);
     t.assertions.assert(incident, "actual overdue restored intent did not produce a native incident");
-    writeFileSync(join(r.root, "repair.md"), "Repair still pending; native receiver fence not yet observed");
-    writeFileSync(join(r.root, "adoption.md"), "Unverified update must not clear a live obligation");
-    const resolveArgs = ["quality", "resolve", incident.id, "--repair-evidence", "repair.md", "--adoption-evidence", "adoption.md"];
-    await cli(owner, resolveArgs, 1);
+    await cli(owner, ["quality", "resolve", incident.id, "--repair-evidence", "unused.md", "--adoption-evidence", "unused.md"], 1);
     t.assertions.assert(!JSON.parse(readFileSync(r.state("quality", "redline-state.json"), "utf8")).measurementEpochs?.length,
-      "an unresolved obligation started a new measurement window");
+      "a manual command created a new metric window");
     await cli(owner, ["task", "finish", started.taskId, "--outcome", "success", "Must not hide the unconfirmed preparation"], 1);
     await cli(owner, ["task", "finish", started.taskId, "--outcome", "failed", "Unconfirmed preparation prevented acceptance; original work retained"]);
     tick = await tickOnce();
@@ -166,27 +163,20 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
     const original = { id: operation, workspaceId: qa.id, role: "qa", desc: "old rejected support", text: "Do not start after parent conclusion", tier: null, model: null, media: null, prepareOnly: true, returnTo };
     const late = r.command(["receive", JSON.stringify(original)]);
     t.assertions.assert(late.code !== 0 && lastJson(late.out).error?.state === "没有创建或激活会话", "late original request restarted after conclusion");
-    writeFileSync(join(r.root, "repair.md"), "Actual public timer obtained receiver withdrawal: "+JSON.stringify(intent.withdrawReceipt));
-    writeFileSync(join(r.root, "adoption.md"), "Native parent delivered; late prepare remains fenced; original operation "+operation);
-    await cli(owner, ["quality", "resolve", incident.id, "--repair-evidence", "../outside.md", "--adoption-evidence", "adoption.md"], 1);
-    const beforeResolve = Date.now();
-    const closed = await cli(owner, resolveArgs);
-    t.assertions.assert(closed.status === "closed" && closed.closedAtMs >= beforeResolve && closed.resolution.nativeFactsSha256,
-      "verified native repair/adoption did not close with current evidence");
-    const statePath = r.state("quality", "redline-state.json"), closedState = JSON.parse(readFileSync(statePath, "utf8"));
-    t.assertions.assert(closedState.measurementEpochs?.length === 1 && closedState.measurementEpochs[0].atMs === closed.closedAtMs,
-      "new measurement epoch did not start at the actual last verified closure");
+    const statePath = r.state("quality", "redline-state.json");
+    const closedState = JSON.parse(readFileSync(statePath, "utf8")), closed = closedState.incidents[incident.id];
+    t.assertions.assert(closed.status === "closed" && closed.resolution?.basis === "native-hourly-facts/2"
+      && closed.resolution.nativeFactsSha256 && existsSync(r.state("quality", "incidents", incident.id+".closed.json")),
+      "the actual receiver fence did not automatically archive its incident in the same tick");
+    t.assertions.assert(!closedState.measurementEpochs?.length, "automatic native closure started a new metric window");
     const facts=await cli(owner,["quality","facts"]);
     const tree=facts.taskTrees.find((x: any)=>x.taskId===survivingTask.taskId);
-    t.assertions.assert(facts.measurementWindow.startAtMs===closed.closedAtMs
+    t.assertions.assert(facts.measurementWindow.startAtMs===facts.window.endAtMs-24*3600000
       && tree?.sessions.some((x: any)=>x.sessionId===priorChild.collaborator && x.readable===true),
-      "moving the metric cutoff omitted a readable completed member of a still-active native task tree");
-    await cli(owner, resolveArgs);
-    t.assertions.assert(JSON.parse(readFileSync(statePath, "utf8")).measurementEpochs.length === 1,
-      "idempotent resolution reset the measurement window again");
+      "native closure discarded rolling samples or a readable completed member of an active task");
     tick = await tickOnce();t.assertions.assert(tick.code === 0, tick.out+tick.err);
     const after = JSON.parse(r.ok(["quality", "alerts"]));
     t.assertions.assert(!after.redLines.some((x: any) => x.id === incident.id), "old resolved occurrence reopened without a new native breach");
-    t.note("Original restoration/fence boundaries plus actual Agent-bound resolve rejects open/outside evidence; verified receiver adoption starts one epoch without rewriting history. Not a live experimental Team intervention.");
+    t.note("Actual receiver fence automatically archives the incident on the next tick, retains attribution/evidence and rolling24h samples with no manual resolve or epoch. Original live intents, result identities and late preparation fence preserved. Isolated SDK canary, not live Team intervention.");
   } finally { await dispose(); relay.stop(); await hub.stop(); }
 });

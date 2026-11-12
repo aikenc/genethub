@@ -4,7 +4,7 @@ import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-native-horizon",
-  title: "A measurement epoch does not truncate the native activation or execution of a continuing Task",
+  title: "Legacy stored epochs cannot shorten rolling24h capture or continuing Task native history",
   oracle: "Real SDK Task and three genuine Owner rounds straddle a labelled case-owned measurement epoch. A transparent native CLI forwarder requests one-row round pages without changing responses. Diagnostic collection must preserve the original activation and earliest Task work despite the later metric horizon; actual native timestamps, pause, receipts and source ledgers remain unchanged.",
   catches: ["rolling metric cutoff hides an active Task's first native Round", "new measurement epoch loses ongoing Task work", "readable native history is silently truncated", "history cache certifies an unobserved earlier range"],
   tags: ["core", "team-quality"], llm: { default: "none" },
@@ -46,7 +46,7 @@ defineSpecialty({
     writeFileSync(log, "");
     writeFileSync(proxy, `#!${process.env.GENEHUB_PYTHON}\nimport os,sys,json\na=sys.argv[1:]\nif a[:2]==['session','rounds'] and '--limit' in a:a[a.index('--limit')+1]='1'\nwith open(${JSON.stringify(log)},'a') as f:f.write(json.dumps(a)+'\\n')\nos.execv(${JSON.stringify(r.daemon.genet)},[${JSON.stringify(r.daemon.genet)}]+a)\n`); chmodSync(proxy, 0o700);
     const facts = JSON.parse(r.ok(["quality", "facts"], { GENEHUB_CLI: proxy }));
-    t.assertions.assert(facts.captureKind === "diagnostic" && facts.measurementWindow.startAtMs === epoch && facts.issues.length === 0,
+    t.assertions.assert(facts.captureKind === "diagnostic" && facts.measurementWindow.startAtMs === facts.window.endAtMs - 24*3600000 && facts.issues.length === 0,
       "measurement fixture became an official card or native collection failed");
     const work = facts.workItems.find((x: any) => x.taskId === task.taskId && x.sessionId === owner);
     const tree = facts.taskTrees.find((x: any) => x.taskId === task.taskId);

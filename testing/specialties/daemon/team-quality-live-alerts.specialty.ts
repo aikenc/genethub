@@ -59,6 +59,14 @@ defineSpecialty({
   second.resourceObligationBasis = "dispatch-resource-obligation/2";
   const different = replay([first, second]);
   t.assertions.assert(!Object.values(different.state.incidents).some((x: any) => x.platformEscalation === "consecutive-hours"), "different measurement versions stitched consecutive hours");
+  const clear = facts(ready+2*h), auto = replay([red,unknown,clear]);
+  t.assertions.assert(auto.state.incidents[id].status === "closed" && auto.state.incidents[id].resolution.basis === "native-hourly-facts/2"
+    && auto.state.incidents[id].resolution.nativeFactsSha256 && !auto.state.measurementEpochs?.length,
+    "a complete clean native observation did not close and retain evidence automatically, or opened a measurement epoch");
+  const recurred = replay([red,clear,delivery(ready+3*h)]);
+  t.assertions.assert(recurred.steps[2].new.length===1 && recurred.steps[2].new[0]!==id
+    && Object.values(recurred.state.incidents).some((x:any)=>x.status==="open"),
+    "a genuinely recurring native breach was suppressed by its archived instance");
   const quiet = replay([facts(base+22*h)]);
   t.assertions.assert(!Object.keys(quiet.state.incidents).length && !existsSync(join(output, ".genethub/team/quality/live-alerts.json")), "quiet external replay created an incident or wrote native Team state");
   t.note("Frozen external timestamp algebra, not historical live Team execution or official score; no internal product import/mocking.");

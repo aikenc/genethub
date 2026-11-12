@@ -5,8 +5,8 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-epoch",
-  title: "Versioned frozen cards disqualify durable redlines and exclude pre-adoption samples",
-  oracle: "Independent frozen work yields a formal card; an unresolved incident disqualifies it across an otherwise quiet hour. Moving the measurement horizon to actual adoption excludes twenty old conclusions, explicitly re-measures, and new sufficient conclusions qualify under a distinct epoch key. Legacy facts retain the old basis.",
+  title: "Versioned native-hour cards keep rolling samples and archive historical redlines without manual resolution",
+  oracle: "The new hourly-native policy never imports old open incident penalties or legacy epoch cutoffs. A real breach in an hour disqualifies that hour, a continued breach still triggers, and a later resolved hour keeps its rolling24h conclusions. Unknown stays unknown. Frozen old policy facts still replay by their original basis.",
   catches: ["durable redline disappears with the hour", "publication silently clears history", "pre-repair samples enter the new epoch", "insufficient new sample is called formal", "different epochs stitch a streak"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["spacebuilder.py build", "tools/run.py quality card --snapshot", "tools/run.py quality alerts --snapshot"],
@@ -55,5 +55,27 @@ defineSpecialty({
   const next=command("card",{...fresh,workItems:items(end-20*60000),redlineLifecycle:{...policy,epoch:{...epoch,id:"independent-adoption-b"}}});
   t.assertions.assert(next.streakCompatibilityKey!==sufficient.streakCompatibilityKey && legacy.streakCompatibilityKey!==sufficient.streakCompatibilityKey,
     "different adoption epochs or legacy basis could form one streak");
-  t.note("Independent external arithmetic only, not actual native capture or experimental quality80 attainment. Native closure/fencing is exercised separately.");
+  const nativePolicy = {...policy, policy: "native-hourly-facts/2", open: [incident], epoch};
+  const hourly = {...facts, redlineLifecycle: nativePolicy};
+  const clean = command("card", hourly);
+  t.assertions.assert(clean.formal && clean.score >= 80 && !clean.redLines.R3.triggered && !clean.disqualified
+    && clean.coverage.closedWorkItems === 20 && clean.streakCompatibilityKey.endsWith("native-hourly-facts/2")
+    && !clean.streakCompatibilityKey.includes(epoch.id), "old incident or epoch penalized a clean new hour or discarded rolling samples");
+  const unresolved = {...facts.workItems[0], resourceRequired: true, resourceHeld: true};
+  const held = command("card", {...hourly, workItems:[unresolved,...facts.workItems.slice(1)]});
+  t.assertions.assert(held.redLines.R5.triggered && held.disqualified && held.penalty === 50,
+    "a still-held resource disappeared with the manual closure policy");
+  const later = {...hourly, window:{startAtMs:end,endAtMs:end+h}, capturedAtMs:end+h,
+    measurementWindow:{startAtMs:end-23*h,endAtMs:end+h}};
+  const stillHeld = command("card", {...later,workItems:[unresolved,...facts.workItems.slice(1)]});
+  t.assertions.assert(stillHeld.redLines.R5.triggered && stillHeld.disqualified, "a continued actual breach did not trigger naturally next hour");
+  const released = command("card", {...later,workItems:[{...unresolved,resourceHeld:false,releasedAtMs:end-1000},...facts.workItems.slice(1)]});
+  t.assertions.assert(!released.redLines.R5.triggered && !released.disqualified && released.coverage.closedWorkItems === 20,
+    "a resource released before this hour kept a historical penalty or reset rolling samples");
+  const noRead = command("card", {...hourly,coverage:{...hourly.coverage,deliveries:false}});
+  t.assertions.assert(noRead.redLines.R3.triggered === null && !noRead.formal,
+    "unreadable current evidence was replaced by old debt or a fabricated pass");
+  t.assertions.assert(command("card",facts).score===legacy.score && command("card",{...facts,redlineLifecycle:{...policy,open:[incident]}}).score===debt.score,
+    "new policy rewrote original legacy arithmetic");
+  t.note("Independent frozen arithmetic only; new policy and original legacy replay both exercised. Actual automatic closure is a separate native SDK withdrawal/tick canary, not an official quality80 claim.");
 });
