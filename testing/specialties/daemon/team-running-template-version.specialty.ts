@@ -1,7 +1,49 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
+
+defineSpecialty({
+  id: "specialty.daemon.team-running-template-version-portable",
+  title: "A standard source-free Team artifact retains the actual builtin package identity",
+  oracle: "The real shipped Builder creates a portable Team. An independent Node digest records source builtin bytes, including a plain-text Skill reference; removing the case-owned source leaves the public quality facts identity exact and known, without a fabricated release label. Changing that packaged reference fails the actual artifact integrity verifier.",
+  catches: ["portable output omits root builtin Skills", "runtime identity depends on original source directory", "non-Markdown Skill reference dropped", "installed platform label invented for a portable artifact", "packaged Skill mutation escapes receipt integrity"],
+  tags: ["core", "team-quality", "team-classes"], llm: { default: "none" },
+  productInterfaces: ["spacebuilder.py build", "spacebuilder.py verify --artifacts-only", "tools/run.py quality facts", "filesystem"],
+  surfaces: ["daemon", "team-template", "spacebuilder", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
+  requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
+  resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 }, expectedDurationMs: 15000, timeoutMs: 90000,
+}, async t => {
+  const reference = "skills/genet_builtin/team-core/references/portable-version-fixture.txt";
+  const r = await openTeam(t, "portable-template-version", [], { portable: true, configureSource(root) {
+    writeFileSync(join(root, reference), "Case-owned builtin Skill reference; retain exact runtime bytes.\n");
+  } });
+  try {
+    const files = [join(r.source, "tools/run.py")];
+    const walk = (base: string) => {
+      for (const entry of readdirSync(base, { withFileTypes: true })) {
+        if (entry.name === "__pycache__" || /\.py[co]$/.test(entry.name)) continue;
+        const path = join(base, entry.name); if (entry.isDirectory()) walk(path); else if (entry.isFile()) files.push(path);
+      }
+    };
+    walk(join(r.source, "tools/genet_builtin")); walk(join(r.source, "skills/genet_builtin"));
+    const hash = createHash("sha256");
+    for (const path of files.sort()) hash.update(relative(r.source, path).replaceAll("\\", "/") + "\0").update(readFileSync(path)).update("\0");
+    const expected = "sha256:" + hash.digest("hex");
+    rmSync(r.source, { recursive: true });
+    const first = JSON.parse(r.ok(["quality", "facts"])).versions.teamTemplate;
+    t.assertions.assert(first.id === expected && first.status === "content-only" && first.releaseVersion === null
+      && existsSync(join(r.root, reference)), "source-free portable artifact lost its actual builtin identity: " + JSON.stringify(first));
+    const verify = () => spawnSync(process.env.GENEHUB_PYTHON!, [r.builder, "verify", r.root, "--artifacts-only", "--format", "json"],
+      { env: r.env, encoding: "utf8", timeout: 30000 });
+    const intact = verify(); t.assertions.assert(intact.status === 0, intact.stdout + intact.stderr);
+    const target = join(r.root, reference); writeFileSync(target, readFileSync(target, "utf8") + "Changed after packaging.\n");
+    const changed = verify();
+    t.assertions.assert(changed.status !== 0 && (changed.stdout + changed.stderr).includes("SB017"),
+      "changed packaged builtin Skill escaped actual artifact integrity checks");
+  } finally { await r.dispose(); }
+});
 
 defineSpecialty({
   id: "specialty.daemon.team-running-template-version",
