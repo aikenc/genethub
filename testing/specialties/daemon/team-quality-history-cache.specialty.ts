@@ -4,9 +4,9 @@ import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-history-cache",
-  title: "Complete unchanged native history survives a narrower live-cache checkpoint without repeated full reads",
-  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. A restored cache-only requested horizon cannot force complete stable histories to be re-inspected; legacy caches without completeness proof and new genuine inputs must be fetched again. No native Session, timestamp, result or live Team ledger is fabricated.",
-  catches: ["live cache narrows the hourly history horizon", "closed histories exhaust the next capture budget", "legacy incomplete history is trusted", "new native inputs reuse stale history"],
+  title: "Complete unchanged native history survives horizon and guest-patch checkpoints without repeated full reads",
+  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
+  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.inspect", "session.rounds", "session.narrative"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -39,8 +39,26 @@ defineSpecialty({
     narrow();writeFileSync(log,"");const second=facts();
     t.assertions.assert(second.issues.length===0&&heavy().length===0&&calls().some(x=>x[0]==="session"&&x[1]==="get"&&x[2]===owner),
       "unchanged complete native history was reread after a narrower live checkpoint, consuming the hourly budget");
+    const ownerCache=readdirSync(native).map(f=>join(native,f)).find(p=>JSON.parse(readFileSync(p,"utf8")).sessionId===owner);
+    if(!ownerCache)throw Error("actual Owner cache missing");
+    const checkpoint=JSON.parse(readFileSync(ownerCache,"utf8"));
+    t.assertions.assert(checkpoint.historyCoverage?.roundsComplete===true&&checkpoint.historyCoverage?.narrativeComplete===true,"actual Owner history must be fully paged");
+    // Explicit cache metadata fixture, not a fabricated native upgrade. All
+    // original rounds, inputs, timestamps and machine identity stay unchanged.
+    const oldPatch={...checkpoint,kernel:{...checkpoint.kernel,version:"prior-guest-patch-checkpoint"}};
+    writeFileSync(ownerCache,JSON.stringify(oldPatch));writeFileSync(log,"");const patched=facts();
+    t.assertions.assert(patched.issues.length===0&&!heavy().some(x=>x[2]===owner)&&calls().some(x=>x[0]==="session"&&x[1]==="get"&&x[2]===owner),
+      "guest patch invalidated unchanged complete native history and forced full reads");
+    t.assertions.assert(JSON.stringify(patched.turns.filter((x:any)=>x.sessionId===owner))===JSON.stringify(second.turns.filter((x:any)=>x.sessionId===owner)),"cache reuse changed genuine native turns");
+    for(const machineId of ["foreign-machine-checkpoint",null]){
+      writeFileSync(ownerCache,JSON.stringify({...oldPatch,kernel:{...oldPatch.kernel,machineId}}));writeFileSync(log,"");const foreign=facts();
+      t.assertions.assert(foreign.issues.length===0&&heavy().some(x=>x[2]===owner),"foreign or missing machine identity reused native history");
+    }
+    writeFileSync(ownerCache,JSON.stringify({...oldPatch,historyCoverage:{...oldPatch.historyCoverage,narrativeComplete:false}}));writeFileSync(log,"");const partial=facts();
+    t.assertions.assert(partial.issues.length===0&&heavy().some(x=>x[2]===owner),"guest patch trusted a partial native history");
     // Pre-upgrade cache has no complete-pagination proof. Its declared narrow
     // horizon alone must never certify an earlier requested range.
+    narrow();
     for(const f of readdirSync(native)){const p=join(native,f),v=JSON.parse(readFileSync(p,"utf8"));delete v.historyCoverage;writeFileSync(p,JSON.stringify(v));}
     writeFileSync(log,"");const legacy=facts();
     t.assertions.assert(legacy.issues.length===0&&heavy().some(x=>x[2]===owner),"legacy cache without completeness proof was trusted across an unproven range");
