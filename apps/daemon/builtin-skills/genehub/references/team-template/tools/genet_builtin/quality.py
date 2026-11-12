@@ -126,7 +126,15 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget):
                     and coverage.get('roundsComplete') is True
                     and coverage.get('narrativeComplete') is True)
     covered = old and (old.get('sinceAtMs', since+1) <= since or full_history)
-    if stable and covered and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('kernel') == kernel and old.get('updatedAtMs') == summary.get('updatedAtMs'):
+    # Completed public history is machine-owned, not guest-patch-owned. This
+    # versioned coverage basis also binds its projection; change the basis if
+    # extraction semantics change. Partial/legacy caches retain exact-kernel
+    # compatibility. A failed context read cannot establish machine identity.
+    prior_kernel = (old or {}).get('kernel') or {}
+    same_machine = (isinstance((kernel or {}).get('machineId'), str)
+                    and bool(kernel['machineId']) and prior_kernel.get('machineId') == kernel['machineId'])
+    compatible = same_machine and (prior_kernel == kernel or full_history)
+    if stable and covered and compatible and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
         return old
     inspection = call('session', 'inspect', sid)['inspection']
     rounds, cursor, round_digest = [], None, None
