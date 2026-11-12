@@ -5,10 +5,10 @@ import { defineSpecialty, openTeam } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.daemon.team-quality-history-cache",
   title: "Complete unchanged native history survives horizon and guest-patch checkpoints without repeated full reads",
-  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
-  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history"],
+  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. A real public deletion stays unknown despite cached history and preserves its native refusal identifier and remaining budget. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
+  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history", "failed fresh read reuses healthy cached history", "native refusal cause is lost"],
   tags: ["core", "team-quality"], llm: { default: "none" },
-  productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.inspect", "session.rounds", "session.narrative"],
+  productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.inspect", "session.rounds", "session.narrative", "session.delete"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, browser: 0 }, expectedDurationMs: 25000, timeoutMs: 180000,
@@ -67,6 +67,13 @@ defineSpecialty({
     const changed=facts();
     t.assertions.assert(changed.issues.length===0&&heavy().some(x=>x[2]===owner)&&changed.turns.filter((x:any)=>x.sessionId===owner).length>before,
       "fresh native input reused stale cached turns");
+    // A real native read failure must stay unknown even with a healthy cache.
+    // Delete only this case's own idle Session through its public action.
+    await r.client.call({type:"session.delete",payload:{sessionId:owner}});
+    const unavailable=facts();const issue=unavailable.issues.find((x:any)=>x.kind==="native-read-unavailable"&&x.sessionId===owner);
+    t.assertions.assert(unavailable.evidenceCoverage.nativeComplete===false&&!unavailable.turns.some((x:any)=>x.sessionId===owner),"failed fresh native read reused cached healthy history");
+    t.assertions.assert(issue?.errorCode==="targetNotFound"&&Number.isFinite(issue.captureBudgetRemainingMs)&&issue.captureBudgetRemainingMs>=0&&issue.captureBudgetRemainingMs<=100000,
+      "native refusal code and remaining capture budget were lost behind an exception type");
     t.note("Actual isolated SDK sessions and transparent native CLI; cache requested-range checkpoint only, full native history is genuine. No live Team writes or official-score claim.");
   } finally {await r.dispose();}
 });
