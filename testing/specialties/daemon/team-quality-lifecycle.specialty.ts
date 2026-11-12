@@ -4,6 +4,54 @@ import path from "node:path";
 import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public.ts";
 
 defineSpecialty({
+  id: "specialty.daemon.team-quality-archived-failed-owner",
+  title: "An archived native failure notification does not stop observing an unfinished Task Owner",
+  oracle: "An actual native Owner fails upstream and its normal failure notification is delivered and archived. Across a real wall-clock minute boundary the normal Team tick records another actual paused observation while preserving the original input, stable failure result and unfinished business Task. No clock or observation fixture is substituted.",
+  catches: ["failure result archiving stops Task observations", "paused native failure becomes missing R2/R4 coverage", "sampling resumes failed input", "diagnostic repair fabricates business completion or repeats failure result"],
+  tags: ["core", "team-quality"], llm: { default: "none" },
+  productInterfaces: ["tools/run.py task start", "tools/run.py tick", "session.get", "filesystem"],
+  surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
+  requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
+  resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 }, expectedDurationMs: 75000, timeoutMs: 150000,
+}, async t => {
+  const r = await openTeam(t, "archived-failed-owner", [{ id: "ctl-cli-command", profile: "cli-command" },
+    { id: "ctl-failed-owner", profile: "coded-failure", failureCode: "upstream" }]);
+  try {
+    const config = path.join(r.root, ".genethub/open.env");
+    writeFileSync(config, readFileSync(config, "utf8") + "\nTEAM_AGENT=ctl-failed-owner\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=999999\nTEAM_WATCHDOG_AFTER=999999\n");
+    const front = await r.create("ctl-cli-command"), requestId = "failed-owner.goal";
+    await r.send(front, JSON.stringify({ requestId, cwd: r.root,
+      argv: [process.env.GENEHUB_PYTHON!, path.join(r.root, "tools/run.py"), "task", "start", "--space", "leader", "--desc", "failed native Owner", "--request-id", requestId, "Attempt a bounded external check"] }));
+    let task: any;
+    await t.tools.waitUntil(async () => {
+      const view = await r.snapshot(front), item = view.items.findLast(x => x.type === "assistantMessage" && x.text.includes(JSON.stringify(requestId)));
+      if (item?.type === "assistantMessage") { const v = JSON.parse(item.text); t.assertions.assert(v.code === 0, v.err); task = JSON.parse(v.out); }
+      return Boolean(task) && view.summary.status === "idle";
+    }, 20000);
+    const owner = task.owner.sessionId;
+    await t.tools.waitUntil(async () => (await r.snapshot(owner)).summary.status === "failed", 20000);
+    const input = (await r.snapshot(owner)).summary.inputSummary;
+    r.ok(["tick"]);
+    await t.tools.waitUntil(async () => (await r.snapshot(front)).summary.status === "idle", 20000);
+    r.ok(["tick"]);
+    const done = r.state("done", owner + ".json"), pending = r.state("pending", owner + ".json");
+    t.assertions.assert(existsSync(done) && !existsSync(pending), "native failure result did not reach the archived observation boundary");
+    const receipt = readFileSync(done), archived = JSON.parse(receipt.toString()), afterArchive = Date.now();
+    t.assertions.assert(archived.resultDelivery?.queued && input?.paused && input.pendingMessageIds.length > 0,
+      "native failure or original result is missing");
+    await t.tools.waitUntil(async () => Math.floor(Date.now() / 60000) > Math.floor(afterArchive / 60000), 65000);
+    r.ok(["tick"]);
+    const events = readFileSync(r.state("events", "events.jsonl"), "utf8").trim().split("\n").map(x => JSON.parse(x));
+    t.assertions.assert(events.some(x => x.kind === "session-observed" && x.sessionId === owner && x.atMs > afterArchive && x.paused === true),
+      "normal tick stopped observing the failed Owner after result archiving");
+    const current = (await r.snapshot(owner)).summary.inputSummary, ledger = JSON.parse(readFileSync(r.state("tasks", task.taskId + ".json"), "utf8"));
+    t.assertions.assert(JSON.stringify(current) === JSON.stringify(input) && !ledger.finished && readFileSync(done).equals(receipt)
+      && (await r.snapshot(front)).items.filter(x => x.type === "userMessage" && x.id === archived.resultDelivery.messageId).length === 1,
+      "measurement repair resumed input, settled the Task or repeated/rewrote the original failure result");
+  } finally { await r.dispose(); }
+});
+
+defineSpecialty({
   id: "specialty.daemon.team-quality-lifecycle",
   title: "Real task commands preserve optional quality metadata and business completion when the event destination fails",
   oracle: "A real Agent caller dispatches supports, replays follows/standing once, binds a native writer lease and finishes through a filesystem fault of both event persistence sinks; public diagnostic capture then matches native handoff IDs/timestamps without changing business records.",
