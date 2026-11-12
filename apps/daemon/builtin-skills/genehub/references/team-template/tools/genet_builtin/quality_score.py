@@ -82,7 +82,7 @@ def score(facts):
     if audience_basis not in (None, 'source-result-generation/1'):
         raise ValueError('unsupported result audience basis')
     idle_basis = facts.get('idleObservationBasis')
-    if idle_basis not in (None, 'native-minute-freshness/1'):
+    if idle_basis not in (None, 'native-minute-freshness/1', 'native-minute-freshness/2'):
         raise ValueError('unsupported idle observation basis')
     start, end = facts['window']['startAtMs'], facts['window']['endAtMs']
     cutoff = facts['capturedAtMs']

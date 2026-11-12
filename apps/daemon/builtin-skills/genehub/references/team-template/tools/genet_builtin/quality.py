@@ -253,6 +253,43 @@ def idle_periods(samples, rounds, children, begin, stop):
     return periods
 
 
+def replaced_idle_obligation(item, work, native, processes, end):
+    """A read-in replacement ends observation, never the failed business item."""
+    own = native.get(item.get('sessionId'), {})
+    inputs = own.get('inputSummary') or {}
+    rounds = own.get('rounds') or []
+    latest = max(rounds, key=lambda x:x.get('startedAtMs', 0), default={})
+    if (number(item.get('conclusionAtMs')) or item.get('owner')
+            or own.get('status') not in ('idle', 'failed')
+            or not inputs.get('paused') or not inputs.get('error')
+            or latest.get('outcome') != 'failed'
+            or not number(latest.get('endedAtMs'))
+            or item.get('machine') not in processes
+            or any(x.get('sessionId') == item.get('sessionId') for x in processes[item['machine']])):
+        return None
+    released = item.get('releasedAtMs')
+    if item.get('resourceRequired') and (not number(released) or item.get('resourceHeld') is True):
+        return None
+    successors = [x for x in work if x.get('follows') == item['id']
+                  and x.get('taskId') == item.get('taskId')
+                  and x.get('requester') == item.get('requester')
+                  and x.get('sessionId') != item.get('sessionId')
+                  and x.get('outcome') == 'success'
+                  and number(x.get('dispatchAtMs'))
+                  and latest['endedAtMs'] <= x['dispatchAtMs']
+                  and number(x.get('conclusionAtMs'))
+                  and number(x.get('consumedAtMs'))
+                  and x['conclusionAtMs'] <= x['consumedAtMs'] <= end]
+    if not successors:
+        return None
+    successor = min(successors, key=lambda x:x['consumedAtMs'])
+    at = max(successor['consumedAtMs'], released or 0, latest['endedAtMs'])
+    if at > end:
+        return None
+    return {'basis':'native-read-in-successor/1', 'atMs':at,
+            'successorOperationId':successor['id'], 'failedRoundId':latest.get('roundId')}
+
+
 def event_failures(state, since, cutoff):
     """A failed ledger observation is not a missing native execution/receipt.
 
@@ -557,20 +594,6 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
         own=native.get(item['sessionId'], {})
         stop=min(end,item['conclusionAtMs']) if number(item.get('conclusionAtMs')) else end
         samples=sorted([x for x in observed if x.get('sessionId')==item['sessionId'] and x['atMs'] < stop],key=lambda x:x['atMs'])
-        children=[x for x in work if x['requester']==item['sessionId']]
-        item['idlePeriods']=idle_periods(samples,own.get('rounds',[]),children,max(metric_start,item['dispatchAtMs']),stop)
-        if number(item.get('conclusionAtMs')) and item['conclusionAtMs'] <= end:
-            for period in item['idlePeriods']:
-                if period['resolvedAtMs'] is None:period['resolvedAtMs']=item['conclusionAtMs']
-        if not item['standing'] and item['hasReceipt'] and stop > start and stop-item['dispatchAtMs'] > HOUR:
-            left=max(item['dispatchAtMs'],start-HOUR)
-            recent=[x for x in samples if x['atMs'] >= left-60000]
-            # A minute timer can finish a Task just before its next sample.
-            # Use the same existing state freshness as work_activity and the
-            # interior-gap proof; a 66-second terminal tail is still observed.
-            covered=bool(recent) and recent[0]['atMs'] <= left+60000 and recent[-1]['atMs']+125000 >= stop
-            covered=covered and all(b['atMs']-a['atMs'] <= 125000 for a,b in zip(recent,recent[1:]))
-            idle_complete=idle_complete and covered
         receipts=own.get('retainedInputs')
         activation=item['activationMessageId']
         incoming=next((x for x in receipts or [] if activation and x['messageId']==activation), {})
@@ -656,6 +679,29 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                     resources_complete=False
         if item['resourceRequired'] and number(item.get('conclusionAtMs')) and item['conclusionAtMs']+600000 < end and not held and not number(item.get('releasedAtMs')):
             resources_complete=False
+    # Read-in and resource proof must be enriched for every operation first:
+    # dispatch filename order does not order a failed item and its successor.
+    # This boundary affects R2 only; work activity, failures and conclusions
+    # retain their independent native histories.
+    for item in work:
+        own=native.get(item['sessionId'], {})
+        replacement=replaced_idle_obligation(item,work,native,processes,end)
+        if replacement:item['idleObligationEnd']=replacement
+        terminal=item.get('conclusionAtMs')
+        if replacement:terminal=replacement['atMs']
+        stop=min(end,terminal) if number(terminal) else end
+        samples=sorted([x for x in observed if x.get('sessionId')==item['sessionId'] and x['atMs'] < stop],key=lambda x:x['atMs'])
+        children=[x for x in work if x['requester']==item['sessionId']]
+        item['idlePeriods']=idle_periods(samples,own.get('rounds',[]),children,max(metric_start,item['dispatchAtMs']),stop)
+        if number(terminal) and terminal <= end:
+            for period in item['idlePeriods']:
+                if period['resolvedAtMs'] is None:period['resolvedAtMs']=terminal
+        if not item['standing'] and item['hasReceipt'] and stop > start and stop-item['dispatchAtMs'] > HOUR:
+            left=max(item['dispatchAtMs'],start-HOUR)
+            recent=[x for x in samples if x['atMs'] >= left-60000]
+            covered=bool(recent) and recent[0]['atMs'] <= left+60000 and recent[-1]['atMs']+125000 >= stop
+            covered=covered and all(b['atMs']-a['atMs'] <= 125000 for a,b in zip(recent,recent[1:]))
+            idle_complete=idle_complete and covered
     # Idle gaps belong to an unfinished Owner with no live children. Minute
     # observations are required for coverage; an absent sample is not health.
     for task in tasks.values():
@@ -717,7 +763,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/1','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
             'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
                               'backgroundBasis':'registered-native-process-runtime/1',
                               'backgroundRunsAppliedToScore':False,
