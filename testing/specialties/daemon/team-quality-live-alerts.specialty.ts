@@ -8,9 +8,9 @@ const requirements = [{ kind: "python" as const, env: "GENEHUB_PYTHON", minVersi
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-live-replay",
-  title: "Read-only frozen quality replay warns before red, preserves unknown and escalates consecutive hours",
-  oracle: "Independent timestamp fixtures cross the three-minute warning and ten-minute delivery boundary, then the fifteen-minute triage deadline. Two same-basis consecutive R6 hours escalate; different bases do not stitch. No external replay becomes an official capture or writes live Team state.",
-  catches: ["hourly-only redline detection", "triage deadline missing", "unknown clears an observed incident", "cross-basis consecutive escalation", "replay mutates native quality history"],
+  title: "Read-only quality replay routes automatic attribution without triage timers or repeat-hour escalation",
+  oracle: "Independent timestamp fixtures cross the three-minute warning and ten-minute delivery boundary. Platform responsibility routes to the platform consumer and Team responsibility to Team; neither fifteen minutes nor consecutive hours require triage or escalate responsibility. No external replay becomes an official capture or writes live Team state.",
+  catches: ["hourly-only redline detection", "manual triage gate returns", "unknown clears an observed incident", "repeat-hour responsibility changes without evidence", "replay mutates native quality history"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py quality alerts --snapshot", "spacebuilder.py build"],
   surfaces: ["team-template", "filesystem"], requiredArtifacts: [], requirements,
@@ -26,7 +26,7 @@ defineSpecialty({
   const h = 3600000, base = Date.UTC(2026, 10, 11), ready = base+4*h+5*60000;
   const facts = (end: number): any => ({ schema: "team-quality-facts/1", scoringModel: "tq/2", team: "independent-live-work",
     window: { startAtMs: end-h, endAtMs: end }, measurementWindow: { startAtMs: end-h, endAtMs: end }, capturedAtMs: end,
-    versions: {}, coverage: { dispatches: true, starts: true, deliveries: true, observations: true, goals: true, resources: true, turns: true, inputs: true },
+    versions: {}, attributionContext: { schema: "team-quality-attribution-context/1", dispatch: "builtin-task/1", resultQueue: "template-native-inbox/1", resourceReturn: "template-reconciler/1" }, coverage: { dispatches: true, starts: true, deliveries: true, observations: true, goals: true, resources: true, turns: true, inputs: true },
     workItems: [], taskTrees: [], taskTreesSourceComplete: true, turns: [], wakes: [], inputs: [], failures: [], stalls: [], goalIntervals: [],
   });
   const delivery = (end: number) => ({ ...facts(end), workItems: [{ id: "work.delivery", hasReceipt: true, requester: "parent", dispatchAtMs: ready-60000,
@@ -41,9 +41,11 @@ defineSpecialty({
   const projected = replay([warning, red, late]);
   t.assertions.assert(projected.officialCapture === false && projected.steps[0].new.length === 0
     && projected.steps[0].warnings.some((x: any) => x.rule === "R3") && projected.steps[1].new.length === 1
-    && projected.steps[2].escalated.length === 1, "R3 warning/red/triage boundaries did not produce one episode and escalation");
+    && projected.steps[2].escalated.length === 0, "R3 warning/red boundaries changed or introduced mandatory triage escalation");
   const id = projected.steps[1].new[0];
-  t.assertions.assert(projected.state.incidents[id].platformEscalation === "triage-timeout", "fifteen-minute untriaged incident was not escalated");
+  t.assertions.assert(projected.state.incidents[id].notification.target === "platform-development"
+    && !projected.state.incidents[id].triageDueAtMs && !projected.state.incidents[id].platformEscalation,
+    "automatic platform responsibility was not routed directly, or requires timed triage");
   const unknown = facts(ready+26*60000); unknown.coverage.deliveries = false;
   const kept = replay([red, unknown]);
   t.assertions.assert(kept.state.incidents[id].status === "open" && kept.steps[1].unknown.some((x: any) => x.rule === "R3"), "unknown evidence cleared an observed redline");
@@ -54,8 +56,8 @@ defineSpecialty({
     return f;
   };
   const first = parallel(base+20*h), second = parallel(base+21*h), repeated = replay([first, second]);
-  t.assertions.assert(repeated.steps[1].new.length === 0 && repeated.steps[1].escalated.length === 1
-    && Object.values(repeated.state.incidents).some((x: any) => x.rule === "R6" && x.platformEscalation === "consecutive-hours"), "same-basis consecutive R6 hours did not escalate one instance");
+  t.assertions.assert(repeated.steps[1].new.length === 0 && repeated.steps[1].escalated.length === 0
+    && Object.values(repeated.state.incidents).some((x: any) => x.rule === "R6" && x.notification.target === "team" && !x.platformEscalation), "repeated genuine R6 did not remain one Team responsibility instance");
   second.resourceObligationBasis = "dispatch-resource-obligation/2";
   const different = replay([first, second]);
   t.assertions.assert(!Object.values(different.state.incidents).some((x: any) => x.platformEscalation === "consecutive-hours"), "different measurement versions stitched consecutive hours");
@@ -74,9 +76,9 @@ defineSpecialty({
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-live-native-wake",
-  title: "An actual Team tick produces one urgent redline and native reflection, with immediate platform triage feedback",
-  oracle: "A restored unconfirmed source intent references a real Agent-owned task and no invented execution. Actual tick detects its elapsed acknowledgement obligation, persists one urgent note and wakes native reflection; public native triage immediately registers one platform feedback. Repeated ticks preserve identities and no-redline ticks add no redline wake.",
-  catches: ["redline remains a passive hourly card", "urgent redline obeys ordinary wake delay", "duplicate redline notes or platform feedback", "platform triage is never reported", "diagnostic failure erases the previous alert"],
+  title: "An actual Team tick routes redlines once, supports mutable correction notes and never duplicates platform feedback",
+  oracle: "A restored unconfirmed source intent references a real Agent-owned task and no invented execution. Actual tick detects its elapsed acknowledgement obligation and routes directly to the platform alert without feedback or Team wake. Optional attribution corrections route Team work to its real Owner and native reflection, preserve correction history and allow further correction. Repeated ticks preserve identities and no-redline ticks add no redline wake.",
+  catches: ["redline remains a passive hourly card", "urgent redline obeys ordinary wake delay", "duplicate redline notes or platform feedback", "automatic responsibility blocked on triage", "diagnostic failure erases the previous alert"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py tick", "tools/run.py quality alerts", "tools/run.py quality triage", "session.get"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], requirements,
@@ -109,20 +111,36 @@ defineSpecialty({
     r.ok(["tick"]);
     const alerts = JSON.parse(r.ok(["quality", "alerts"]));
     const incident = alerts.redLines.find((x: any) => x.rule === "R1" && x.workItemId === operation);
-    t.assertions.assert(incident && redNotes().filter(x => x.id === incident.noteId).length === 1 && existsSync(join(r.root, incident.evidence.path)), "one actual tick did not persist one urgent redline with evidence");
-    const reflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
-    t.assertions.assert(reflect.sessionId && reflect.notifiedNotes.includes(incident.noteId), "urgent redline did not reach native reflection in its detecting tick");
-    await t.tools.waitUntil(async () => !!(await r.snapshot(reflect.sessionId)).summary.latestReply, 20000);
+    t.assertions.assert(incident && incident.notification.target === "platform-development"
+      && redNotes().length === 0 && existsSync(join(r.root, incident.evidence.path)),
+      "platform responsibility did not route directly, or woke Team reflection for mandatory triage");
     const taskView = await cli(owner, ["task", "status", task.taskId]);
     t.assertions.assert(taskView.liveQuality.redLines.some((x: any) => x.id === incident.id), "Owner public brief omitted its current redline");
-    await cli(owner, ["quality", "triage", incident.id, "--attribution", "platform-template", "--evidence", incident.evidence.path]);
-    const feedback = JSON.parse(r.ok(["feedback", "ls", "--open"]));
-    t.assertions.assert(JSON.stringify(feedback).includes("quality-redline:"+incident.id), "platform triage did not immediately create platform feedback");
-    r.ok(["tick"]); r.ok(["tick"]);
+    const feedback = () => JSON.parse(r.ok(["feedback", "ls", "--open"]));
+    t.assertions.assert(!JSON.stringify(feedback()).includes("quality-redline:"+incident.id), "automatic redline created a duplicate platform feedback record");
+    await cli(owner, ["quality", "triage", incident.id, "--attribution", "team", "--evidence", "case-owned optional correction of responsibility"]);
+    r.ok(["tick"]); await idle(owner);
+    const corrected = JSON.parse(r.ok(["quality", "alerts"])).redLines.find((x: any) => x.id === incident.id);
+    const reflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
+    t.assertions.assert(corrected.notification.target === "team" && corrected.corrections.length === 1
+      && redNotes().filter(x => x.id === corrected.noteId).length === 1
+      && reflect.sessionId && reflect.notifiedNotes.includes(corrected.noteId),
+      "Team correction did not reach native reflection once in its detecting tick");
+    const ownerMessageId = "quality-redline."+incident.id+"."+owner;
+    t.assertions.assert((await r.snapshot(owner)).items.filter(x => x.type === "userMessage" && x.id === ownerMessageId).length === 1,
+      "Team redline did not reach its real native Task Owner exactly once");
+    await t.tools.waitUntil(async () => !!(await r.snapshot(reflect.sessionId)).summary.latestReply, 20000);
+    await cli(owner, ["quality", "triage", incident.id, "--attribution", "kernel", "--evidence", "case-owned revised correction with new evidence"]);
+    await cli(owner, ["quality", "triage", incident.id, "--attribution", "kernel", "--evidence", "case-owned revised correction with new evidence"]);
+    r.ok(["tick"]); r.ok(["tick"]); await idle(owner);
     const final = JSON.parse(r.ok(["quality", "alerts"]));
-    t.assertions.assert(final.redLines.find((x: any) => x.id === incident.id)?.feedbackId
-      && redNotes().filter(x => x.id === incident.noteId).length === 1 && redNotes().length === 1,
-      "repeated ticks or platform escalation duplicated the urgent redline");
+    const last = final.redLines.find((x: any) => x.id === incident.id);
+    t.assertions.assert(last.notification.target === "platform-development" && last.corrections.length === 2
+      && last.attribution.component === "platform-template" && !last.feedbackId
+      && !JSON.stringify(feedback()).includes("quality-redline:"+incident.id)
+      && redNotes().length === 1
+      && (await r.snapshot(owner)).items.filter(x => x.type === "userMessage" && x.id === ownerMessageId).length === 1,
+      "correction rewrote automatic evidence, became immutable or replayed redline/feedback notifications");
     // External append-tail crash fault in the diagnostic event file. Scheduling
     // does not read that log; capture failure must not erase the open episode.
     appendFileSync(r.state("events", "events.jsonl"), "{truncated diagnostic append\n");
@@ -130,6 +148,6 @@ defineSpecialty({
     const unavailable = JSON.parse(r.ok(["quality", "alerts"]));
     t.assertions.assert(unavailable.redLines.some((x: any) => x.id === incident.id)
       && unavailable.unknown.some((x: any) => x.rule === "live-capture"), "failed diagnostic read erased a known open redline or claimed health");
-    t.note("Actual native task/timer/reflection and platform feedback, with one explicit restored source-intent fixture; no observation reminder, no live Team writes or official quality80 claim.");
+    t.note("Actual native task/timer, platform alert, Team Owner/reflection routing and optional correction history, with one explicit restored source-intent fixture; no observation reminder, no live Team writes or official quality80 claim.");
   } finally { await r.dispose(); }
 });
