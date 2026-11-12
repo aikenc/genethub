@@ -2,13 +2,16 @@
 import math
 
 LEGACY_BASIS = 'task-agent-hours/1'
-BASIS = 'task-agent-hours/2'
+TIERED_BASIS = 'task-agent-hours/2'
+BASIS = 'acceptance-unit-agent-hours/3'
 TIERS = ((1800000, 0.75), (3600000, 1.5), (7200000, 2))
 
 
 def policy():
     return dict(basis=BASIS, minimumTotalEffectiveMs=1800000,
                 minimumHourEffectiveMs=900000,
+                unitBasis='dispatch-acceptance-unit/1',
+                executionBasis='registered-native-execution-union/2',
                 tiers=[dict(minimumTotalEffectiveMs=minimum, required=required)
                        for minimum, required in TIERS])
 
@@ -63,13 +66,13 @@ def length(rows):
 
 
 def evaluate(trees, start, end, basis=LEGACY_BASIS):
-    if basis not in (LEGACY_BASIS, BASIS):
+    if basis not in (LEGACY_BASIS, TIERED_BASIS, BASIS):
         raise ValueError('unsupported task-hour basis')
     if not isinstance(trees, list):
         raise ValueError('task trees are required for tq/2')
     result, task_ids = [], set()
     for tree in trees:
-        task_id = tree.get('taskId')
+        task_id = tree.get('unitId') if basis == BASIS else tree.get('taskId')
         opened, stopped = tree.get('openedAtMs'), tree.get('endedAtMs')
         if (not isinstance(task_id, str) or not task_id or task_id in task_ids
                 or not numeric(opened) or not numeric(stopped) or stopped < opened):
@@ -92,28 +95,44 @@ def evaluate(trees, start, end, basis=LEGACY_BASIS):
             if not numeric(joined):
                 raise ValueError('invalid task-hour Session membership time')
             member_wall = clipped(wall, max(opened, joined), end)
-            if person.get('readable') is not True:
+            if person.get('readable') is not True and basis != BASIS:
                 if member_wall:
                     missing.append(sid); missing_ms += length(member_wall)
                 continue
             runs = intervals(person.get('runs'))
+            if basis == BASIS and person.get('readable') is not True:
+                runs = intervals(person.get('knownBackgroundRuns', []))
             # Union each Session before summing people. Parallel tools and
             # overlapping execution records cannot manufacture extra Agents.
-            agent_ms += sum(length(clipped(runs, a, b)) for a, b in member_wall)
+            known = sum(length(clipped(runs, a, b)) for a, b in member_wall)
+            agent_ms += known
+            if basis == BASIS and (person.get('readable') is not True or person.get('partialCoverage')):
+                missing.append(sid)
+                if person.get('readable') is not True:
+                    missing_ms += length(member_wall)-known
+                else:
+                    uncertain = intervals(person.get('allocationUnknownRuns', []))
+                    missing_ms += sum(length(clipped(uncertain,a,b)) for a,b in member_wall)
         low = agent_ms/wall_ms if wall_ms else None
         high = low+missing_ms/wall_ms if wall_ms else None
         required = 2
-        if basis == BASIS:
+        if basis in (TIERED_BASIS, BASIS):
             required = next((threshold for minimum, threshold in reversed(TIERS)
                              if total_ms >= minimum), None)
         eligible = total_ms >= 1800000 and wall_ms >= 900000
         state = ('not-applicable' if not eligible else
+                 'unknown' if basis == BASIS and tree.get('boundaryKnown') is not True else
                  'pass' if low >= required else 'fail' if high < required else 'unknown')
         row = dict(taskId=task_id, totalEffectiveMs=total_ms,
                            hourEffectiveMs=wall_ms, agentMs=agent_ms,
                            low=low, high=high, missingSessionIds=sorted(missing),
                            eligible=eligible, state=state)
-        if basis == BASIS:
+        if basis in (TIERED_BASIS, BASIS):
             row['required'] = required
+        if basis == BASIS:
+            row.update(taskId=tree['taskId'], unitId=task_id, boundaryBasis=tree.get('boundaryBasis'),
+                       boundaryKnown=tree.get('boundaryKnown') is True,
+                       reason=tree.get('boundaryReason'), operationIds=tree.get('operationIds', []),
+                       conclusion=tree.get('conclusion'))
         result.append(row)
     return result

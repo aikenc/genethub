@@ -191,7 +191,7 @@ def receipt(t, root, sid):
     return None
 
 
-def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None, directory=None, tier=None, model=None, parameters=None, follows=None, standing=False):
+def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None, directory=None, tier=None, model=None, parameters=None, follows=None, standing=False, unit_of=None, unit_stage=None):
     """A stable per-operation intent; native creation and first input share its ID."""
     runtime = get_runtime(root)
     runtime.verify_task(task)
@@ -212,6 +212,15 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         request['follows'] = follows
     if standing:
         request['standing'] = True
+    from .acceptance_units import link
+    try:
+        unit = (None if saved and not saved.get('request', {}).get('acceptanceUnit')
+                and unit_of is None and unit_stage is None else
+                link(t, root, task, op_id, requester, follows, unit_of, unit_stage))
+    except ValueError as error:
+        raise TeamConfigurationError(str(error)) from error
+    if unit:
+        request['acceptanceUnit'] = unit
     req = resources.request(task['taskId'], role, goal, requester, machine, directory, parameters)
     resources.gate(runtime, req, op_id)
     with t.inbox_lock(root, op_id, purpose='任务派单'):
@@ -438,7 +447,8 @@ def command(t, args, root=None, sender=None):
             if not task:
                 resources.gate(runtime, resources.request(task_id, args.space, requested['goal'], sid, args.machine or t.role_machine(root, args.space) or (t.remote_targets(root).get(args.space) or {}).get('machineId'), args.directory, parameters), 'taskop.' + identity(task_id + ':owner'))
                 task = dict(framework=runtime.identity(), version=1, taskId=task_id, request=requested, front=sid, owner=None,
-                            state='active', revision=1, createdAtMs=t.now_ms(), collaborators=[])
+                            state='active', revision=1, createdAtMs=t.now_ms(), collaborators=[],
+                            acceptanceBasis='dispatch-acceptance-unit/1')
                 t.write_json(path, task)
             quality_events.emit(t, root, 'task-created', task_id, at_ms=task['createdAtMs'],
                                 taskId=task_id, front=sid)
@@ -486,7 +496,8 @@ def command(t, args, root=None, sender=None):
         op = task['taskId'] + ':support:' + args.request_id
         result = dispatch(t, root, task, op, args.space, args.desc, ' '.join(args.words), sid,
                           args.machine, args.directory, args.tier, args.model, parameters,
-                          follows=getattr(args, 'follows', None), standing=getattr(args, 'standing', False))
+                          follows=getattr(args, 'follows', None), standing=getattr(args, 'standing', False),
+                          unit_of=getattr(args, 'unit_of', None), unit_stage=getattr(args, 'unit_stage', None))
         with t.inbox_lock(root, task['taskId'], purpose='协作关系'):
             task = read_task(t, root, task['taskId'])
             if not any(x['operationId'] == result['operationId'] for x in task['collaborators']):
@@ -1335,6 +1346,8 @@ def parser(sub):
             p.add_argument('task_id')
             p.add_argument('--follows', help='operationId of this Team work item being redone')
             p.add_argument('--standing', action='store_true', help='standing support, excluded from finite-work latency and R2')
+            p.add_argument('--unit-of', help='new for an independent acceptance goal, otherwise an existing operationId; rework inherits its original unit')
+            p.add_argument('--unit-stage', choices=('work', 'integration', 'verification'), help='stage of the same complete acceptance unit; not a rework marker')
         p.add_argument('--space', required=True); p.add_argument('--desc', required=True)
         p.add_argument('--request-id', required=True); p.add_argument('--machine'); p.add_argument('--directory')
         p.add_argument('--tier'); p.add_argument('--model'); p.add_argument('--parameters', help='business JSON object; normally supplied by a project command'); p.add_argument('words', nargs='+')

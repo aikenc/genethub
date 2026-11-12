@@ -581,6 +581,8 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                 'outcome':(conclusion or {}).get('outcome'),
                 'resourceRequired':resource_required, 'legacyReleaseStateKnown':legacy_released,
                 'withdrawnAtMs':intent.get('withdrawnAtMs') if intent.get('state')=='withdrawn' else None}
+        if request.get('acceptanceUnit'):
+            item['acceptanceUnit'] = request['acceptanceUnit']
         audience = result_audience(team, item, rec)
         if audience is not None:
             item['deliveryAudience'] = audience
@@ -848,11 +850,16 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     team_version = running_version(root, cutoff)
     if team_version.get('id') != version_before.get('id'):
         team_version.update(id=None,releaseVersion=None,status='changed-during-capture')
-    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
-            'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
+    trees = task_trees(tasks,goal_tasks,controls,native,end,intents,log)
+    from .acceptance_units import collect as collect_units, BASIS as UNIT_BASIS
+    from .execution_facts import SCORE_BASIS as EXECUTION_BASIS
+    units = collect_units(tasks,intents,work,trees,native,end)
+    return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':trees,
+            'acceptanceUnits':units,'acceptanceUnitBasis':UNIT_BASIS,'executionBasis':EXECUTION_BASIS,
+            'executionFacts':{'schema':'team-execution-facts/2','scoreMeaningChanged':True,
                               'backgroundBasis':'registered-native-process-runtime/1',
-                              'backgroundRunsAppliedToScore':False,
-                              'note':'Measurement foundation; final versioned scoring model will consume timing segments and background runs'},
+                              'backgroundRunsAppliedToScore':True,
+                              'note':'Versioned formal per-Session union for R6 and R4; old snapshots keep their own basis'},
             'taskTreesSourceComplete':goal_ownership_known,'taskHoursBasis':'task-controls-and-native-rounds/1','r6Basis':R6_BASIS,'team':Path(root).name,'window':{'startAtMs':start,'endAtMs':end},
             'capturedAtMs':cutoff,'measurementWindow':{'startAtMs':metric_start,'endAtMs':end},'redlineLifecycle':lifecycle,
             'measurementGoalIntervals':[{'startAtMs':a,'endAtMs':b} for task_id,a,b in metric_goals if task_id in goal_tasks and b>a],

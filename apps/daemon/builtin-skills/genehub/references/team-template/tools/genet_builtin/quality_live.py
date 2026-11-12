@@ -50,7 +50,11 @@ def project(facts):
             warn('R3',item,item.get('conclusionAtMs'),180000,item.get('deliveredAtMs'))
         if item.get('resourceRequired') and item.get('resourceHeld') is True:
             warn('R5',item,item.get('conclusionAtMs'),300000,item.get('releasedAtMs'))
-    for stall in facts.get('stalls', []):
+    observed = facts
+    if facts.get('executionBasis') is not None:
+        from .execution_facts import project as execution_project
+        observed = execution_project(facts)  # same native work basis as the formal R4 verdict
+    for stall in observed.get('stalls', []):
         if stall.get('endAtMs',0) >= now:
             warn('R4',{'id':stall['taskId']},stall.get('startAtMs'),480000)
     return {'schema':'team-quality-live-alerts/1','asOfMs':facts['capturedAtMs'],

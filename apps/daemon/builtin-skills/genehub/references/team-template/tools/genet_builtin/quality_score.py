@@ -70,6 +70,13 @@ def activity_intervals(value):
 def score(facts):
     if facts.get('schema') != 'team-quality-facts/1':
         raise ValueError('unsupported quality facts schema')
+    original_facts = facts
+    execution_basis = facts.get('executionBasis')
+    if execution_basis is not None:
+        from .execution_facts import SCORE_BASIS, project
+        if execution_basis != SCORE_BASIS:
+            raise ValueError('unsupported formal execution basis')
+        facts = project(facts)
     model = facts.get('scoringModel', 'tq/1')
     if model not in ('tq/1', 'tq/2'):raise ValueError('unsupported scoring model')
     resource_basis = facts.get('resourceObligationBasis')
@@ -227,14 +234,20 @@ def score(facts):
 
     task_report = None
     if model == 'tq/2':
-        from .task_hours import evaluate, BASIS, LEGACY_BASIS
+        from .task_hours import evaluate, BASIS, TIERED_BASIS, LEGACY_BASIS
         r6_basis = facts.get('r6Basis', LEGACY_BASIS)
-        task_report = evaluate(facts.get('taskTrees'), start, end, basis=r6_basis)
+        if r6_basis == BASIS and (execution_basis is None or facts.get('acceptanceUnitBasis') != 'dispatch-acceptance-unit/1'):
+            raise ValueError('acceptance units require their native association and execution basis')
+        task_report = evaluate(facts.get('acceptanceUnits') if r6_basis == BASIS else facts.get('taskTrees'), start, end, basis=r6_basis)
         eligible = [x for x in task_report if x['eligible']]
         failed = [x for x in eligible if x['state']=='fail']
         instances['R6'] = [dict(taskId=x['taskId'], effectiveParallelism=x['low'],
                                possibleParallelism=x['high'], required=x.get('required', 2),
                                hourEffectiveMs=x['hourEffectiveMs']) for x in failed]
+        if r6_basis == BASIS:
+            for instance, row in zip(instances['R6'], failed):
+                instance.update(unitId=row['unitId'], workItemId=row['unitId'],
+                                totalEffectiveMs=row['totalEffectiveMs'], boundaryBasis=row['boundaryBasis'])
         r6_known = bool(failed) or (facts.get('taskTreesSourceComplete') is True
                                    and all(x['state']!='unknown' for x in eligible))
         wall = sum(x['hourEffectiveMs'] for x in eligible)
@@ -339,7 +352,7 @@ def score(facts):
     losses.sort(key=lambda x: (x['gapTo80'] is not None, -(x['gapTo80'] or 0), -(x['loss'] or 0), x['id']))
     result = {'schema': 'team-quality-card/1', 'model': model, 'team': facts.get('team'),
             'window': facts['window'], 'measurementWindow': facts.get('measurementWindow',facts['window']), 'capturedAtMs': cutoff, 'versions': facts.get('versions', {}),
-            'factsSha256': hashlib.sha256(canonical(facts).encode()).hexdigest(),
+            'factsSha256': hashlib.sha256(canonical(original_facts).encode()).hexdigest(),
             'score': round(provisional, 3) if formal and provisional is not None else None,
             'provisionalScore': round(provisional, 3) if provisional is not None else None,
             'officialCapture': facts.get('captureKind')=='native-hour' and end % 3600000==0 and end-start==3600000,
@@ -362,7 +375,11 @@ def score(facts):
     if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
     if audience_basis is not None:result['resultAudienceBasis'] = audience_basis
     if idle_basis is not None:result['idleObservationBasis'] = idle_basis
-    bases = ([r6_basis] if model == 'tq/2' and r6_basis == BASIS else [])
+    bases = ([r6_basis] if model == 'tq/2' and r6_basis in (TIERED_BASIS, BASIS) else [])
+    if execution_basis is not None:
+        result['executionBasis'] = execution_basis
+        result['acceptanceUnitBasis'] = facts.get('acceptanceUnitBasis')
+        bases += [execution_basis]
     bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis) if x is not None]
     if bases:
         result['measurementVersion'] = '+'.join([model]+bases)
