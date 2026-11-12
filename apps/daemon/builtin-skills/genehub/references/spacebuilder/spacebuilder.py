@@ -910,6 +910,13 @@ def validate_team(value: Any, path: Path) -> dict[str, Any]:
 
 def team_runtime_target(target: str) -> bool:
     parts = Path(target).parts
+    # Keep the raw builtin Skill package, including references and assets, with
+    # the code whose running identity includes those bytes. Rendered agent
+    # Skills alone cannot identify a source-free Team artifact.
+    if (len(parts) >= 3 and parts[:2] == ("skills", "genet_builtin")
+            and all(part not in (".", "..", "__pycache__") for part in parts)
+            and Path(target).suffix not in {".pyc", ".pyo"}):
+        return True
     return (len(parts) >= 2 and parts[0] == "tools" and
             all(part not in (".", "..") and not part.startswith(".") for part in parts) and
             Path(target).suffix in {".py", ".json", ".js", ".cjs", ".mjs"})
@@ -923,15 +930,19 @@ def team_runtime_operations(root: Path) -> list[Operation]:
     operations = []
     if not tools.is_dir():
         fail("SB001", "team configuration requires its tools runtime", sources=(str(tools),))
-    for source in sorted(tools.rglob("*")):
-        target = source.relative_to(root).as_posix()
-        if "__pycache__" in source.parts or not team_runtime_target(target):
-            continue
-        if source.is_symlink():
-            fail("SB011", "Team runtime dependency must not be a symlink", sources=(str(source),))
-        if source.is_file():
-            operations.append(Operation(target, source.read_bytes(), ["core:team-runtime"], "team-runtime-file", "copy",
-                                        executable=bool(source.stat().st_mode & 0o111)))
+    builtin_skills = root / "skills" / "genet_builtin"
+    if (root / "skills").is_symlink() or builtin_skills.is_symlink():
+        fail("SB011", "Team builtin Skills directory must not be a symlink")
+    for directory in (tools, builtin_skills):
+        for source in sorted(directory.rglob("*")):
+            target = source.relative_to(root).as_posix()
+            if "__pycache__" in source.parts or not team_runtime_target(target):
+                continue
+            if source.is_symlink():
+                fail("SB011", "Team runtime dependency must not be a symlink", sources=(str(source),))
+            if source.is_file():
+                operations.append(Operation(target, source.read_bytes(), ["core:team-runtime"], "team-runtime-file", "copy",
+                                            executable=bool(source.stat().st_mode & 0o111)))
     if not any(item.target == "tools/run.py" for item in operations):
         fail("SB001", "Team output requires tools/run.py")
     return operations
