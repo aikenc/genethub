@@ -13,6 +13,19 @@ from .quality_score import canonical, number, score
 HOUR = 3600000
 
 
+def read_issue(kind, error, budget, **identity):
+    """Keep native refusal identifiers, never exception text or CLI output."""
+    issue = dict(kind=kind, error=type(error).__name__, **identity,
+                 captureBudgetRemainingMs=max(0, int((budget-time.monotonic())*1000)))
+    code = getattr(error, 'code', None)
+    if (isinstance(code, str) and 0 < len(code) <= 80 and code.isascii()
+            and all(c.isalnum() or c in '_.:-' for c in code)):
+        issue['errorCode'] = code
+    if error.__cause__ is not None:
+        issue['cause'] = type(error.__cause__).__name__
+    return issue
+
+
 def read(path, default=None, maximum=64*1024*1024):
     path = Path(path)
     if not path.exists():
@@ -563,7 +576,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
             platforms[machine]={'version':ctx['version'],'machineId':ctx['machineId']}
             processes[machine]=capture_call('process','list',*team.machine_args(machine))['processes']
         except Exception as error:
-            issues.append({'kind':'machine-facts-unavailable','machine':machine,'error':type(error).__name__})
+            issues.append(read_issue('machine-facts-unavailable', error, budget, machine=machine))
     order=list(wanted.items())
     if live:
         active={x["sessionId"] for x in records(state/"pending") if x.get("sessionId")}
@@ -574,7 +587,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
             if not team.SESSION_ID.fullmatch(sid): raise ValueError('invalid native session identity')
             native[sid]=native_snapshot(team,sid,machine,history_starts.get(sid,metric_start),platforms.get(machine),store/'native'/ (sid+'.json'),budget)
         except Exception as error:
-            issues.append({'kind':'native-read-unavailable','sessionId':sid,'error':type(error).__name__})
+            issues.append(read_issue('native-read-unavailable', error, budget, sessionId=sid))
     # Tasks begun inside roles are work, but cannot by themselves manufacture
     # a loaded user-goal hour. Use public root/initiator ownership, not wording
     # or a mandatory new goal form. Unknown native ownership stays unknown.
