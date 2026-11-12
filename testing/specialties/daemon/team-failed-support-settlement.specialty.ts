@@ -1,19 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-failed-support-settlement",
   title: "Native failed support reports its failure once and non-success conclusions retain unresolved work",
-  oracle: "A genuinely failed SDK support remains paused with its original input, but its requester receives one truthful failure result without declaring business success. A separate unfinished, paused writer blocks success yet permits explicit blocked/failed settlement, retaining its real lease and accepting its eventual result.",
-  catches: ["unfinished Task suppresses native failure forever", "failure notification resumes failed work", "blocked conclusion waits forever for running support", "non-success settlement releases a paused writer", "late support result is discarded"],
+  oracle: "A genuinely failed SDK support remains paused with its original input, but its requester receives one truthful failure result without declaring business success. After the first anomaly is handled, a second real failed Round in that same Session creates one fresh urgent anomaly and native reflection, with no tick replay. A separate unfinished, paused writer blocks success yet permits explicit blocked/failed settlement, retaining its real lease and accepting its eventual result.",
+  catches: ["unfinished Task suppresses native failure forever", "handled anomaly suppresses later failure in the same Session", "new native failure never wakes reflection", "same-Round retry repeats the urgent anomaly", "failure notification resumes failed work", "blocked conclusion waits forever for running support", "non-success settlement releases a paused writer", "late support result is discarded"],
   tags: ["core", "team-result"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py tick", "session.get", "session.inspect"],
   surfaces: ["daemon", "team-template", "filesystem"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
-  expectedDurationMs: 25000, timeoutMs: 180000,
+  expectedDurationMs: 35000, timeoutMs: 180000,
 }, async t => {
   const r = await openTeam(t, "failed-support-settlement", [
     { id: "ctl-cli-command", profile: "cli-command" },
@@ -49,6 +49,26 @@ defineSpecialty({
     const failedDirectory = join(r.root, "failed-writer"); mkdirSync(failedDirectory);
     const support = await cli(owner, ["task", "support", task.taskId, "--space", "qa", "--desc", "native failed support", "--directory", failedDirectory, "--request-id", "failure.support", "Perform a bounded external check"]);
     const child = support.collaborator as string;
+    const failedRound = async (except?: string) => {
+      const reply = await r.client.call({ type: "session.rounds", payload: { sessionId: child, throughRoundId: null, cursor: null, limit: 100 } });
+      if (reply?.type !== "sessionRounds") throw Error("native failed Round history missing");
+      const found = reply.data.rounds.findLast(x => x.outcome === "failed" && x.roundId !== except);
+      t.assertions.assert(Boolean(found), "actual external Agent did not produce a distinct failed Round");
+      return found!.roundId;
+    };
+    const anomalies = (round: string) => ["notes", "notes-done"].flatMap(dir => existsSync(r.state(dir))
+      ? readdirSync(r.state(dir)).filter(name => name.endsWith(".json")).map(name => JSON.parse(readFileSync(r.state(dir, name), "utf8"))) : [])
+      .filter(note => note.kind === "anomaly" && note.session === child && note.turn?.roundId === round);
+    const reflection = async (noteId: string) => {
+      const state = JSON.parse(readFileSync(r.state("reflect.json"), "utf8")); await idle(state.sessionId);
+      const prompts = (await r.snapshot(state.sessionId)).items.filter(x => x.type === "userMessage");
+      t.assertions.assert(prompts.some(x => {
+        if (x.type !== "userMessage") return false;
+        const path = x.text.match(/简报: ([^\n]+)/u)?.[1]?.trim();
+        return path?.startsWith(r.root + "/") && readFileSync(path, "utf8").includes(noteId);
+      }), "new anomaly did not reach an actual native reflection brief");
+      return state.sessionId as string;
+    };
     await t.tools.waitUntil(async () => (await r.snapshot(child)).summary.status === "failed", 20000);
     const before = (await r.snapshot(child)).summary.inputSummary;
     t.assertions.assert(before?.paused && before.pendingMessageIds.length > 0, "external failure did not retain real paused input");
@@ -62,6 +82,7 @@ defineSpecialty({
       const pending = r.state("pending", child+".json");
       return JSON.parse(readFileSync(existsSync(pending) ? pending : r.state("done", child+".json"), "utf8"));
     };
+    select("ctl-normal"); // A real reflecting Agent can finish without changing the failed worker.
     r.ok(["tick"]); await idle(owner);
     const first = record();
     t.assertions.assert(first.resultDelivery?.queued === true && first.done?.outcome === "failed",
@@ -77,6 +98,11 @@ defineSpecialty({
     t.assertions.assert(!nativeTask.finished && !nativeTask.collaborators[0].finished, "execution failure fabricated a business conclusion");
     t.assertions.assert(existsSync(first.lock) && existsSync(r.state("pending", child+".json")),
       "a paused failed writer was released or archived before explicit recovery");
+    const firstRound = await failedRound(), firstNotes = anomalies(firstRound);
+    t.assertions.assert(firstNotes.length === 1, "first native failure did not create exactly one anomaly");
+    const firstNote = firstNotes[0], firstReflection = await reflection(firstNote.id);
+    await cli(owner, ["notes", "done", firstNote.id]);
+    const handledNote = r.state("notes-done", firstNote.id+".json"), handledBytes = readFileSync(handledNote);
     const resumeId = "failure.support.resume", resumeGoal = "Retry the original unfinished external check";
     const resumeArgs = ["send", "--to", child, "--kind", "human", "--resume", "--message-id", resumeId, resumeGoal];
     const outsider = await r.create("ctl-cli-command");
@@ -108,8 +134,17 @@ defineSpecialty({
     t.assertions.assert(second.done?.outcome === "failed" && second.resultDelivery?.queued
       && second.done.reply !== first.done.reply && second.resultDelivery.messageId !== first.resultDelivery.messageId,
       "the new failed round reused the previous failure generation or lost its notification");
+    const secondRound = await failedRound(firstRound), secondNotes = anomalies(secondRound);
+    t.assertions.assert(secondNotes.length === 1 && secondNotes[0].id !== firstNote.id,
+      "a handled anomaly suppressed the next genuine failed Round in the same Session");
+    const secondReflection = await reflection(secondNotes[0].id);
+    t.assertions.assert(secondReflection !== firstReflection && readFileSync(handledNote).equals(handledBytes),
+      "new failure reused an old reflection or rewrote its handled anomaly");
     const originalResult = first.resultDelivery.messageId, newResult = second.resultDelivery.messageId;
     r.ok(["tick"]); await idle(owner);
+    t.assertions.assert(anomalies(secondRound).length === 1
+      && JSON.parse(readFileSync(r.state("reflect.json"), "utf8")).sessionId === secondReflection
+      && readFileSync(handledNote).equals(handledBytes), "same-Round tick replay duplicated reflection or changed old evidence");
     const inputs = (await r.snapshot(owner)).items;
     t.assertions.assert(inputs.filter(x => x.type === "userMessage" && x.id === originalResult).length === 1
       && inputs.filter(x => x.type === "userMessage" && x.id === newResult).length === 1
