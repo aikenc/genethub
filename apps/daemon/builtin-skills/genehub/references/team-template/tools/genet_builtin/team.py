@@ -79,10 +79,8 @@ BATCH_STUCK_AFTER_S = int(env_get("TEAM_BATCH_STUCK_AFTER", "90"))
 WATCHDOG_AFTER_S = int(env_get("TEAM_WATCHDOG_AFTER", "15"))
 WATCHDOG_MAX_WAKES = int(env_get("TEAM_WATCHDOG_MAX_WAKES", "3"))
 # When the timer wakes the reflect session. Each can be overridden by the environment or `.genethub/open.env`.
-WAKE_ROUNDS = 3          # user-initiated rounds since the last wake
 WAKE_GAP_S = 600         # least time between two wakes (`reflect now` and urgent notes ignore it)
 NOTE_QUIET_S = 60        # ordinary notes wait this long so one start handles a batch; urgent notes wake immediately
-WAKE_CHECK_S = 60        # how often the rounds are counted (counting asks the daemon)
 PLATFORM_CHECK_S = 60    # how often the template is compared with the platform branch
 REPORT_AGAIN_S = 6 * 3600
 HEALTH_CHECK_S = 60      # how often the timer asks the daemon whether its hooks are broken (one `hook list` is ~2s)
@@ -2413,7 +2411,6 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
     root_env = open_env(root)
     root_env["TEAM_MODE"] = "1"
     root_env.setdefault("TEAM_EFFORT", "high")
-    root_env.setdefault("TEAM_WAKE_ROUNDS", "10")
     root_env.setdefault("TEAM_WAKE_GAP", "1800")
     write_open_env(root, root_env)
     front_env = open_env(os.path.join(root, "front"))
@@ -2459,7 +2456,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             "team-reflect",
             "团队反思与进化（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
             "# 团队反思岗位角色规范\n\n"
-            "- 我是团队的 **反思岗位**，扫描全队（`front`、`leader`、各管线组员、`qa`、`research`）的增量会话与留言，执行**二级记忆提炼**：先把各岗位经验与 `ghref` 证据指针写入 `spaces/<角色>/index.md`，再将跨角色高频铁律提炼入根 `memory.md`（≤30 行），必要时升级团队 Skill/脚本并 `snapshot` 提交。\n",
+            "- 我是团队的 **反思岗位**，只处理告警、留言、升级冲突或新的明显失分。按信号读原会话；无动作只标记留言，不写报告、不提交。同一教训至少两次独立发生并有 ghref 证据才更新岗位 index.md，跨角色高频教训进入根 memory.md（≤30 行）；已有教训不重复写。\n",
             skills=["team-core", "team-reflect"],
         )
     else:
@@ -3959,70 +3956,38 @@ def reflect_sessions(spaces):
     return live_sessions(wid) if wid else []
 
 
-def user_rounds_since(spaces, since, team_mode=False, limit=None):
-    """(how many rounds started after `since`, when the last one ended).
-    In team mode, counts completed rounds across all non-reflect spaces so the reflect session wakes after team progress.
-    Each `session rounds` costs about a second, so the walk goes newest-first and stops at `limit`: the caller only
-    needs to know whether enough rounds piled up."""
-    count, last = 0, 0
-    target_wids = [wid for role, wid in spaces.items() if role not in ("reflect", "team-reflect")] if team_mode else [spaces["root"]]
-    by_workspace = session_snapshot_by_workspace(target_wids, active=False) if target_wids else {}
-    for wid in target_wids:
-        for item in sorted(by_workspace.get(wid, []), key=lambda value: -(value.get("updatedAtMs") or 0)):
-            if not team_mode and SYSTEM_LABEL in (item.get("labels") or []):
-                continue
-            if item.get("updatedAtMs", 0) <= since:
-                continue
-            for found in genet("session", "rounds", item["id"]).get("page", {}).get("rounds", []):
-                user_item = found.get("userItemId") or ""
-                if found.get("endedAtMs", 0) > since and (team_mode or (user_item and not user_item.startswith("x."))):
-                    count += 1
-                    last = max(last, found["endedAtMs"])
-                    if limit and count >= limit:
-                        return count, last
-    return count, last
-
-
 def briefing(root, mine, reason):
-    """The reflect session's starting file, assembled by the script without a model. Returns its path."""
-    now = now_ms()
-    stuck_after = setting(root, "TEAM_STUCK_AFTER", STUCK_AFTER_S)
-    lines = ["# 反思简报（脚本生成，没有调用模型）", "", "原因: %s" % reason, "时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"), ""]
+    """A bounded signal brief; original cards/notes remain the evidence source."""
     from . import quality
-    lines += quality.briefing(root, now)
+    compact = lambda value, limit: " ".join(str(value or "").split())[:limit]
+    lines = ["# 反思简报", "原因: " + compact(reason, 180)]
+    lines += quality.briefing(root, now_ms())
+    upgrade = read_json(state_dir(root, "upgrade", "latest.json"), {}) or {}
+    if upgrade.get("status") in ("conflict", "test-failure", "waiting-safe-point"):
+        lines += ["升级: %s %s" % (upgrade["status"], compact(upgrade.get("reason"), 220)),
+                  "原记录: .genethub/team/upgrade/latest.json"]
+    handled = notes_dir(root, True)
+    recent = [entry for entry in os.scandir(handled) if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False)] if os.path.isdir(handled) else []
+    if recent:
+        entry = max(recent, key=lambda item: item.stat().st_mtime_ns)
+        previous = read_json(entry.path, {}) or {}
+        lines.append("上次处理记录（验收按原证据与本次自然卡核对）: %s %s" % (entry.name, compact(previous.get("result"), 260)))
+    else:
+        lines.append("上次改动验收: 未知；没有处理记录，不能据此宣称有效。")
     notes = pending_notes(root)
-    lines.append("## 未处理的留言（%d）" % len(notes))
-    for note in notes:
-        lines += ["- %s [%s] 会话 %s 轮 %s" % (note["id"], note.get("kind"), note.get("session") or "-", (note.get("turn") or {}).get("roundId") or "-"),
-                  "  ref: %s" % (note.get("ref") or "（无）"), "  原话: %s" % (note.get("quote") or "（无）"), "  情况: %s" % (note.get("context") or "（无）")]
-    session_lines, suspect_lines = [], []
-    for role, workspace_id in mine["spaces"].items():
-        for item in sorted(live_sessions(workspace_id), key=lambda value: -value.get("updatedAtMs", 0))[:30]:
-            last_active = item.get("lastActivityAtMs") or item.get("updatedAtMs") or now
-            quiet_s = max(0, int((now - last_active) / 1000))
-            status = item.get("status")
-            inputs = item.get("inputSummary") or {}
-            requests = (item.get("interactionSummary") or {}).get("requests") or []
-            row = "- %s/%s %s [%s] %s %s" % (role, item["id"], ",".join(item.get("labels") or []), status, item.get("description") or item.get("title") or "", time.strftime("%m-%d %H:%M", time.localtime(item.get("updatedAtMs", 0) / 1000)))
-            session_lines.append(row)
-            if not requests and (status == "failed" or inputs.get("paused") or (status == "running" and quiet_s >= stuck_after)):
-                suspect_lines.append("%s（静默 %ds%s）" % (row, quiet_s, "，错误: %s" % inputs["error"] if inputs.get("error") else ""))
-    if suspect_lines:
-        lines += ["", "## 疑似异常会话（%d）" % len(suspect_lines)] + suspect_lines
-    lines += ["", "## 各会话"] + session_lines
-    done = state_dir(root, "done")
-    records = sorted((read_json(os.path.join(done, entry)) or {} for entry in os.listdir(done)), key=lambda value: value.get("createdAtMs", 0))[-10:] if os.path.isdir(done) else []
-    lines += ["", "## 最近完成的后台会话（%d）" % len(records)] + ["- %s %s %s" % (record.get("sessionId"), record.get("kind"), record.get("desc")) for record in records]
-    if has_repo(root):
-        try:
-            changed = drift_lines(root)
-        except ExpertError:
-            changed = []
-        lines += ["", "## 与平台模板的差异（%d）" % len(changed)] + ["- %s" % line for line in changed]
+    lines += ["留言 %d 条（全文用 run.py notes list 按编号读取）:" % len(notes)]
+    for note in notes[:12]:
+        lines.append("- %s [%s] %s ref=%s" % (note["id"], note.get("kind"), note.get("session") or "-", compact(note.get("ref"), 140)))
+        lines.append("  %s %s" % (compact(note.get("quote"), 60), compact(note.get("context") or note.get("text"), 160)))
+    if len(notes) > 12:
+        lines.append("其余 %d 条保留在原留言目录；按信号关联读取，不扫描全队会话。" % (len(notes)-12))
+    text = "\n".join(lines)
+    if len(text) > 4950:
+        text = text[:4950] + "\n（简报已限长；原始卡与留言未截断。）"
     path = state_dir(root, "briefings", time.strftime("%Y%m%d-%H%M%S") + ".md")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
+        handle.write(text + "\n")
     return path
 
 
@@ -4054,14 +4019,12 @@ def start_reflect(root, name, mine, reason, request=None, requester=None, tier=N
             notice(busy[0]["id"], "task", sender, request, request)
             return "已有反思会话 %s 在运行，已把要求排进它的队列" % busy[0]["id"]
         return "已有反思会话 %s 在运行，这次不再开" % busy[0]["id"]
-    if has_repo(root):
-        git_snapshot(root, "snapshot: 反思开始前")  # whatever others changed is committed first, so every change after it is the reflect session's
     notes = pending_notes(root)
     title = reflect_title(reason, notes, request)
     path = briefing(root, mine, reason)
     team_hint = ""
     if os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE"):
-        team_hint = "\n团队模式二级记忆提炼要求：先将各岗位（leader/组员/qa/research）具体经验与 ghref 证据写入对应 `spaces/<岗位>/index.md`，再将跨角色通用铁律提炼入根 `memory.md`（≤30 行）。"
+        team_hint = "\n只处理本轮信号。同一教训至少两次独立发生且有 ghref 证据才更新岗位记忆，已有教训不重复写。没有动作只 notes done，不写报告、不 snapshot。"
     text = clip("[系统说明：本反思会话由 %s 发起（用途: reflect）]\n\n原因: %s\n简报: %s\n%s%s\n按 team-reflect 办：先读简报，再按留言里的 ref 回到那一轮。处理完的留言用 `team.py notes done <编号>`；没有要告诉用户的就不要 tell-user。" % (
         sender, reason, path, ("用户的要求（原话在前，引用在后）:\n%s" % request) if request else "", team_hint))
     session_id, why = start(root, mine["spaces"][ref_key], ref_key, title, text, "TEAM_MODEL_REFLECT", tier, model)
@@ -4089,10 +4052,9 @@ URGENT_NOTE_KINDS = ("unhappy", "anomaly", "upgrade", "upgrade-conflict", "upgra
 
 
 def wake(root, name, mine):
-    """The timer decides whether the reflect session should start, without calling a model: the person started
-    WAKE_ROUNDS rounds since the last wake, or there are pending notes. Urgent notes (unhappy, anomaly, upgrade)
-    wake immediately; ordinary notes wait NOTE_QUIET_S and respect WAKE_GAP_S. If a reflect session is already
-    running and new notes arrive, they are queued into it."""
+    """Only a note or a new hourly quality deficit may wake reflection.
+    Read-only round counts and elapsed time are not actionable signals.
+    """
     if not reflect_space_key(mine["spaces"]):
         return
     state = read_json(state_dir(root, "reflect.json"), {}) or {}
@@ -4106,11 +4068,9 @@ def wake(root, name, mine):
         notified = set(state.get("notifiedNotes") or []) if state.get("notifiedSessionId") == running_id else set()
         fresh = [note for note in notes if note["id"] not in notified]
         if fresh:
-            lines = ["- %s [%s] 会话 %s: 原话=%s | 情况=%s (ref: %s)" % (
-                note["id"], note.get("kind"), note.get("session") or "-",
-                note.get("quote") or "（无）", note.get("context") or "（无）", note.get("ref") or "（无）"
-            ) for note in fresh]
-            notice(running_id, "note", "%s:hook" % name, "反思期间收到 %d 条新留言，请一并处理并 notes done:\n%s" % (len(fresh), "\n".join(lines)),
+            path = briefing(root, mine, "反思期间新增 %d 条留言" % len(fresh))
+            notice(running_id, "note", "%s:hook" % name, "反思期间收到 %d 条新留言；编号 %s。限长简报: %s；按需读取原留言，处理后 notes done。" %
+                   (len(fresh), ",".join(note["id"] for note in fresh[:20]), path),
                    running_id, *(note["id"] for note in fresh))
             state["notifiedSessionId"] = running_id
             state["notifiedNotes"] = sorted(notified | {note["id"] for note in fresh})
@@ -4128,15 +4088,14 @@ def wake(root, name, mine):
     reason = None
     if notes and (has_urgent or now - max(note.get("at", 0) for note in notes) >= setting(root, "TEAM_NOTE_QUIET", NOTE_QUIET_S) * 1000):
         reason = "有 %d 条未处理的留言%s" % (len(notes), "（含会话异常）" if has_anomaly else "")
-    elif not has_urgent and now - state.get("checkedAtMs", 0) >= setting(root, "TEAM_WAKE_CHECK", WAKE_CHECK_S) * 1000:
-        state["checkedAtMs"] = now
-        write_json(state_dir(root, "reflect.json"), state)
-        is_team = bool(os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE"))
-        need = setting(root, "TEAM_WAKE_ROUNDS", WAKE_ROUNDS)
-        count, last = user_rounds_since(mine["spaces"], state.get("atMs", 0), team_mode=is_team, limit=need)
-        write_json(state_dir(root, "reflect.json"), dict(state, seen={"rounds": count, "lastEndedAtMs": last}))  # what the last count saw, for whoever wonders why no wake
-        if count >= need:
-            reason = "自上次反思以来累计完成 %d 轮对话" % count if is_team else "自上次反思以来用户发起了 %d 轮对话" % count
+    if not reason:
+        from . import quality
+        signal = quality.reflection_signal(root, state)
+        if signal:
+            reason, key = signal
+            state["qualitySignal"] = key
+    if not reason:
+        return
     runtime = get_runtime(root)
     decision = check_decision(runtime.reflection.evaluate(runtime.context,
         {"reason": reason, "notes": notes, "state": state, "nowMs": now}))
@@ -4146,6 +4105,9 @@ def wake(root, name, mine):
             raise TeamConfigurationError("reflection allow requires a reason")
         result = start_reflect(root, name, mine, reason)
         current = read_json(state_dir(root, "reflect.json"), {}) or {}
+        if current.get("sessionId") and state.get("qualitySignal"):
+            current["qualitySignal"] = state["qualitySignal"]
+            write_json(state_dir(root, "reflect.json"), current)
         if current.get("sessionId") and notes:
             current["notifiedSessionId"] = current["sessionId"]
             current["notifiedNotes"] = sorted(already_notified | {note["id"] for note in notes})

@@ -910,38 +910,56 @@ def command(team,args):
                                '核对质量快照、过程事件与采集状态；修复后按原窗口重算') from error
 
 
-def briefing(root,now):
+def reflection_signal(root, state):
+    """One newly observed hourly deficit; replay captures are not new hours."""
     try:
-        from .quality_live import briefing as live_briefing
-        live_lines=live_briefing(root)
-        store=Path(root)/'.genethub/team/quality'
-        latest=read(store/'latest.json')
-        if not latest:return live_lines+['','## 团队工作质量','未知：尚无小时卡；等待内置质量采集。']
-        value=read(Path(root)/latest['card'])
-        stale=value['window']['endAtMs'] < now//HOUR*HOUR
-        lines=live_lines+['','## 团队工作质量（'+value.get('measurementVersion',value.get('model','tq/1'))+'）',
-               '卡：'+latest['card'], '事实：'+latest['snapshot'],
-               '正式分：'+str(value['score']) if value['formal'] else '暂定：'+('未知' if value['provisionalScore'] is None else str(value['provisionalScore']))+'，不能作为达标证据。',
-               '覆盖：'+canonical(value['coverage']).strip(), '采用版本：'+canonical(value['versions']).strip()]
-        if value.get('attribution'):
-            lines.append('失分归因（全部计分，责任来源不等于已证实根因）：'+canonical(value['attribution']).strip())
-        lines.append('有效在途小时均值（已确认下界/可能上界）：'+canonical(value.get('effectiveInFlight')).strip())
-        if value.get('model')=='tq/2':
-            lines.append('R6：按任务树实际Agent工时/有效墙钟；累计至少30分钟且本小时至少15分钟才考核，低于2触发；没有合格任务为不适用。只连续计算同一口径的卡。')
-            lines.append('任务并行：'+canonical(value.get('taskParallelism')).strip())
-        else:
-            lines.append('R6：有未完成用户目标期间，小时均值低于2触发；暂停/等用户不计。上下界间的不确定性不能算作达标。')
-        if stale:lines.append('当前整点小时尚无卡；上卡不能替代本小时。')
-        lines.append('失分与缺口（按卡内顺序）：')
-        for loss in value['losses'][:16]:
-            detail=dict(loss)
-            if detail.get('id')=='R6' and detail.get('loss') is None:
-                # A valid goals/starts capture can still await conclusions or
-                # activity observations. Do not diagnose missing starts from
-                # the score's aggregate uncertainty label; keep the card intact.
-                detail['reason']=('原生任务树会话执行区间读取缺失；核对各任务上下界及missingSessionIds。' if value.get('model')=='tq/2' else '目标/开工覆盖、活动观测或后继结论尚不足以判定；核对小时均值上下界与事实快照。')
-            lines.append('- '+canonical(detail).strip())
-        lines.append('按实际原因自主选择改进；没有新增流程、岗位或改进格式要求。')
+        latest = read(Path(root)/'.genethub/team/quality/latest.json')
+        if not latest:
+            return None
+        value = read(Path(root)/latest['card'])
+        if not isinstance(value, dict):
+            return None
+        key = str(value['window']['endAtMs']) + ':' + str(value.get('measurementVersion'))
+        if state.get('qualitySignal') == key:
+            return None
+        result = value.get('score') if value.get('formal') else value.get('provisionalScore')
+        if value.get('formal') and number(result) and result >= 80:
+            return None
+        return ('新小时质量卡存在明显失分或数据不足；按卡中证据处理', key)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None  # malformed input is not permission to invent a patrol
+
+
+def briefing(root, now):
+    """Compact references and the three largest losses, never full histories."""
+    compact = lambda value, limit: ' '.join(str(value or '').split())[:limit]
+    lines = []
+    try:
+        from .quality_live import current
+        live = current(root)
+        lines.append('实时告警: 红线%d，警告%d，未知%d；全文 .genethub/team/quality/live-alerts.json' %
+                     (len(live.get('redLines', [])), len(live.get('warnings', [])), len(live.get('unknown', []))))
+        for alert in live.get('redLines', [])[:4]:
+            lines.append('- %s %s %s 责任=%s' % (alert.get('rule'), alert.get('id'),
+                         compact(alert.get('workItemId'), 90), compact((alert.get('attribution') or {}).get('component'), 30)))
+        latest = read(Path(root)/'.genethub/team/quality/latest.json')
+        if not latest:
+            return ['质量首行: 未知，尚无小时卡；不能作为达标证据。'] + lines
+        value = read(Path(root)/latest['card'])
+        if not isinstance(value, dict):
+            raise ValueError('missing quality card')
+        headline = ('正式分: ' + str(value.get('score'))) if value.get('formal') else ('非正式: ' + str(value.get('provisionalScore')) + '，不能作为达标证据')
+        lines.insert(0, '质量首行: ' + headline)
+        version = (value.get('versions') or {}).get('teamTemplate') or {}
+        lines += ['自然卡: ' + latest['card'], '原生事实: ' + latest['snapshot'],
+                  '团队运行样板: ' + compact(canonical(version).strip(), 300),
+                  '覆盖: ' + compact(canonical(value.get('coverage')).strip(), 250)]
+        if value['window']['endAtMs'] < now//HOUR*HOUR:
+            lines.append('本小时尚无新卡；上卡不能替代本小时。')
+        losses = sorted(value.get('losses', []), key=lambda x: -(x['loss'] if number(x.get('loss')) else 0))[:3]
+        lines.append('最大三个失分或缺口（其余见原卡）:')
+        for loss in losses:
+            lines.append('- %s 失分=%s %s' % (loss.get('id'), loss.get('loss'), compact(loss.get('reason'), 180)))
         return lines
-    except (OSError,ValueError,KeyError,TypeError):
-        return ['','## 团队工作质量','未知：质量卡读取失败；不能按零失分或达标处理。']
+    except (OSError, ValueError, KeyError, TypeError):
+        return ['质量首行: 未知，质量卡读取失败；不能按零失分或达标处理。'] + lines

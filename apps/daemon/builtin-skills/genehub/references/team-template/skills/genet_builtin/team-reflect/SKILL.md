@@ -1,26 +1,22 @@
 ---
 name: team-reflect
-description: 1+N 项目团队的反思与进化会话：非实时回看全队会话与留言，执行二级记忆提炼（Session -> 各岗位 index.md -> 根 memory.md），自主维护升级团队 Skill、看板与脚本。在 team-reflect 空间里开的反思会话用它。
+description: 团队的反思岗位：按告警、留言、升级冲突或新小时明显失分处理具体问题；无动作不写报告，同一教训至少两次发生才沉淀记忆。
 ---
 
 # 团队反思与进化
 
-你不面对用户，只让这支项目团队下次配合更默契、交付更让用户满意；这是唯一的目标。先读 `references/rationale.md`。
+只处理本轮信号，让团队交付更可靠。第一轮调用工具读消息里的简报（最多5,000字符），再按原卡、留言编号或 ghref 读取相关证据；不扫描全队历史。背景按需读 references/rationale.md。
 
-团队根目录是 `run.py path root`（你的 cwd 往上两级），改团队文件用绝对路径。先区分定义源与执行制品：有 `.spacebuilder/output-lock.json` 的目录只运行和验证；按当前 `artifacts/PROVENANCE.json` 找定义源负责人，在源端维护 Skill、脚本和岗位，build 后部署，不在远端执行副本重建定义或手写生成物。记忆与业务成果保留，迁移时不覆盖。
+团队根是 `run.py path root`。有 `.spacebuilder/output-lock.json` 的是执行制品：按来源找定义源，在源端修改、构建与部署，执行端只验证；保留业务文件、身份、原任务与回执。
 
-1. **立即调用工具读简报与自愈异常**（第一轮必须带工具调用读取第一条消息里的简报路径，严禁只发纯文本开场白结束本轮）：看未处理留言（含 `kind=anomaly`）、**疑似异常会话**、全队各岗位会话与模板差异。对卡住、失败或无回复停止的会话，先用 `"$GENEHUB_CLI" session get <id>` 确认没在等人，再读 `session narrative` 查清原因，先核对暂停来源、原派单与结果。用户暂停、待人及原因未知时不自动恢复；有明确继续要求才走 team-core 的显式续接，保持原 Owner 与稳定 ID，不中断重开重复任务；协作故障登记影响、恢复和实际采用证据。
-2. **追根因与二级记忆提炼（`Session -> 各岗位 index.md -> 根 memory.md`）**：
-   - 按留言的 `ref` 用 `"$GENEHUB_CLI" session narrative <会话> --item <消息>` 或用 `rg` 搜 `.genethub/sessions/` 与 `spaces/*/.genethub/sessions/`，定位根因。
-   - **第一级提炼（岗位级 L2）**：扫描 `leader`、各管线组员（如 `skill-lead`、`combat-lead`）、`qa`、`research` 的增量会话，把该角色专属的踩坑教训、模块架构约束、`rg` 检索词 + `ghref` 证据指针写入对应 `spaces/<岗位>/index.md`（以及 `front/index.md`）。
-   - **第二级提炼（团队根级 L1）**：将跨角色共性、高频复现的全局铁律浓缩进根目录 `memory.md`（严格守 ≤30 行，满了先合并或降级到对应岗位 `index.md`）。
-3. **自主维护与演进**：优先改 `soul.md` / `memory.md` / 岗位身份，再改 `skills/<业务分组>/` 与 `tools/<业务包>/`。按 team-core `references/extensions.md` 继承公开 Class，由根描述的 `team` 选择；不要复制调度器、替换内部函数或追加第二份锁。`tools/genet_builtin/`、`skills/genet_builtin/` 尽量随平台整体升级；确需修改时记录必要补丁与验证，不能宣称以后无需合并。每个 `SKILL.md` ≤40 行，合并指令 ≤32 KiB。
-   改本队能解决的自己改；样板负责且未改过的步骤、内核原因码或不得不绕行的问题，按 [平台反馈](references/platform-feedback.md) 写 `run.py feedback`。归因证据不足先标线索，不能只向用户传话或反复写无人读取的报告。反馈只写文件，不触发模型；采用修复后由本队复验原编号，平台不代写 fixed。
-4. **生效与记录（必做闭环）**：定义源改完运行 `"$GENEHUB_PYTHON" <团队根>/tools/run.py sync-identity`，独立制品由源端 build 后部署、执行端 `spacebuilder verify --artifacts-only`；执行副本的 `sync-identity` 不会重编，不能据此声称新规范已生效。保留原候选与未提交成果，记录源提交、构建与实际岗位采用；最后 `run.py snapshot -m "…"`，并 `run.py notes done <编号> --result "做了什么"`。
-5. **默认静默**：例行诊断、记忆/模板更新写 notes 和报告，不向前台发 report 或“已静默更新”note；普通 Agent note 仍会触发模型。只有用户主动索要结论、业务交付或确需用户决定时用 `run.py tell-user` 一次回传，回答体验影响、处理状态、防复发；故障类别本身不是通知理由。升级见 `references/upgrade.md`。
+1. **核对信号**：按留言 ref 用 `"$GENEHUB_CLI" session narrative <会话> --item <消息>` 读原文。异常先 `session get` 核对原任务、暂停来源和是否待人；用户暂停、待人或原因未知时保持暂停，不中断重开。明确续接才沿原 Owner、原 SID、稳定编号恢复。
+2. **只做必要改进**：本队流程改业务 Skill/公开策略 Class，合同见 team-core references/extensions.md；不复制调度器或增加第二把租约。未触发红线的平台问题按 references/platform-feedback.md 写反馈，证据不足保留线索。
+3. **记忆按复发沉淀**：同一教训至少两次独立发生并有 ghref 证据，才更新相应岗位 index.md；已有教训不重复写。跨角色高频教训再进根 memory.md（≤30行），完整细节留原会话。一次性问题只处理原留言。
+4. **有修改才验证与提交**：身份修改运行 `run.py sync-identity`；运行包修改由源端 build、执行端 verify --artifacts-only，核对实际采用。仅提交自己本轮已验证的改动，保留他人未提交成果；需要 snapshot 前先检查候选，不能把无关文件一起提交。Skill≤40行、编译指令≤32KiB。
+5. **无动作就结束**：只 `run.py notes done <编号> --result "原证据与无需动作的原因"`；不写报告、不更新记忆、不 snapshot、不向前台发送“已巡查”消息。有动作也优先在原留言记录改动与验收，避免重复报告。只有用户索要、业务交付或确需用户决定时 tell-user，一次说清影响、状态与防复发。
 
-质量简报含最新小时卡、实际采用版本与失分账单；正式分、暂定分和缺失数据分开读。用 `run.py quality card`、`quality history` 或 `quality describe` 核对；按原因自主选择改流程、知识或反馈平台，不要求额外的改进格式。口径见 team-core `references/quality.md`。
+质量卡只读：正式分、暂定分与未知分开；指标保持滚动24小时，红线只按本小时原生事实复核，红线小时失格、连续达标归零。卡、归因和证据自动存档，不人工解除、不另开窗口；业务验收另判。
 
-红线已按自动归因通知负责方：团队原因通知 Owner 和反思，读 `quality alerts` 后自主修正，下一张卡看结果；平台原因直接进入平台告警，不另写平台反馈。自动归因判断有误时，才可用 `quality triage <实例id> --attribution <更正来源> --evidence <依据>` 补更正备注，允许后续更正，历史自动存档；不设登记时限或超时升级。平台反馈只用于未触发红线的平台问题。
+红线已自动路由：团队原因通知 Owner 和反思，修本队问题并看下一张卡；平台原因直达平台开发，不重复写反馈。只有自动归因错误时才用 quality triage 写可更正备注，无登记时限或超时升级。全文见 team-core references/quality.md。
 
-红线按每小时原生事实自动复核和归档，不提交人工解除命令。违约仍在就继续触发，已消失则下一小时不再扣分；读取不完整保持未知。红线所在小时失格并使连续达标计数归零，指标始终使用滚动24小时，不另开测量窗口。归因、事实与更正备注自动存档，用户目标是否验收单独判断。
+升级由 run.py upgrade 自动选择最新版，已采用/等待不唤醒；只处理实际冲突或测试失败，见 references/upgrade.md。例行诊断没有新信号就不巡查；不要因回合数或整点要求开一轮报告。
