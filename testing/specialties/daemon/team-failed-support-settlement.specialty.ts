@@ -39,13 +39,15 @@ defineSpecialty({
       if (last?.type !== "assistantMessage") throw new Error("native task command receipt missing");
       const v = JSON.parse(last.text);
       t.assertions.assert(expected === 0 ? v.code === 0 : v.code !== 0, v.out+v.err);
-      return expected === 0 ? JSON.parse(v.out.trim().split("\n").at(-1)!) : v;
+      if (expected !== 0) return v;
+      try { return JSON.parse(v.out.trim().split("\n").at(-1)!); } catch { return v; }
     };
     const front = await r.create("ctl-cli-command");
     const task = await cli(front, ["task", "start", "--space", "leader", "--desc", "failure result check", "--request-id", "failure.goal", "Inspect a bounded support failure"]);
     const owner = task.owner.sessionId as string; await idle(owner);
     select("ctl-failed-support");
-    const support = await cli(owner, ["task", "support", task.taskId, "--space", "qa", "--desc", "native failed support", "--request-id", "failure.support", "Perform a bounded external check"]);
+    const failedDirectory = join(r.root, "failed-writer"); mkdirSync(failedDirectory);
+    const support = await cli(owner, ["task", "support", task.taskId, "--space", "qa", "--desc", "native failed support", "--directory", failedDirectory, "--request-id", "failure.support", "Perform a bounded external check"]);
     const child = support.collaborator as string;
     await t.tools.waitUntil(async () => (await r.snapshot(child)).summary.status === "failed", 20000);
     const before = (await r.snapshot(child)).summary.inputSummary;
@@ -73,6 +75,46 @@ defineSpecialty({
       "reconciliation resumed failed work, dropped input or replayed its result");
     const nativeTask = JSON.parse(readFileSync(r.state("tasks", task.taskId+".json"), "utf8"));
     t.assertions.assert(!nativeTask.finished && !nativeTask.collaborators[0].finished, "execution failure fabricated a business conclusion");
+    t.assertions.assert(existsSync(first.lock) && existsSync(r.state("pending", child+".json")),
+      "a paused failed writer was released or archived before explicit recovery");
+    const resumeId = "failure.support.resume", resumeGoal = "Retry the original unfinished external check";
+    const resumeArgs = ["send", "--to", child, "--kind", "human", "--resume", "--message-id", resumeId, resumeGoal];
+    const outsider = await r.create("ctl-cli-command");
+    await cli(outsider, resumeArgs, 1);
+    t.assertions.assert((await r.snapshot(child)).summary.inputSummary?.paused && existsSync(first.lock),
+      "a different requester changed the failed writer before the original Owner decided");
+    await cli(owner, resumeArgs);
+    await cli(owner, resumeArgs);
+    await cli(owner, [...resumeArgs.slice(0, -1), "CONFLICTING RETRY"], 1);
+    await t.tools.waitUntil(async () => {
+      const snap = await r.snapshot(child);
+      return snap.summary.status === "failed" && snap.items.some(x => x.type === "userMessage" && x.id === resumeId);
+    }, 20000);
+    const resumed = await r.snapshot(child);
+    const continuation = resumed.items.filter(x => x.type === "userMessage" && x.id === resumeId);
+    t.assertions.assert(continuation.length === 1 && continuation[0].type === "userMessage"
+      && continuation[0].origin?.sessionId === owner && continuation[0].text.includes(resumeGoal),
+      "failure recovery changed the Session, lost requester attribution or replayed its input");
+    const receipts = (await import("node:fs")).readdirSync(r.state("resumes")).filter(n => n.endsWith(".json"))
+      .map(n => JSON.parse(readFileSync(r.state("resumes", n), "utf8")));
+    const receipt = receipts.find(x => x.id === resumeId);
+    t.assertions.assert(receipt?.state === "accepted"
+      && JSON.stringify(receipt.previousPending.done) === JSON.stringify(first.done)
+      && receipt.previousPending.resultDelivery.messageId === first.resultDelivery.messageId
+      && receipt.previousPending.executionFailure.roundId
+      && existsSync(first.lock), "recovery discarded the immutable failure, result receipt or writer obligation");
+    r.ok(["tick"]); await idle(owner);
+    const second = record();
+    t.assertions.assert(second.done?.outcome === "failed" && second.resultDelivery?.queued
+      && second.done.reply !== first.done.reply && second.resultDelivery.messageId !== first.resultDelivery.messageId,
+      "the new failed round reused the previous failure generation or lost its notification");
+    const originalResult = first.resultDelivery.messageId, newResult = second.resultDelivery.messageId;
+    r.ok(["tick"]); await idle(owner);
+    const inputs = (await r.snapshot(owner)).items;
+    t.assertions.assert(inputs.filter(x => x.type === "userMessage" && x.id === originalResult).length === 1
+      && inputs.filter(x => x.type === "userMessage" && x.id === newResult).length === 1
+      && existsSync(first.lock) && (await r.snapshot(child)).summary.inputSummary?.paused,
+      "new failure duplicated an earlier result, cleared its pause or released unfinished work");
     await cli(owner, ["task", "finish", task.taskId, "--outcome", "blocked", "Failed external check; business not accepted"]);
 
     for (const outcome of ["blocked", "failed"]) {
