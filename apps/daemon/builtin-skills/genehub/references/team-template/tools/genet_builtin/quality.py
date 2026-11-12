@@ -374,10 +374,6 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     metric_start = end-24*HOUR
     from .quality_epoch import context as epoch_context
     lifecycle = epoch_context(root, end)
-    if lifecycle['epoch']:
-        metric_start = max(metric_start, lifecycle['epoch']['atMs'])
-        start = max(start, metric_start)
-        if start >= end:raise ValueError('await the first post-adoption measurement hour')
     before = template_digest()
     log = events(root, cutoff)
     tasks = {v['taskId']: v for v in records(state/'tasks')}
@@ -761,17 +757,15 @@ def register(sub):
     c=a.add_parser('triage',help='record redline attribution without closing a repair');c.add_argument('incident')
     c.add_argument('--attribution',required=True,choices=['team','platform-template','kernel','provider','unknown'])
     c.add_argument('--evidence',required=True)
-    c=a.add_parser('resolve',help='verify repaired/adopted evidence and current native obligation before closing a redline')
-    c.add_argument('incident');c.add_argument('--repair-evidence',required=True);c.add_argument('--adoption-evidence',required=True)
 
 
 def _command(team,args):
     root=team.find_root();store=Path(root)/'.genethub/team/quality'
     action=args.quality_action
-    if action in ('alerts','triage','resolve'):
+    if action in ('alerts','triage'):
         from . import quality_live
         value=(quality_live.replay(read(Path(args.snapshot))) if args.snapshot else quality_live.current(root)) if action=='alerts' else (
-            quality_live.triage(team,root,args) if action=='triage' else quality_live.resolve(team,root,args))
+            quality_live.triage(team,root,args))
         print(canonical(value),end='');return
     if action=='execution':
         from .execution_facts import view
@@ -779,7 +773,7 @@ def _command(team,args):
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
         print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':{'basis':'task-agent-hours/1','minimumTotalEffectiveMs':1800000,'minimumHourEffectiveMs':900000,'required':2},'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
-                         'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour and unresolved old instances; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
+                         'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour native facts only; indicators: rolling 24h','inference':'native read-in without follows is tentative adoption'}),end='');return
     if action=='history':
         latest={}
         revisions={}
@@ -797,9 +791,6 @@ def _command(team,args):
             print(canonical({'status':'busy','cardProduced':False}),end='');return
         try:
             cutoff=team.now_ms();offset=[0,1,0,2][cutoff//300000 % 4];end=(cutoff//HOUR-offset)*HOUR
-            redstate=read(store/'redline-state.json') or {}
-            if any(x['atMs'] >= end for x in redstate.get('measurementEpochs',[])):
-                print(canonical({'status':'重新测量中','cardProduced':False,'reason':'await first post-adoption hour; prior immutable cards retained'}),end='');return
             facts=capture(team,root,end,cutoff);facts['captureKind']='native-hour'
             from .quality_live import current
             live=current(root)

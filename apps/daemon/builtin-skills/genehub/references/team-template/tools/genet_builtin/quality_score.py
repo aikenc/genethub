@@ -245,7 +245,7 @@ def score(facts):
     if lifecycle is not None:
         from .quality_epoch import validate
         validate(lifecycle)
-        for row in lifecycle['open']:
+        for row in lifecycle['open'] if lifecycle['policy'] == 'verified-repair-adoption/1' else []:
             rule=row['rule']
             if rule not in instances:raise ValueError('unsupported durable redline rule')
             if not instances[rule]:

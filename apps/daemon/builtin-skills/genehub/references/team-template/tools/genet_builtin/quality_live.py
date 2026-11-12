@@ -1,7 +1,7 @@
 """Bounded live quality observations and durable redline occurrences.
 
 The timer is the producer. Public offline projection never writes Team state.
-A symptom disappearing does not prove a repair was adopted or close the goal.
+Fresh complete native observations close an incident automatically; goal acceptance is separate.
 """
 import hashlib
 from pathlib import Path
@@ -19,8 +19,8 @@ def identity(value):
 
 
 def project(facts):
-    # Detection uses current obligations. Durable unresolved episodes are a
-    # separate scoring policy, not evidence that the symptom still exists.
+    # Native occurrences decide this window; durable history is evidence,
+    # never an additional physical violation.
     facts=dict(facts)
     if 'redlineLifecycle' in facts:
         facts['redlineLifecycle']=dict(facts['redlineLifecycle'],open=[])
@@ -56,8 +56,17 @@ def project(facts):
             warn('R4',{'id':stall['taskId']},stall.get('startAtMs'),480000)
     return {'schema':'team-quality-live-alerts/1','asOfMs':facts['capturedAtMs'],
             'redLines':red,'warnings':warnings,
+            'windowEndMs':now,
+            'nativeFactsSha256':hashlib.sha256(canonical(facts).encode()).hexdigest(),
+            'ruleCoverage':{rule:(v['coverageKnown'] and (rule != 'R6' or facts.get('taskTreesSourceComplete') is True and all(x['state']!='unknown' for x in card.get('taskParallelism') or []))) for rule,v in card['redLines'].items()},
             'unknown':[{'rule':rule} for rule,v in card['redLines'].items() if v['triggered'] is None]
                       +[dict(issue,rule='source-evidence') for issue in facts.get('issues',[])]}
+
+
+def same_occurrence(row, signal):
+    return (row['rule']==signal['rule'] and row['workItemId']==signal['workItemId']
+            and row.get('reason')==signal.get('reason')
+            and (row['rule']=='R6' or row.get('dueAtMs')==signal.get('dueAtMs')))
 
 
 def advance(state, sample):
@@ -72,12 +81,8 @@ def advance(state, sample):
         rule = signal['rule'];basis = signal['measurementVersion']
         key = identity([rule,signal['workItemId'],signal.get('reason'),
                         basis,signal.get('dueAtMs') if rule!='R6' else 'parallelism'])
-        def same(row):
-            return (row['rule']==rule and row['workItemId']==signal['workItemId']
-                    and row.get('reason')==signal.get('reason')
-                    and (rule=='R6' or row.get('dueAtMs')==signal.get('dueAtMs')))
-        row=next((x for x in state['incidents'].values() if x['status']=='open' and same(x)),None)
-        closed=max((x for x in state['incidents'].values() if x['status']=='closed' and same(x)),
+        row=next((x for x in state['incidents'].values() if x['status']=='open' and same_occurrence(x,signal)),None)
+        closed=max((x for x in state['incidents'].values() if x['status']=='closed' and same_occurrence(x,signal)),
                    key=lambda x:x['closedAtMs'],default=None)
         if row is None and closed:
             if (signal.get('officialHour') and signal['sourceWindowEndMs']<=closed['closedAtMs']
@@ -98,6 +103,20 @@ def advance(state, sample):
             if hour not in hours:hours.append(hour);hours.sort();hours[:]=hours[-48:]
             if hour-HOUR in hours and hour-HOUR>row.get('previousClosedAtMs',0) and not row.get('platformEscalation'):
                 row['platformEscalation'] = 'consecutive-hours';escalated.append(key)
+    # Historical hourly signals feed audit/escalation only. Closure needs the
+    # current complete native rule observation, never absence from a failed read.
+    current = [x for x in sample['redLines'] if x.get('sourceWindowEndMs') == sample.get('windowEndMs')]
+    for row in state['incidents'].values():
+        if row['status'] != 'open' or (sample.get('ruleCoverage') or {}).get(row['rule']) is not True:
+            continue
+        matching = [x for x in current if same_occurrence(row,x)]
+        if any(not number(x.get('resolvedAtMs')) or x['resolvedAtMs'] > now for x in matching):
+            continue
+        closed_at = max([x['resolvedAtMs'] for x in matching], default=now)
+        row.update(status='closed', closedAtMs=closed_at,
+                   resolution={'basis':'native-hourly-facts/2', 'observedAtMs':now,
+                               'nativeFactsSha256':sample.get('nativeFactsSha256'),
+                               'ruleCoverageKnown':True})
     for key,row in state['incidents'].items():
         if (row['status']=='open' and (row.get('triage') or {}).get('attribution','unknown')=='unknown'
                 and now>=row['triageDueAtMs'] and not row.get('platformEscalation')):
@@ -172,6 +191,13 @@ def tick(team, root):
             if not evidence.exists():team.write_json(str(evidence),{'incident':row,'facts':facts})
             row['evidence']={'path':str(evidence.relative_to(Path(root))),'dueAtMs':row.get('dueAtMs'),
                              'firstSeenAtMs':row['firstSeenAtMs'],'measurementVersion':row['measurementVersion']}
+            if row['status'] == 'closed':
+                archive=store/'incidents'/(ident+'.closed.json')
+                if not archive.exists():team.write_json(str(archive),{'incident':row,'facts':facts})
+                if not row.get('closureRecorded'):
+                    team.quality_events.emit(team,root,'redline-closed',ident,incidentId=ident,
+                                            rule=row['rule'],closedAtMs=row['closedAtMs'],resolution=row.get('resolution'))
+                    row['closureRecorded']=True
             if row.get('symptomResolvedAtMs') is not None and not row.get('resolutionRecorded'):
                 team.quality_events.emit(team,root,'redline-symptom-resolved',ident,incidentId=ident,rule=row['rule'],
                     resolvedAtMs=row['symptomResolvedAtMs'],repairAdoptionVerified=False)
@@ -187,11 +213,11 @@ def tick(team, root):
                                          workItemId=row['workItemId'],attribution=row['attribution'],evidence=row['evidence'])
             platform_feedback(team,root,row)
         team.write_json(str(store/'redline-state.json'),state)
-        # Durable episodes survive an hour boundary or a disappearing symptom.
-        # Explicit repair/adoption closure is a separate operation, never inferred
-        # from baseline refresh or an unreadable Session.
+        # Current obligations plus unreadable unresolved instances remain live;
+        # the immutable hourly cards never receive historical closure debt.
         sample['redLines']=[dict(row) for row in state['incidents'].values() if row['status']=='open']
-        sample['measurementEpoch']=next(iter(reversed(state.get('measurementEpochs',[]))),None)
+        sample['measurementEpoch']=None
+        sample['lifecyclePolicy']='native-hourly-facts/2'
         for warning in sample['warnings']:
             warning['id']=identity([warning['rule'],warning['workItemId'],warning['sinceAtMs']])
         team.write_json(str(store/'live-alerts.json'),sample)
@@ -225,64 +251,9 @@ def failed(team, root, error):
     team.write_json(str(Path(root)/'.genethub/team/quality/live-alerts.json'),value)
 
 
-def _evidence(root, name):
-    path=Path(name)
-    if path.is_absolute() or '..' in path.parts:raise ValueError('evidence must be a Team-relative regular file')
-    root=Path(root).resolve();path=root/path
-    if path.is_symlink() or not path.is_file() or root not in path.resolve().parents or not 0<path.stat().st_size<=131072:
-        raise ValueError('bounded regular repair/adoption evidence required')
-    return {'path':str(path.relative_to(root)),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
-def resolve(team, root, args):
-    """Explicit Team verification; never called automatically by an upgrade."""
-    import os
-    actor=os.environ.get('GENEHUB_SESSION_ID','')
-    if not team.SESSION_ID.fullmatch(actor):raise ValueError('native Agent session required for repair verification')
-    repair=_evidence(root,args.repair_evidence);adoption=_evidence(root,args.adoption_evidence)
-    store=Path(root)/'.genethub/team/quality'
-    with team.inbox_lock(root,'quality-live',purpose='红线修复采用复验'):
-        state=quality.read(store/'redline-state.json');row=state['incidents'][args.incident]
-        if row['status']=='closed':
-            if row['resolution']['repair']!=repair or row['resolution']['adoption']!=adoption:
-                raise ValueError('closed incident evidence is immutable')
-            return row
-        now=team.now_ms()
-        facts=quality.capture(team,root,now,now,budget_seconds=100)
-        sample=project(facts)
-        if facts.get('issues') or any(x['rule']==row['rule'] for x in sample['unknown']):
-            raise ValueError('unknown native evidence cannot close an incident')
-        matching=[x for x in sample['redLines'] if x['rule']==row['rule']
-                  and x['workItemId']==row['workItemId'] and x.get('reason')==row.get('reason')]
-        if any(not number(x.get('resolvedAtMs')) or x['resolvedAtMs']>now for x in matching):
-            raise ValueError('native obligation remains open after the claimed repair')
-        closed_at=team.now_ms()
-        proof=store/'resolutions'/(args.incident+'-facts.json')
-        team.write_json(str(proof),facts)
-        row['status']='closed';row['closedAtMs']=closed_at
-        row['resolution']={'repair':repair,'adoption':adoption,'sessionId':actor,
-            'nativeFacts':str(proof.relative_to(Path(root))),
-            'nativeFactsSha256':hashlib.sha256(canonical(facts).encode()).hexdigest(),
-            'observedAtMs':now,'versions':facts['versions']}
-        epoch=None
-        if not any(x['status']=='open' for x in state['incidents'].values()):
-            epoch={'id':identity([closed_at,sorted(state['incidents'])]),'atMs':closed_at,
-                   'closedIncidentIds':sorted(state['incidents'])}
-            state.setdefault('measurementEpochs',[]).append(epoch)
-        state['asOfMs']=closed_at
-        team.write_json(str(store/'redline-state.json'),state)
-        sample['redLines']=[dict(x) for x in state['incidents'].values() if x['status']=='open']
-        sample['measurementEpoch']=epoch or next(iter(reversed(state.get('measurementEpochs',[]))),None)
-        team.write_json(str(store/'live-alerts.json'),sample)
-        team.quality_events.emit(team,root,'redline-closed',args.incident,
-            at_ms=closed_at,incidentId=args.incident,rule=row['rule'],resolution=row['resolution'])
-        if epoch:team.quality_events.emit(team,root,'measurement-epoch-started',epoch['id'],at_ms=closed_at,epoch=epoch)
-        return row
-
-
 def briefing(root):
     value=current(root)
-    return ['', '## 未关闭红线（实时观察；消失不等于修复采用）',
+    return ['', '## 未关闭红线（按原生事实自动复核归档；未知保持未知）',
             '观测时间：'+str(value.get('asOfMs')),
             *['- '+canonical({k:x.get(k) for k in ('id','rule','workItemId','attribution','evidence','triageDueAtMs','platformEscalation','triage')}).strip()
               for x in value['redLines']],
