@@ -55,9 +55,17 @@ defineSpecialty({
     write(r.state("pending", queued.sessionId + ".json"), queued);
     const inbox = r.state("inbox", r.front + ".jsonl"); mkdirSync(dirname(inbox), { recursive: true });
     writeFileSync(inbox, JSON.stringify({ messageId: inboxId, atMs: Date.now(), purpose: "result", sender: "original queued sender", ref: queued.done.ref, text: "Original queued evidence", machine: null }) + "\n");
-    const started = Date.now(); r.ok(["hook"]);
-    t.assertions.assert(Date.now() - started < 60000, "idle requester result exceeded one minute");
+    const started = Date.now();
+    // Each bounded timer pass can retain unfinished reconciliation. Observe
+    // real archive completion across passes within the original user contract,
+    // rather than treating a returned hook as five completed deliveries.
+    await t.tools.waitUntil(async () => {
+      r.ok(["hook"]);
+      return [...conclusions.slice(0, 2), independent, queued].every(rec =>
+        existsSync(r.state("done", rec.sessionId + ".json")));
+    }, 60000);
     await idle(r.front);
+    t.assertions.assert(Date.now() - started < 60000, "idle requester result exceeded one minute");
     for (const rec of conclusions.slice(0, 2)) {
       const saved = JSON.parse(readFileSync(r.state("done", rec.sessionId + ".json"), "utf8"));
       t.assertions.assert(saved.resultDelivery.messageId === messageId && saved.resultDelivery.queued
