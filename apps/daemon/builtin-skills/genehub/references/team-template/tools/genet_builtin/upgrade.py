@@ -62,6 +62,35 @@ def clean(t, root):
     return not git(t, root, 'status', '--porcelain').strip()
 
 
+def source_identity(t, root, head):
+    """Validation inputs, excluding the reflection's own narrative commits.
+
+    Keep tools, tests, settings and custom files. A Git ancestry correction is
+    also an input even if it leaves file bytes unchanged. Never rewrite refs
+    to make unrelated histories appear compatible.
+    """
+    tree = git(t, root, 'ls-tree', '-r', '-z', head)
+    entries = tree.split(b'\0')
+    if len(tree) > 2*1024*1024 or len(entries) > 10001:
+        raise Conflict([], 'source-file-bound-exceeded')
+    digest = hashlib.sha256()
+    for entry in entries:
+        if not entry:
+            continue
+        path = entry.split(b'\t', 1)[1].decode('utf-8')
+        parts = Path(path).parts
+        if (path in ('memory.md', 'front/index.md', 'front/memory.md')
+                or path.startswith('docs/reflection/')
+                or len(parts) == 3 and parts[0] == 'spaces' and parts[2] in ('index.md', 'memory.md')):
+            continue
+        digest.update(entry + b'\0')
+    base = t.git(root, 'merge-base', head, t.platform_ref(root), check=False)
+    if base.returncode not in (0, 1):
+        raise RuntimeError('merge-base failed: ' + base.stderr.decode('utf-8', 'replace')[-1600:])
+    digest.update(b'ancestry\0' + base.stdout.strip())
+    return digest.hexdigest()
+
+
 def alive(pid):
     if type(pid) is not int or pid <= 0:
         return False
@@ -128,6 +157,10 @@ def schedule(t, root):
             waiting = previous if previous.get('sourceApplied') and previous.get('target') == target else dict(schema='team-upgrade/1', target=target, head=head)
             return store(t, root, waiting,
                          'waiting-safe-point', reason='uncommitted-source-changes')
+        inputs = source_identity(t, root, head)
+        if (previous.get('target') == target and previous.get('status') in ('conflict', 'test-failure')
+                and previous.get('sourceIdentity') == inputs):
+            return previous  # recording the failure is not a new repair attempt
         if (previous.get('sourceApplied') and previous.get('target') == target
                 and previous.get('head') == head and previous.get('status') == 'waiting-safe-point'):
             row = previous
@@ -138,7 +171,8 @@ def schedule(t, root):
                 and previous.get('status') in ('adopted', 'conflict', 'test-failure')):
             return previous
         row = row or dict(schema='team-upgrade/1', target=target, head=head, template=template,
-                          startedAtMs=t.now_ms(), generation=hashlib.sha256((target + '\0' + head).encode()).hexdigest()[:24])
+                          startedAtMs=t.now_ms(), sourceIdentity=inputs,
+                          generation=hashlib.sha256((target + '\0' + head).encode()).hexdigest()[:24])
         row['delegatedNotes'] = sorted(set(row.get('delegatedNotes', [])) | set(delegated))
         directory = Path(t.state_dir(root, 'upgrade', row['generation']))
         directory.mkdir(parents=True, exist_ok=True)
@@ -155,7 +189,12 @@ def merge_tree(t, root, row, directory):
     # Record the new platform as a comparison branch, never as adoption.
     t.platform_commit(root, row['template'])
     platform = t.git_text(root, 'rev-parse', t.platform_ref(root))
-    base = t.git_text(root, 'merge-base', row['head'], platform)
+    ancestry = t.git(root, 'merge-base', row['head'], platform, check=False)
+    if ancestry.returncode == 1:
+        raise Conflict([], 'no-common-ancestor; manual three-way integration required')
+    if ancestry.returncode:
+        raise RuntimeError('merge-base failed: ' + ancestry.stderr.decode('utf-8', 'replace')[-1600:])
+    base = ancestry.stdout.decode().strip()
     local = set(git(t, root, 'diff', '--name-only', '-z', base, row['head']).decode().split('\0'))
     changed = set(git(t, root, 'diff', '--name-only', '-z', base, platform).decode().split('\0'))
     builtin = ('tools/genet_builtin/', 'skills/genet_builtin/')
