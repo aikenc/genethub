@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
@@ -247,6 +248,59 @@ defineSpecialty({
   t.assertions.assert(pastSerial.redLines.R6.triggered===true && pastSerial.taskParallelism[0].high===1
     && pastSerial.taskParallelism[0].missingSessionIds.length===0,
     "a future Session introduced phantom uncertainty into a prior hour");
+  const legacyFacts={...clone(),scoringModel:"tq/2",taskTrees:[r6Tree("legacy-frozen",50,[r6Session("o",r6Runs([0,50]))])],taskTreesSourceComplete:true};
+  const legacyText=card(legacyFacts).text;
+  t.note("Frozen pre-tier card byte digest: "+createHash("sha256").update(legacyText).digest("hex"));
+  t.assertions.assert(createHash("sha256").update(legacyText).digest("hex")==="c3ccc6310a3b2fdecb2a45ece94f661d6dee428481486c7956164fb195722bce",
+    "legacy frozen card changed from the retained pre-tier run eaf1");
+  const tierTree=(id:string,totalMs:number,parallel:number)=>{
+    const end=start+h,opened=end-totalMs,a=Math.max(start,opened),wall=end-a;
+    const sessions=Array.from({length:Math.ceil(parallel)},(_,n)=>({sessionId:id+".worker."+n,readable:true,
+      runs:[{startAtMs:a,endAtMs:a+wall*Math.min(1,parallel-n)}]}));
+    return {taskId:id,openedAtMs:opened,endedAtMs:end,excluded:[] as any[],sessions};
+  };
+  const tierCard=(tree:any)=>card({...clone(),scoringModel:"tq/2",r6Basis:"task-agent-hours/2",taskTrees:[tree],taskTreesSourceComplete:true}).value;
+  for(const [total,threshold]of [[1800000,.75],[3599999,.75],[3600000,1.5],[7199999,1.5],[7200000,2],[10800000,2]]){
+    const tree=tierTree("tier."+total,total!,threshold!);
+    const passed=tierCard(tree),row=passed.taskParallelism[0];
+    t.assertions.assert(passed.redLines.R6.triggered===false && row.state==="pass" && row.required===threshold,
+      "R6 did not use the cumulative-duration threshold at "+total+"ms: "+JSON.stringify(row));
+    const failed=tierCard(tierTree("below."+total,total!,threshold!-.25));
+    t.assertions.assert(failed.redLines.R6.triggered===true && failed.redLines.R6.instances[0].required===threshold,
+      "proven deficit lost its actual duration-tier threshold");
+    tree.sessions.push({sessionId:"unread",readable:false,runs:[]});
+    t.assertions.assert(tierCard(tree).redLines.R6.triggered===false,"missing evidence erased a proven passing lower bound");
+    const uncertain=tierTree("uncertain."+total,total!,threshold===.75?.5:threshold!-1);
+    const wall=uncertain.endedAtMs-Math.max(start,uncertain.openedAtMs);
+    uncertain.sessions.push({sessionId:"unknown",readable:false,runs:[],openedAtMs:uncertain.endedAtMs-wall*(threshold===.75?.25:1)} as any);
+    const unknownTier=tierCard(uncertain);
+    t.assertions.assert(unknownTier.redLines.R6.triggered===null && unknownTier.taskParallelism[0].high===threshold,
+      "upper bound exactly at a tier threshold was declared a breach or a pass");
+  }
+  const exempt=tierCard(tierTree("under-half-hour",1799999,0));
+  t.assertions.assert(exempt.redLines.R6.applicable===false && exempt.taskParallelism[0].required===null,
+    "task shorter than half an effective hour was assessed");
+  const hourlyEdge:any=r6Tree("hour-quarter",15,[r6Session("o",r6Runs([-30,15]))]);hourlyEdge.openedAtMs=start-30*r6Minute;
+  t.assertions.assert(tierCard(hourlyEdge).taskParallelism[0].state==="pass","exactly fifteen minutes in this hour was excluded");
+  hourlyEdge.endedAtMs--;
+  t.assertions.assert(tierCard(hourlyEdge).taskParallelism[0].state==="not-applicable","less than fifteen minutes in this hour was assessed");
+  const effective=tierTree("effective-not-elapsed",10800000,1.5);
+  effective.excluded=[{startAtMs:start-2*h,endAtMs:start-h/2}];
+  const effectiveRow=tierCard(effective).taskParallelism[0];
+  t.assertions.assert(effectiveRow.totalEffectiveMs===5400000 && effectiveRow.required===1.5 && effectiveRow.state==="pass",
+    "elapsed pauses promoted a task into a higher duration tier");
+  const newBasis=tierCard(tierTree("new-basis",7200000,2));
+  t.assertions.assert(newBasis.redLines.R6.basis==="task-agent-hours/2"
+    && newBasis.streakCompatibilityKey.includes("task-agent-hours/2")
+    && newBasis.streakCompatibilityKey!==JSON.parse(legacyText).streakCompatibilityKey
+    && card(legacyFacts).text===legacyText && JSON.parse(legacyText).redLines.R6.basis==="task-agent-hours/1"
+    && !("required"in JSON.parse(legacyText).taskParallelism[0]),"new duration tiers rewrote or stitched legacy frozen semantics");
+  const unsupported={...legacyFacts,r6Basis:"task-agent-hours/999"};
+  t.assertions.assert(evaluate(unsupported).status!==0,"unsupported R6 basis silently received a score");
+  const describe=spawnSync(python,[path.join(output,"tools/run.py"),"quality","describe"],{cwd:output,env,encoding:"utf8",timeout:10000});
+  const policy=describe.status===0?JSON.parse(describe.stdout).r6:null;
+  t.assertions.assert(policy?.basis==="task-agent-hours/2" && policy.minimumTotalEffectiveMs===1800000
+    && policy.minimumHourEffectiveMs===900000 && JSON.stringify(policy.tiers.map((x:any)=>[x.minimumTotalEffectiveMs,x.required]))===JSON.stringify([[1800000,.75],[3600000,1.5],[7200000,2]]),"public R6 description differs from the duration-tier contract");
   const importedNative=clone();importedNative.captureKind="native-hour";
   t.assertions.assert(card(importedNative).value.officialCapture===false,
     "an external snapshot self-declared official native provenance");

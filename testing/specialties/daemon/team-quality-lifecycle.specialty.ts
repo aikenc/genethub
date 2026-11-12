@@ -293,6 +293,7 @@ defineSpecialty({
       "a partial diagnostic observation became complete hourly evidence");
     t.assertions.assert(facts.goalBasis?.taskIds?.includes(task.taskId) && !facts.goalBasis.taskIds.includes(nested.taskId),
       "an internal role Task manufactured user-goal exposure");
+    t.assertions.assert(facts.r6Basis==="task-agent-hours/2","actual native capture omitted its duration-tier scoring basis");
     const tick=await ok(owner,["quality","tick"]);
     const savedCard=readFileSync(tick.card,"utf8");
     const readCard=await cli(owner,["quality","card"]);
@@ -307,7 +308,12 @@ defineSpecialty({
     r.ok(["reflect","now","--model","fixture","Inspect current measured quality losses"],{TEAM_AGENT:"ctl-normal",GENEHUB_SESSION_ID:front});
     const briefings=readdirSync(r.state("briefings")).filter(x=>x.endsWith(".md")).sort();
     const brief=readFileSync(r.state("briefings",briefings.at(-1)!),"utf8");
-    t.assertions.assert(brief.includes("失分归因（全部计分")&&brief.includes("team-quality-loss-attribution/1")&&brief.includes('"allLossesCount":true'),"actual native reflection briefing dropped attribution totals or their all-losses policy");
+    const latestCardRef=JSON.parse(readFileSync(r.state("quality","latest.json"),"utf8"));
+    const attribution=JSON.parse(savedCard).attribution;
+    t.assertions.assert([...brief].length<=5000 && brief.includes(latestCardRef.card) && brief.includes(latestCardRef.snapshot)
+      && attribution?.schema==="team-quality-loss-attribution/1" && attribution.allLossesCount===true
+      && typeof attribution.totalAccountedLoss==="number" && Object.keys(attribution.lossByComponent).length>0,
+      "bounded reflection briefing lost its native card/facts references or referenced full-card attribution totals");
     const pointer=r.state("quality","latest.json"),pointerBefore=readFileSync(pointer);
     const ready=path.join(r.root,"capture-lock-ready");
     const lockScript=`import os,pathlib,sys

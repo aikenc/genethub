@@ -71,6 +71,12 @@ defineSpecialty({
     "a genuinely recurring native breach was suppressed by its archived instance");
   const quiet = replay([facts(base+22*h)]);
   t.assertions.assert(!Object.keys(quiet.state.incidents).length && !existsSync(join(output, ".genethub/team/quality/live-alerts.json")), "quiet external replay created an incident or wrote native Team state");
+  const shortTier=parallel(base+19*h+30*60000);shortTier.r6Basis="task-agent-hours/2";
+  const tiered=replay([shortTier]);
+  t.assertions.assert(!Object.keys(tiered.state.incidents).length,"one Agent on a half-hour task incorrectly opened a live R6 redline");
+  const nextTier=parallel(base+20*h);nextTier.r6Basis="task-agent-hours/2";
+  const tierFailure=replay([shortTier,nextTier]);
+  t.assertions.assert(tierFailure.steps[1].new.length===1 && Object.values(tierFailure.state.incidents).some((x:any)=>x.rule==="R6" && x.measurementVersion.includes("task-agent-hours/2")),"a genuine next-duration-tier deficit did not open a versioned live redline");
   t.note("Frozen external timestamp algebra, not historical live Team execution or official score; no internal product import/mocking.");
 });
 
