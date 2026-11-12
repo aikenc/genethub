@@ -4483,7 +4483,12 @@ def reconcile(root, name, mine):
                     if to:
                         deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
                     if (timed_out or status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
+                        failure_round = latest_round(session_id, record.get("machine"))
+                        # Explicit recovery keeps the Session but starts a new
+                        # native Round; its handled predecessor must not hide
+                        # this failure. An unknown Round stays deduplicated.
+                        generation = (failure_round or {}).get("roundId") or "unknown-round"
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": failure_round, "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop", generation)
                     said.append("stop")
                     update_pending(root, path, record)
                 failed_execution = status == 'failed' or (paused and TURN_FAILED_ERROR in (inputs.get('error') or ''))
