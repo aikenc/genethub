@@ -60,6 +60,16 @@ defineSpecialty({
     if(!ownerCache)throw Error("actual Owner cache missing");
     const checkpoint=JSON.parse(readFileSync(ownerCache,"utf8"));
     t.assertions.assert(checkpoint.historyCoverage?.roundsComplete===true&&checkpoint.historyCoverage?.narrativeComplete===true,"actual Owner history must be fully paged");
+    // Old complete history must be reprojected once for integration evidence;
+    // a complete old round list alone cannot stand in for the new read basis.
+    const oldProjection={...checkpoint,historyCoverage:{...checkpoint.historyCoverage,basis:"native-page-completion/1"}};
+    delete oldProjection.integrationReferenceBasis;delete oldProjection.integrationReferences;
+    writeFileSync(ownerCache,JSON.stringify(oldProjection));writeFileSync(log,"");const reprojected=facts();
+    t.assertions.assert(reprojected.issues.length===0 && heavy().some(x=>x[2]===owner)
+      && JSON.parse(readFileSync(ownerCache,"utf8")).integrationReferenceBasis==="native-owner-use-reference/1",
+      "old cached projection hid native integration evidence");
+    writeFileSync(log,"");facts();
+    t.assertions.assert(!heavy().some(x=>x[2]===owner),"refreshed integration projection rereads unchanged history every time");
     // Explicit cache metadata fixture, not a fabricated native upgrade. All
     // original rounds, inputs, timestamps and machine identity stay unchanged.
     const oldPatch={...checkpoint,kernel:{...checkpoint.kernel,version:"prior-guest-patch-checkpoint"}};

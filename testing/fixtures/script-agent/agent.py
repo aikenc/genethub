@@ -402,6 +402,10 @@ class FixtureSession(Session):
                 if isinstance(request.get("requestId"), str):
                     reply["requestId"] = request["requestId"]
                 self.say(turn_id, item, json.dumps(reply), True)
+                # A script Agent can emit its own bounded integration reply;
+                # the real daemon supplies message timing and Round ownership.
+                if isinstance(request.get("assistantText"), str) and len(request["assistantText"]) <= 4096:
+                    self.say(turn_id, item+"-statement", request["assistantText"], True)
                 self.complete(turn_id)
                 return
             profile = "normal"

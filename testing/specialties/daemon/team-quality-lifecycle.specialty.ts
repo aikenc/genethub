@@ -420,7 +420,8 @@ sys.stdin.read(1)
       "handover reset the unit clock, or normal QA became rework");
 
     const unitWork=await ok(newOwner,["task","support",continuedTask.taskId,"--space","qa","--desc","independent complete delivery",
-      "--request-id","quality.complete-unit-work","--unit-of","new","Repair one independently accepted artifact"]);
+      "--request-id","quality.complete-unit-work","--unit-of","new","--parameters",JSON.stringify({qualityComparison:{schema:"acceptance-comparison/1",
+        scope:"one complete reference artifact",size:1,inputSha256:"a".repeat(64),acceptanceSha256:"b".repeat(64)}}),"Repair one independently accepted artifact"]);
     await idle(unitWork.collaborator);
     const unitOp=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
       .find(x=>x.sessionId===unitWork.collaborator).operationId;
@@ -445,11 +446,66 @@ sys.stdin.read(1)
       && completedUnit.endedAtMs===completedUnit.conclusion.atMs
       && !JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).finished,
       "complete linked stages failed to retain one unit and its exact Owner result-processing boundary");
+    t.assertions.assert(completedFacts.workItems.find((x:any)=>x.id===unitOp).adoptionEvidence.state!=="evidenced",
+      "normal native result reading was silently promoted to adoption");
+    const originalResult=completedFacts.workItems.find((x:any)=>x.id===unitOp);
+    const originalRef=originalResult.deliveryEvents.find((x:any)=>x.recipient===newOwner)?.ref;
+    t.assertions.assert(typeof originalRef==="string" && originalRef.startsWith("ghref:item:"),
+      "actual delivered support has no precise original result reference");
+    const statement=async(text:string,id:string)=>{
+      await r.send(newOwner,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,"-c","print('native integration response')"],
+        cwd:r.root,requestId:id,assistantText:text}));await idle(newOwner);
+    };
+    await statement("Reference only: "+originalRef+"\n```\n采用："+originalRef+"\n```","quality.reference-only");
+    const referenceOnly=await ok(front,["quality","facts"]);
+    t.assertions.assert(referenceOnly.workItems.find((x:any)=>x.id===unitOp).adoptionEvidence.state!=="evidenced",
+      "mere link or quoted example confirmed adoption");
+    await statement("采用："+originalRef,"quality.real-integration-reference");
+    const openGoalEvidence=await ok(front,["quality","facts"]);
+    const openUse=openGoalEvidence.workItems.find((x:any)=>x.id===unitOp).adoptionEvidence;
+    t.assertions.assert(openUse.state==="evidenced" && openUse.via==="native-integration-message"
+      && openUse.resultRef===originalRef && openUse.ownerMessageRef.startsWith("ghref:item:"+newOwner+":")
+      && typeof openUse.roundId==="string"
+      && !JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).finished,
+      "native completed-round integration was lost until the entire long goal finished");
     const container=completedFacts.acceptanceUnits.find((x:any)=>x.taskId===continuedTask.taskId && x.unitId===originIntent.operationId);
     t.assertions.assert(container.boundaryKnown===false && container.excluded.some((x:any)=>
       x.startAtMs<=completedUnit.openedAtMs && x.endAtMs>=completedUnit.endedAtMs)
       && completedUnit.sessions.find((x:any)=>x.sessionId===newOwner).runs.length>0,
       "the root container retained its child's wall time or hid the uniquely attributable Owner execution");
+
+    await ok(afterHandover.collaborator,["task","finish",continuedTask.taskId,"--outcome","success","Normal QA, not a rework"]);
+    r.ok(["tick"]);await idle(newOwner);
+    const invalidUse=await cli(newOwner,["task","finish",continuedTask.taskId,"--outcome","success",
+      "--uses",originIntent.operationId,"Cannot declare a non-child root as integrated"]);
+    t.assertions.assert(invalidUse.code!==0 && !JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).finished,
+      "invalid integration reference changed the business conclusion");
+    const uses=[unitOp,integrationOp,verifiedOp(),nextIntent.operationId];
+    function verifiedOp(){return intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
+      .find(x=>x.sessionId===verified.collaborator).operationId;}
+    const finishArgs=["task","finish",continuedTask.taskId,"--outcome","success",...uses.flatMap(x=>["--uses",x]),
+      "Integrated the declared candidate and ordinary verification results"];
+    await ok(newOwner,finishArgs);
+    const finishedBytes=readFileSync(r.state("tasks",continuedTask.taskId+".json"));
+    await ok(newOwner,finishArgs);
+    t.assertions.assert(readFileSync(r.state("tasks",continuedTask.taskId+".json")).equals(finishedBytes),
+      "retry changed the native integration declaration");
+    const changedUse=await cli(newOwner,["task","finish",continuedTask.taskId,"--outcome","success","--uses",unitOp,
+      "Integrated the declared candidate and ordinary verification results"]);
+    t.assertions.assert(changedUse.code!==0,"retry silently changed adopted operation identities");
+    const legacyBaseline=r.state("quality","baseline.json"),oldBaselineBytes=JSON.stringify({schema:"team-quality-baseline/1",executionMsPerAdopted:12345});
+    writeFileSync(legacyBaseline,oldBaselineBytes);
+    const evidenced=await ok(front,["quality","facts"]);
+    const used=evidenced.workItems.find((x:any)=>x.id===unitOp),normalQA=evidenced.workItems.find((x:any)=>x.id===nextIntent.operationId);
+    t.assertions.assert(evidenced.adoptionBasis==="native-owner-use-reference/1"
+      && used.adoptionEvidence.state==="evidenced" && used.adoptionEvidence.operationId===unitOp
+      && used.adoptionEvidence.sessionId===newOwner && used.consumedAtMs<=used.adoptionEvidence.atMs
+      && normalQA.disposition==="adopted-evidenced" && normalQA.reworkEvidence!=="explicit-follows",
+      "actual Owner conclusion did not retain bounded use evidence, or ordinary QA became rework");
+    t.assertions.assert(evidenced.costBasis==="complete-acceptance-unit-time/1"
+      && evidenced.unitCosts.some((x:any)=>x.unitId===unitOp && x.completed && x.observedMs>0 && x.comparison?.contract.scope==="one complete reference artifact")
+      && readFileSync(legacyBaseline,"utf8")===oldBaselineBytes,
+      "native full-unit costs missing, or old per-support baseline overwritten");
 
   } finally { await r.dispose(); }
 });

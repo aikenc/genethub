@@ -353,6 +353,107 @@ defineSpecialty({
   t.assertions.assert(measuredBuild.streakCompatibilityKey!==newBasis.streakCompatibilityKey
     && measuredBuild.streakCompatibilityKey.includes(executionBasis) && card(legacyFacts).text===legacyText,
     "new formal execution/unit meanings stitched an old chain or rewrote a frozen card");
+  // New bases keep a read-only result distinct from a bounded integration
+  // reference. The twenty closed items are the denominator, not a selected
+  // subset of successful declarations.
+  const useBasis="native-owner-use-reference/1", timeBasis="complete-acceptance-unit-time/1";
+  const useFacts=clone();useFacts.adoptionBasis=useBasis;
+  for(const x of useFacts.workItems){x.taskId="bounded-goal";x.adoptionEvidence={basis:useBasis,state:"inferred"};}
+  const inferredOnly=card(useFacts).value;
+  t.assertions.assert(inferredOnly.indicators.firstPassAdoptionPct.value===null
+    && inferredOnly.indicators.reworkPct.value===null && inferredOnly.adoptionEvidenceCoverage.unknown===20,
+    "ten-minute inference became confirmed adoption");
+  const proof=(x:any)=>({basis:useBasis,state:"evidenced",sessionId:x.requester,operationId:x.id,atMs:start+800000});
+  for(const x of useFacts.workItems){x.disposition="adopted-evidenced";x.adoptionEvidence=proof(x);}
+  const allUsed=card(useFacts).value;
+  t.assertions.assert(allUsed.indicators.firstPassAdoptionPct.value===100
+    && allUsed.adoptionEvidenceCoverage.evidenced===20 && allUsed.streakCompatibilityKey!==good.value.streakCompatibilityKey,
+    "bounded requester integration references or compatibility isolation missing");
+  const readUnused=JSON.parse(JSON.stringify(useFacts));
+  readUnused.workItems[0].adoptionEvidence={basis:useBasis,state:"read"};
+  t.assertions.assert(card(readUnused).value.indicators.firstPassAdoptionPct.value===null,
+    "nineteen referenced results hid one read-but-unused result");
+  const forgedUse=JSON.parse(JSON.stringify(useFacts));forgedUse.workItems[0].adoptionEvidence.sessionId="another-owner";
+  t.assertions.assert(card(forgedUse).value.indicators.firstPassAdoptionPct.value===null,
+    "another requester's declaration confirmed adoption");
+  const ordinaryQA=JSON.parse(JSON.stringify(useFacts));
+  ordinaryQA.workItems[0].acceptanceUnit={id:"same-unit",stage:"verification",relation:"support"};
+  t.assertions.assert(card(ordinaryQA).value.indicators.reworkPct.value===0,"ordinary linked QA was called rework");
+  const unmarkedWork=JSON.parse(JSON.stringify(ordinaryQA));
+  unmarkedWork.workItems[1].acceptanceUnit={id:"same-unit",stage:"work",relation:"support"};
+  Object.assign(unmarkedWork.workItems[1],{dispatchAtMs:start+600001,confirmedAtMs:start+605000,
+    startedAtMs:start+610000,conclusionAtMs:start+900000,deliveredAtMs:start+930000,consumedAtMs:start+950000});
+  unmarkedWork.workItems[1].adoptionEvidence={...proof(unmarkedWork.workItems[1]),atMs:start+980000};
+  t.assertions.assert(card(unmarkedWork).value.indicators.firstPassAdoptionPct.value===null
+    && card(unmarkedWork).value.indicators.reworkPct.value===null,
+    "unmarked later work in the same unit hid ambiguous rework behind integration references");
+  const missingUnitIdentity=JSON.parse(JSON.stringify(ordinaryQA));delete missingUnitIdentity.workItems[0].taskId;
+  t.assertions.assert(card(missingUnitIdentity).value.indicators.firstPassAdoptionPct.value===null,
+    "missing unit task identity crashed evaluation or became a confirmed first-pass result");
+  ordinaryQA.workItems[1].follows=ordinaryQA.workItems[0].id;
+  t.assertions.assert(card(ordinaryQA).value.indicators.reworkPct.value===5
+    && card(ordinaryQA).value.indicators.firstPassAdoptionPct.value===95,"native rework link vanished behind use evidence");
+
+  const costFacts=JSON.parse(JSON.stringify(useFacts));
+  Object.assign(costFacts,{costBasis:timeBasis,executionBasis,scoringModel:"tq/2",r6Basis:"acceptance-unit-agent-hours/3",
+    acceptanceUnitBasis:"dispatch-acceptance-unit/1",taskTrees:[],taskTreesSourceComplete:true});
+  const contract={schema:"acceptance-comparison/1",scope:"same fixed bounded artifact",size:1,
+    inputSha256:"a".repeat(64),acceptanceSha256:"b".repeat(64)};
+  const scope={key:"exact-comparison-key",contract,meaning:"declared immutable comparable input and acceptance scope; not independent QA"};
+  for(const [n,x]of costFacts.workItems.entries()){x.taskId="goal."+n;x.requester="owner."+n;x.adoptionEvidence=proof(x);}
+  costFacts.acceptanceUnits=costFacts.workItems.map((x:any,n:number)=>({unitId:"complete."+n,taskId:"goal."+n,
+    openedAtMs:start,endedAtMs:start+1200000,boundaryKnown:true,excluded:[],operationIds:[x.id],
+    conclusion:{kind:"linked-stages-and-owner-round",atMs:start+1200000},costComparison:scope,
+    sessions:[{sessionId:"owner."+n,readable:true,executionCoverageKnown:true,
+      runs:[{startAtMs:start,endAtMs:start+600000}]},
+      {sessionId:"worker."+n,readable:true,executionCoverageKnown:true,
+      runs:[{startAtMs:start,endAtMs:start+1200000}]}]}));
+  costFacts.costBaselines={schema:"team-unit-time-baselines/1",basis:timeBasis,groups:{
+    [scope.key]:{unitIds:Array.from({length:20},(_,n)=>"baseline."+n),meanMs:1800000,comparison:scope,frozenAtMs:start}}};
+  const unitCost=card(costFacts).value;
+  t.assertions.assert(unitCost.unitTimeCost.completedUnits===20
+    && unitCost.unitTimeCost.observedCompletedMs===20*1800000
+    && unitCost.indicators.costPerAdoptedVsBaseline.value===1,
+    "complete unit did not charge 10 Owner + 20 support minutes per unit");
+  const splitCost=JSON.parse(JSON.stringify(costFacts));
+  for(const [n,u]of splitCost.acceptanceUnits.entries()){
+    const child={...splitCost.workItems[n],id:"extra.support."+n};child.adoptionEvidence=proof(child);
+    splitCost.workItems.push(child);u.operationIds.push(child.id);u.sessions.splice(1,1,
+    {sessionId:"partA."+n,readable:true,executionCoverageKnown:true,runs:[{startAtMs:start,endAtMs:start+600000}]},
+    {sessionId:"partB."+n,readable:true,executionCoverageKnown:true,runs:[{startAtMs:start+600000,endAtMs:start+1200000}]});}
+  t.assertions.assert(card(splitCost).value.unitTimeCost.observedCompletedMs===unitCost.unitTimeCost.observedCompletedMs
+    && card(splitCost).value.indicators.costPerAdoptedVsBaseline.value===1,
+    "splitting one support into two reduced the complete acceptance-unit cost");
+  const pausedCost=JSON.parse(JSON.stringify(costFacts));
+  for(const u of pausedCost.acceptanceUnits){u.excluded=[{startAtMs:start+300000,endAtMs:start+600000}];
+    u.sessions[1].runs.push({startAtMs:start,endAtMs:start+1200000});}
+  t.assertions.assert(card(pausedCost).value.unitTimeCost.observedCompletedMs===20*1200000,
+    "same Session overlapping work or paused time multiplied unit costs");
+  const unknownCost=JSON.parse(JSON.stringify(costFacts));unknownCost.acceptanceUnits[0].sessions[0].partialCoverage=true;
+  t.assertions.assert(card(unknownCost).value.indicators.costPerAdoptedVsBaseline.value===null
+    && card(unknownCost).value.unitTimeCost.units[0].unknownReasons.includes("shared-owner-allocation-unknown"),
+    "ambiguous Owner time was called a complete efficiency comparison");
+  const sharedSession=JSON.parse(JSON.stringify(costFacts));
+  sharedSession.acceptanceUnits[0].sessions[0].sessionId="same-native-owner";
+  sharedSession.acceptanceUnits[1].sessions[0].sessionId="same-native-owner";
+  const sharedCard=card(sharedSession).value;
+  t.assertions.assert(sharedCard.indicators.costPerAdoptedVsBaseline.value===null
+    && sharedCard.unitTimeCost.observedCompletedMs===20*1800000-2*600000
+    && sharedCard.unitTimeCost.units[0].unknownReasons.includes("shared-session-allocation-unknown"),
+    "same native Session across roots duplicated overlapping Owner cost or manufactured efficiency");
+  const missingMember=JSON.parse(JSON.stringify(costFacts));missingMember.acceptanceUnits[0].operationIds.push("older-result-outside-metric-horizon");
+  t.assertions.assert(card(missingMember).value.indicators.costPerAdoptedVsBaseline.value===null,
+    "missing older stage evidence was silently omitted from complete unit adoption");
+  const oldBaseline=JSON.parse(JSON.stringify(costFacts));delete oldBaseline.costBaselines;
+  t.assertions.assert(card(oldBaseline).value.indicators.costPerAdoptedVsBaseline.value===null,
+    "legacy per-support baseline was borrowed by a complete-unit metric");
+  const missingScope=JSON.parse(JSON.stringify(costFacts));delete missingScope.acceptanceUnits[0].costComparison;
+  t.assertions.assert(card(missingScope).value.indicators.costPerAdoptedVsBaseline.value===null,
+    "incomparable unit scope was compared as the same work");
+  const tooFewUnits=JSON.parse(JSON.stringify(costFacts));tooFewUnits.acceptanceUnits.pop();
+  t.assertions.assert(card(tooFewUnits).value.indicators.costPerAdoptedVsBaseline.value===null,
+    "nineteen complete units passed the existing twenty-sample gate");
+  t.assertions.assert(card(facts).text===good.text,"new outcome/cost bases rewrote a legacy frozen score");
   const importedNative=clone();importedNative.captureKind="native-hour";
   t.assertions.assert(card(importedNative).value.officialCapture===false,
     "an external snapshot self-declared official native provenance");
