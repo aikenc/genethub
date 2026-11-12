@@ -3,6 +3,8 @@
 统一工作质量口径是 tq/1，独立于项目成果质量。默认样板定时采集，不调用模型、不改变派单；
 反思简报带最新卡与失分账单，由团队自主决定改什么。不存在第二套核心分或项目分。
 
+卡的 `versions.teamTemplate` 是本队实际运行样板版本的唯一采用依据：`id` 来自正在执行的内置工具、Skill 与入口文件内容；`releaseVersion` 只在升级回执与这些实际内容一致时显示。没有回执、内容后来修改或采集中发生变化时，发布版本保持未知，不能用平台安装版本或 platform 分支替代。`versions.platformAtCapture` 仍单列各机平台安装版本。版本元数据不改变指标、权重、口径或连续达标规则。
+
 ```
 python3 tools/run.py quality card
 python3 tools/run.py quality history

@@ -412,6 +412,8 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     from .quality_epoch import context as epoch_context
     lifecycle = epoch_context(root, end)
     before = template_digest()
+    from .template_version import capture as running_version
+    version_before = running_version(root, cutoff)
     log = events(root, cutoff)
     tasks = {v['taskId']: v for v in records(state/'tasks')}
     intents = records(state/'task-dispatch')
@@ -763,6 +765,9 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     from .quality_attribution import context as attribution_context
     attribution = attribution_context(hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                       hashlib.sha256(Path(team.__file__).read_bytes()).hexdigest())
+    team_version = running_version(root, cutoff)
+    if team_version.get('id') != version_before.get('id'):
+        team_version.update(id=None,releaseVersion=None,status='changed-during-capture')
     return {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':task_trees(tasks,goal_tasks,controls,native,end,intents,log),
             'executionFacts':{'schema':'team-execution-facts/1','scoreMeaningChanged':False,
                               'backgroundBasis':'registered-native-process-runtime/1',
@@ -787,6 +792,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                         'goals':complete and observed_complete and goal_ownership_known,
                         'resources':complete and resources_complete,'turns':native_complete,'inputs':native_complete and all(s.get('retainedInputs') is not None and all(x.get('source') in ('user','agent','system','workflow') for x in s['retainedInputs']) for s in native.values())},
             'versions':{'nativeHistoryBasis':'task-obligation-and-metric-horizons/1','platformAtCapture':[dict(selector=k,**v) for k,v in sorted(platforms.items(),key=lambda x:x[0] or '')],
+                        'teamTemplate':team_version,
                         'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
             'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
 
