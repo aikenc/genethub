@@ -5,10 +5,10 @@ import { defineSpecialty, openTeam } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.daemon.team-quality-history-cache",
   title: "Complete unchanged native history survives horizon and guest-patch checkpoints without repeated full reads",
-  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. A real public deletion stays unknown despite cached history and preserves its native refusal identifier and remaining budget. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
-  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history", "failed fresh read reuses healthy cached history", "native refusal cause is lost"],
+  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Two real Tasks and 101 additional archived native Sessions require fresh bounded header pages past the first 100 rows without one get per unchanged history. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. A real public deletion stays unknown despite cached history and preserves its native refusal identifier and remaining budget. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
+  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history", "failed fresh read reuses healthy cached history", "native refusal cause is lost", "stable histories exhaust observation budget with one header RPC each", "only the first header page or unarchived rows are read", "corrupt local header hint aborts every source"],
   tags: ["core", "team-quality"], llm: { default: "none" },
-  productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.inspect", "session.rounds", "session.narrative", "session.delete"],
+  productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.list", "session.create", "session.archive", "session.inspect", "session.rounds", "session.narrative", "session.delete"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, browser: 0 }, expectedDurationMs: 25000, timeoutMs: 180000,
@@ -24,6 +24,15 @@ defineSpecialty({
     if(receipt?.type!=="assistantMessage")throw Error("real task receipt missing");
     const started=JSON.parse(receipt.text);t.assertions.assert(started.code===0,started.err);
     const task=JSON.parse(started.out.trim().split("\n").at(-1)!);const owner=task.owner.sessionId as string;await idle(owner);
+    // A second real Task shares the Owner workspace; both histories must stay
+    // independently observable while their unchanged headers are read together.
+    await r.send(caller,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,join(r.root,"tools/run.py"),"task","start","--space","leader","--desc","second bounded history","--request-id","history.second","Assess another bounded goal"],cwd:r.root,requestId:"history.second.start"}));await idle(caller);
+    const secondReceipt=(await r.snapshot(caller)).items.filter(x=>x.type==="assistantMessage"&&x.text.includes('"history.second.start"')).at(-1);
+    if(secondReceipt?.type!=="assistantMessage")throw Error("second real task receipt missing");
+    const secondStarted=JSON.parse(secondReceipt.text);t.assertions.assert(secondStarted.code===0,secondStarted.err);
+    const secondOwner=JSON.parse(secondStarted.out.trim().split("\n").at(-1)!).owner.sessionId as string;await idle(secondOwner);
+    const ownerWorkspace=(await r.snapshot(owner)).summary.workspaceId;
+
     const log=join(t.env.root,"actual-cli-calls.jsonl"),proxy=join(t.env.root,"forward-native-cli.py");
     writeFileSync(log,"");
     writeFileSync(proxy,`#!${process.env.GENEHUB_PYTHON}\nimport os,sys,json\nwith open(${JSON.stringify(log)},'a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\nos.execv(${JSON.stringify(r.daemon.genet)},[${JSON.stringify(r.daemon.genet)}]+sys.argv[1:])\n`);chmodSync(proxy,0o700);
@@ -31,14 +40,22 @@ defineSpecialty({
     const calls=()=>readFileSync(log,"utf8").trim().split("\n").filter(Boolean).map(x=>JSON.parse(x) as string[]);
     const heavy=()=>calls().filter(x=>x[0]==="session"&&["inspect","rounds","narrative"].includes(x[1]));
     const first=facts();t.assertions.assert(first.issues.length===0&&heavy().some(x=>x[2]===owner),"first capture did not read actual native history");
+    // Real public metadata, not a mocked page. Newer archived Sessions push the
+    // older cached Owners past the first page while contributing no work.
+    for(let i=0;i<101;i++){
+      const extra=await r.create("ctl-normal",ownerWorkspace);
+      await r.client.call({type:"session.archive",payload:{sessionId:extra,archived:true}});
+    }
+    const ownerPages=()=>calls().filter(x=>x[0]==="session"&&x[1]==="list"&&x.includes(ownerWorkspace));
+
     const native=r.state("quality","native");
     // Explicit restored cache checkpoint: only its requested horizon changes.
     // All original native history, identities and timestamps remain byte values
     // from the genuine first capture. This is not a historical execution claim.
     const narrow=()=>{for(const f of readdirSync(native)){const p=join(native,f),v=JSON.parse(readFileSync(p,"utf8"));v.sinceAtMs=first.window.endAtMs;writeFileSync(p,JSON.stringify(v));}};
     narrow();writeFileSync(log,"");const second=facts();
-    t.assertions.assert(second.issues.length===0&&heavy().length===0&&calls().some(x=>x[0]==="session"&&x[1]==="get"&&x[2]===owner),
-      "unchanged complete native history was reread after a narrower live checkpoint, consuming the hourly budget");
+    t.assertions.assert(second.issues.length===0&&heavy().length===0&&ownerPages().length>=2&&ownerPages().every(x=>x.includes("--limit")&&x.includes("100")&&x.includes("--include-archived"))&&!calls().some(x=>x[0]==="session"&&x[1]==="get"&&x[2]===owner),
+      "unchanged histories still use per-session header reads instead of complete fresh archived header pages");
     const ownerCache=readdirSync(native).map(f=>join(native,f)).find(p=>JSON.parse(readFileSync(p,"utf8")).sessionId===owner);
     if(!ownerCache)throw Error("actual Owner cache missing");
     const checkpoint=JSON.parse(readFileSync(ownerCache,"utf8"));
@@ -47,7 +64,7 @@ defineSpecialty({
     // original rounds, inputs, timestamps and machine identity stay unchanged.
     const oldPatch={...checkpoint,kernel:{...checkpoint.kernel,version:"prior-guest-patch-checkpoint"}};
     writeFileSync(ownerCache,JSON.stringify(oldPatch));writeFileSync(log,"");const patched=facts();
-    t.assertions.assert(patched.issues.length===0&&!heavy().some(x=>x[2]===owner)&&calls().some(x=>x[0]==="session"&&x[1]==="get"&&x[2]===owner),
+    t.assertions.assert(patched.issues.length===0&&!heavy().some(x=>x[2]===owner)&&ownerPages().length>=2,
       "guest patch invalidated unchanged complete native history and forced full reads");
     t.assertions.assert(JSON.stringify(patched.turns.filter((x:any)=>x.sessionId===owner))===JSON.stringify(second.turns.filter((x:any)=>x.sessionId===owner)),"cache reuse changed genuine native turns");
     for(const machineId of ["foreign-machine-checkpoint",null]){
@@ -62,6 +79,15 @@ defineSpecialty({
     for(const f of readdirSync(native)){const p=join(native,f),v=JSON.parse(readFileSync(p,"utf8"));delete v.historyCoverage;writeFileSync(p,JSON.stringify(v));}
     writeFileSync(log,"");const legacy=facts();
     t.assertions.assert(legacy.issues.length===0&&heavy().some(x=>x[2]===owner),"legacy cache without completeness proof was trusted across an unproven range");
+    // A corrupt local cache is an evidence failure for that source, not a
+    // reason to abort every other Session observation while grouping hints.
+    const healthyCache=readFileSync(ownerCache);
+    for(const damaged of ["{invalid cache checkpoint",JSON.stringify({...JSON.parse(healthyCache.toString()),kernel:"invalid structure checkpoint"})]){
+      writeFileSync(ownerCache,damaged);
+      const corrupt=facts();
+      t.assertions.assert(corrupt.evidenceCoverage.nativeComplete===false&&!corrupt.turns.some((x:any)=>x.sessionId===owner)&&corrupt.issues.some((x:any)=>x.kind==="native-read-unavailable"&&x.sessionId===owner),"corrupt cache hint aborted all native observations or reused healthy history");
+    }
+    writeFileSync(ownerCache,healthyCache);
     writeFileSync(log,"");const before=legacy.turns.filter((x:any)=>x.sessionId===owner).length;
     await r.send(owner,"A new genuine input must be included in the next observation");await idle(owner);
     const changed=facts();
