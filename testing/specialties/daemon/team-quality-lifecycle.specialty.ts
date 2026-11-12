@@ -124,7 +124,7 @@ defineSpecialty({
     } finally { writeFileSync(config,originalConfig); }
     const continued=await ok(owner,["task","status",task.taskId]);
     t.assertions.assert(continued.owner.sessionId===owner,"explicit continuation replaced the original Owner");
-    const first=await ok(owner,["task","support",task.taskId,"--space","qa","--desc","original check","--request-id","quality.original","Check a bounded artifact"]);
+    const first=await ok(owner,["task","support",task.taskId,"--space","qa","--desc","original check","--request-id","quality.original","--unit-of","new","Check a bounded artifact"]);
     await idle(first.collaborator);
     const status=await ok(owner,["task","status",task.taskId]);
     const original=status.collaborators.find((x:any)=>x.sessionId===first.collaborator).operationId as string;
@@ -135,6 +135,10 @@ defineSpecialty({
     const intentFiles=()=>readdirSync(r.state("task-dispatch")).filter(x=>x.endsWith(".json"));
     const followIntent=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8"))).find(x=>x.sessionId===second.collaborator);
     t.assertions.assert(followIntent.request.follows===original && followIntent.request.standing===true,"follows/standing disappeared before the durable request");
+    t.assertions.assert(followIntent.request.acceptanceUnit.id===original && followIntent.request.acceptanceUnit.relation==="rework",
+      "a different support SID reset the original acceptance unit");
+    const reset=await cli(owner,[...follow.slice(0,-1),"--unit-of","new",follow.at(-1)!]);
+    t.assertions.assert(reset.code!==0,"rework declared itself a new independent unit");
     const changed=await cli(owner,follow.filter(x=>x!=="--standing"));
     t.assertions.assert(changed.code!==0,"same request identity accepted changed optional metadata");
     const beforeCount=intentFiles().length;
@@ -293,7 +297,14 @@ defineSpecialty({
       "a partial diagnostic observation became complete hourly evidence");
     t.assertions.assert(facts.goalBasis?.taskIds?.includes(task.taskId) && !facts.goalBasis.taskIds.includes(nested.taskId),
       "an internal role Task manufactured user-goal exposure");
-    t.assertions.assert(facts.r6Basis==="task-agent-hours/2","actual native capture omitted its duration-tier scoring basis");
+    t.assertions.assert(facts.r6Basis==="acceptance-unit-agent-hours/3"
+      && facts.acceptanceUnits.some((x:any)=>x.unitId===original && x.operationIds.includes(followIntent.operationId)),
+      "actual native capture omitted the unchanged acceptance association or its scoring version");
+    const ownerRuns=facts.taskTrees.find((x:any)=>x.taskId===task.taskId).sessions.find((x:any)=>x.sessionId===owner).runs;
+    const allocated=facts.acceptanceUnits.filter((x:any)=>x.taskId===task.taskId)
+      .flatMap((x:any)=>x.sessions.filter((s:any)=>s.sessionId===owner).flatMap((s:any)=>s.runs));
+    t.assertions.assert(allocated.reduce((n:number,x:any)=>n+x.endAtMs-x.startAtMs,0)
+      <=ownerRuns.reduce((n:number,x:any)=>n+x.endAtMs-x.startAtMs,0),"shared Owner time was charged to multiple acceptance units");
     const tick=await ok(owner,["quality","tick"]);
     const savedCard=readFileSync(tick.card,"utf8");
     const readCard=await cli(owner,["quality","card"]);
@@ -383,6 +394,62 @@ sys.stdin.read(1)
       t.assertions.assert(!unproven.deliveryBounds?.length && unproven.deliveryCoverageKnown===false,
         "history without a matching acceptance event invented a timed delivery bound");
     } finally {writeFileSync(eventFile,savedDeliveryEvents);}
+
+    const continuedTask=await ok(front,["task","start","--space","leader","--desc","same unfinished acceptance goal",
+      "--request-id","quality.handover-unit","Deliver one complete bounded artifact"]);
+    await idle(continuedTask.owner.sessionId);
+    const originalTask=JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8"));
+    const originIntent=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
+      .find(x=>x.sessionId===continuedTask.owner.sessionId);
+    const newOwner=await r.create("ctl-cli-command");await idle(newOwner);
+    const handover=["task","handover",continuedTask.taskId,"--session",newOwner,"--request-id","quality.unit-handover","--expected-revision","1"];
+    await ok(front,handover);
+    await t.tools.waitUntil(async()=>{
+      await ok(front,handover);
+      return JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).owner.sessionId===newOwner;
+    },20000);
+    await idle(newOwner);
+    const afterHandover=await ok(newOwner,["task","support",continuedTask.taskId,"--space","qa","--desc","normal verification after handover",
+      "--request-id","quality.unit-verification","--unit-stage","verification","Verify the same original artifact"]);
+    await idle(afterHandover.collaborator);
+    const nextIntent=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
+      .find(x=>x.sessionId===afterHandover.collaborator);
+    t.assertions.assert(nextIntent.request.acceptanceUnit.id===originIntent.operationId
+      && nextIntent.request.acceptanceUnit.stage==="verification" && !nextIntent.request.follows
+      && JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).createdAtMs===originalTask.createdAtMs,
+      "handover reset the unit clock, or normal QA became rework");
+
+    const unitWork=await ok(newOwner,["task","support",continuedTask.taskId,"--space","qa","--desc","independent complete delivery",
+      "--request-id","quality.complete-unit-work","--unit-of","new","Repair one independently accepted artifact"]);
+    await idle(unitWork.collaborator);
+    const unitOp=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
+      .find(x=>x.sessionId===unitWork.collaborator).operationId;
+    await ok(unitWork.collaborator,["task","finish",continuedTask.taskId,"--outcome","success","Candidate only; integration and verification still required"]);
+    r.ok(["tick"]);await idle(newOwner);
+    const candidateFacts=await ok(newOwner,["quality","facts"]);
+    t.assertions.assert(candidateFacts.acceptanceUnits.find((x:any)=>x.unitId===unitOp).conclusion===null,
+      "a support candidate closed an iteration before integration and verification");
+    const integrated=await ok(newOwner,["task","support",continuedTask.taskId,"--space","qa","--desc","integrate original candidate",
+      "--request-id","quality.complete-unit-integration","--unit-of",unitOp,"--unit-stage","integration","Integrate the original unit's artifact"]);
+    await idle(integrated.collaborator);
+    await ok(integrated.collaborator,["task","finish",continuedTask.taskId,"--outcome","success","Integrated original candidate"]);
+    const integrationOp=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")))
+      .find(x=>x.sessionId===integrated.collaborator).operationId;
+    const verified=await ok(newOwner,["task","support",continuedTask.taskId,"--space","qa","--desc","verify integrated delivery",
+      "--request-id","quality.complete-unit-verification","--unit-of",integrationOp,"--unit-stage","verification","Verify the integrated artifact"]);
+    await idle(verified.collaborator);
+    await ok(verified.collaborator,["task","finish",continuedTask.taskId,"--outcome","success","Verification concluded; product acceptance is separate"]);
+    r.ok(["tick"]);await idle(newOwner);
+    const completedFacts=await ok(newOwner,["quality","facts"]),completedUnit=completedFacts.acceptanceUnits.find((x:any)=>x.unitId===unitOp);
+    t.assertions.assert(completedUnit.operationIds.length===3 && completedUnit.conclusion?.kind==="linked-stages-and-owner-round"
+      && completedUnit.endedAtMs===completedUnit.conclusion.atMs
+      && !JSON.parse(readFileSync(r.state("tasks",continuedTask.taskId+".json"),"utf8")).finished,
+      "complete linked stages failed to retain one unit and its exact Owner result-processing boundary");
+    const container=completedFacts.acceptanceUnits.find((x:any)=>x.taskId===continuedTask.taskId && x.unitId===originIntent.operationId);
+    t.assertions.assert(container.boundaryKnown===false && container.excluded.some((x:any)=>
+      x.startAtMs<=completedUnit.openedAtMs && x.endAtMs>=completedUnit.endedAtMs)
+      && completedUnit.sessions.find((x:any)=>x.sessionId===newOwner).runs.length>0,
+      "the root container retained its child's wall time or hid the uniquely attributable Owner execution");
 
   } finally { await r.dispose(); }
 });

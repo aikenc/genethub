@@ -77,6 +77,33 @@ defineSpecialty({
   const nextTier=parallel(base+20*h);nextTier.r6Basis="task-agent-hours/2";
   const tierFailure=replay([shortTier,nextTier]);
   t.assertions.assert(tierFailure.steps[1].new.length===1 && Object.values(tierFailure.state.incidents).some((x:any)=>x.rule==="R6" && x.measurementVersion.includes("task-agent-hours/2")),"a genuine next-duration-tier deficit did not open a versioned live redline");
+  const unitFacts=(end:number)=>{
+    const f=facts(end);f.r6Basis="acceptance-unit-agent-hours/3";
+    f.acceptanceUnitBasis="dispatch-acceptance-unit/1";f.executionBasis="registered-native-execution-union/2";
+    f.acceptanceUnits=["unit.a","unit.b"].map(id=>({unitId:id,taskId:"same-root",boundaryKnown:true,
+      boundaryBasis:"dispatch-acceptance-unit/1",openedAtMs:base+19*h,endedAtMs:end,excluded:[],
+      sessions:[{sessionId:id+".worker",readable:true,runs:[{startAtMs:end-h,endAtMs:end}]}]}));
+    return f;
+  };
+  const unitFirst=unitFacts(base+22*h),unitNext=unitFacts(base+22*h+60000);
+  unitNext.acceptanceUnits=unitNext.acceptanceUnits.filter((x:any)=>x.unitId==="unit.b");
+  unitNext.acceptanceUnits.push({unitId:"legacy-container",taskId:"same-root",boundaryKnown:false,
+    openedAtMs:base,endedAtMs:unitNext.window.endAtMs,
+    excluded:[{startAtMs:unitNext.window.startAtMs,endAtMs:unitNext.window.endAtMs}],sessions:[]});
+  const unitReplay=replay([unitFirst,unitNext]),incidents=Object.values(unitReplay.state.incidents)as any[];
+  t.assertions.assert(unitReplay.steps[0].new.length===2 && unitReplay.steps[1].new.length===0
+    && incidents.some(x=>x.workItemId==="unit.a" && x.status==="closed")
+    && incidents.some(x=>x.workItemId==="unit.b" && x.status==="open"),
+    "independent units in one root collided or an ineligible unknown container blocked natural closure");
+  const working=unitFacts(base+23*h);working.acceptanceUnits=[];
+  working.taskTrees=[{taskId:"background-root",openedAtMs:base+22*h,endedAtMs:base+23*h,excluded:[],
+    sessions:[{sessionId:"native-worker",readable:true,runs:[],backgroundRuns:[{startAtMs:base+22*h,endAtMs:base+23*h,
+      jobId:"registered-build",basis:"registered-native-process-runtime/1"}]}]}];
+  working.stalls=[{taskId:"background-root",startAtMs:base+22*h,endAtMs:base+23*h}];
+  const workingReplay=replay([working]);
+  t.assertions.assert(!workingReplay.steps[0].warnings.some((x:any)=>x.rule==="R4")
+    && !Object.values(workingReplay.state.incidents).some((x:any)=>x.rule==="R4"),
+    "registered real work cleared the formal stall but left an incompatible live R4 warning");
   t.note("Frozen external timestamp algebra, not historical live Team execution or official score; no internal product import/mocking.");
 });
 

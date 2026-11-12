@@ -299,8 +299,60 @@ defineSpecialty({
   t.assertions.assert(evaluate(unsupported).status!==0,"unsupported R6 basis silently received a score");
   const describe=spawnSync(python,[path.join(output,"tools/run.py"),"quality","describe"],{cwd:output,env,encoding:"utf8",timeout:10000});
   const policy=describe.status===0?JSON.parse(describe.stdout).r6:null;
-  t.assertions.assert(policy?.basis==="task-agent-hours/2" && policy.minimumTotalEffectiveMs===1800000
+  t.assertions.assert(policy?.basis==="acceptance-unit-agent-hours/3" && policy.minimumTotalEffectiveMs===1800000
     && policy.minimumHourEffectiveMs===900000 && JSON.stringify(policy.tiers.map((x:any)=>[x.minimumTotalEffectiveMs,x.required]))===JSON.stringify([[1800000,.75],[3600000,1.5],[7200000,2]]),"public R6 description differs from the duration-tier contract");
+  // Independently calculable full acceptance-unit windows. A 42-hour
+  // container is deliberately irrelevant to the duration of its new unit.
+  const unitBasis="acceptance-unit-agent-hours/3",executionBasis="registered-native-execution-union/2";
+  const unitFacts=(total:number,parallel:number)=>{
+    const unit:any={...tierTree("root-open-42-hours",total,parallel),unitId:"complete-delivery",boundaryKnown:true,
+      boundaryBasis:"dispatch-acceptance-unit/1",operationIds:["repair","integration","verification"]};
+    return {...clone(),scoringModel:"tq/2",r6Basis:unitBasis,executionBasis,acceptanceUnitBasis:"dispatch-acceptance-unit/1",
+      taskTrees:[tierTree("container",42*h,0)],acceptanceUnits:[unit],taskTreesSourceComplete:true};
+  };
+  const shortUnit=card(unitFacts(25*r6Minute,1)).value;
+  t.assertions.assert(shortUnit.taskParallelism[0].required===null && shortUnit.redLines.R6.applicable===false,
+    "a short independent complete unit inherited the 42-hour container's threshold");
+  const continuedUnit=card(unitFacts(90*r6Minute,1)).value;
+  t.assertions.assert(continuedUnit.redLines.R6.triggered===true && continuedUnit.taskParallelism[0].required===1.5
+    && continuedUnit.redLines.R6.instances[0].unitId==="complete-delivery",
+    "an unfinished unit lost its cumulative duration or instance identity");
+  const missingBoundary=unitFacts(90*r6Minute,1);missingBoundary.acceptanceUnits[0].boundaryKnown=false;
+  t.assertions.assert(card(missingBoundary).value.redLines.R6.triggered===null,
+    "unlinked historical work was assigned an invented independent boundary");
+  const buildUnit=unitFacts(h,0),buildTree=buildUnit.acceptanceUnits[0];
+  const job=(a:number,b:number,id:string)=>({startAtMs:start+a*r6Minute,endAtMs:start+b*r6Minute,jobId:id,basis:"registered-native-process-runtime/1"});
+  buildTree.sessions=[{sessionId:"owner",readable:true,runs:r6Runs([0,10]),backgroundRuns:[job(5,45,"build"),job(5,45,"overlapping-job")]},
+    {sessionId:"worker",readable:true,runs:r6Runs([0,60]),backgroundRuns:[]}];
+  buildUnit.taskTrees=[{...structuredClone(buildTree),taskId:"root-open-42-hours"}];
+  buildUnit.stalls=[{taskId:"root-open-42-hours",startAtMs:start,endAtMs:start+h}];
+  const measuredBuild=card(buildUnit).value;
+  const instantaneous=structuredClone(buildUnit);
+  instantaneous.stalls.push({taskId:"root-open-42-hours",startAtMs:start+123,endAtMs:start+123});
+  t.assertions.assert(card(instantaneous).value.taskParallelism[0].agentMs===105*r6Minute,
+    "zero-duration native idle observations prevented formal execution projection");
+  instantaneous.stalls.at(-1)!.endAtMs--;
+  t.assertions.assert(evaluate(instantaneous).status!==0,"a reversed stall interval was silently repaired");
+  t.assertions.assert(measuredBuild.taskParallelism[0].agentMs===105*r6Minute
+    && measuredBuild.taskParallelism[0].low===1.75 && measuredBuild.redLines.R6.triggered===false
+    && measuredBuild.redLines.R4.triggered===false,"formal background union ignored work, multiplied one Agent or retained a false stall");
+  const pausedBuild=structuredClone(buildUnit);
+  pausedBuild.acceptanceUnits[0].excluded=r6Runs([20,30]);pausedBuild.taskTrees[0].excluded=r6Runs([20,30]);
+  t.assertions.assert(card(pausedBuild).value.taskParallelism[0].agentMs===85*r6Minute,"formal background work inflated a paused unit");
+  const unreadBuild=structuredClone(buildUnit);unreadBuild.acceptanceUnits[0].sessions[0].readable=false;
+  t.assertions.assert(card(unreadBuild).value.taskParallelism[0].agentMs===100*r6Minute,
+    "unread model rounds erased proven registered native background work or invented unobserved round time");
+  const forgedBuild=structuredClone(buildUnit);forgedBuild.acceptanceUnits[0].sessions[0].backgroundRuns[0].basis="claimed-by-prose";
+  t.assertions.assert(evaluate(forgedBuild).status!==0,"unproven background claim entered formal Agent hours");
+  const sharedOwner=unitFacts(h,0);
+  sharedOwner.acceptanceUnits[0].sessions=[{sessionId:"owner",readable:true,runs:r6Runs([0,20]),partialCoverage:true,
+    allocationUnknownRuns:r6Runs([20,25])},{sessionId:"support",readable:true,runs:r6Runs([0,60])}];
+  const sharedRow=card(sharedOwner).value.taskParallelism[0];
+  t.assertions.assert(sharedRow.agentMs===80*r6Minute && Math.abs(sharedRow.high-85/60)<1e-12 && sharedRow.state==="fail",
+    "ambiguous Owner allocation invented idle time or hid a proven upper bound");
+  t.assertions.assert(measuredBuild.streakCompatibilityKey!==newBasis.streakCompatibilityKey
+    && measuredBuild.streakCompatibilityKey.includes(executionBasis) && card(legacyFacts).text===legacyText,
+    "new formal execution/unit meanings stitched an old chain or rewrote a frozen card");
   const importedNative=clone();importedNative.captureKind="native-hour";
   t.assertions.assert(card(importedNative).value.officialCapture===false,
     "an external snapshot self-declared official native provenance");
