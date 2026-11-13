@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 from .update_gate import SafePointBusy
 
 
@@ -150,6 +151,17 @@ def reviewed_base(t, root, head, base):
         raise Conflict([], 'reviewed-baseline-not-ancestor; retain the original source')
     if result.returncode:
         raise RuntimeError('baseline ancestry check failed: ' + result.stderr.decode('utf-8', 'replace')[-1600:])
+    # Some legacy repos labelled complete Team snapshots as "platform".
+    # Such a tree is not a comparison base for removing platform files: it
+    # also contains the Team's own documents and custom definitions.
+    subject = t.git_text(root, 'show', '-s', '--format=%s', base)
+    recorded = re.fullmatch(r'platform: ([0-9a-f]{16})', subject)
+    if not recorded:
+        raise Conflict([], 'unverified-platform-baseline; select the original intact platform snapshot')
+    with tempfile.TemporaryDirectory(prefix='team-upgrade-baseline-') as scratch:
+        extract(t, root, base, Path(scratch))
+        if t.template_digest(scratch) != recorded.group(1):
+            raise Conflict([], 'unverified-platform-baseline; platform label does not match snapshot contents')
     return base
 
 
