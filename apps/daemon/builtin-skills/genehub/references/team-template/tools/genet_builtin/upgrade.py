@@ -197,6 +197,7 @@ def schedule(t, root, base=None):
             row = None
         if (previous.get('target') == target and previous.get('head') == head
                 and previous.get('reviewedBase') == base
+                and previous.get('sourceIdentity') == inputs
                 and previous.get('status') in ('adopted', 'conflict', 'test-failure')):
             return previous
         row = row or dict(schema='team-upgrade/1', target=target, head=head, template=template,
