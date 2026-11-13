@@ -9,8 +9,8 @@ const requirements = [{ kind: "python" as const, env: "GENEHUB_PYTHON", minVersi
 defineSpecialty({
   id: "specialty.daemon.team-quality-live-replay",
   title: "Read-only quality replay routes automatic attribution without triage timers or repeat-hour escalation",
-  oracle: "Independent timestamp fixtures cross the three-minute warning and ten-minute delivery boundary. Platform responsibility routes to the platform consumer and Team responsibility to Team; neither fifteen minutes nor consecutive hours require triage or escalate responsibility. No external replay becomes an official capture or writes live Team state.",
-  catches: ["hourly-only redline detection", "manual triage gate returns", "unknown clears an observed incident", "repeat-hour responsibility changes without evidence", "replay mutates native quality history"],
+  oracle: "Independent timestamp fixtures cross warning/red boundaries and route automatic responsibility. A fresh verified resource return closes only its matching occurrence despite unrelated unknown resources, retaining the historical breach and global unknown coverage. Missing, upper-bound, future, mismatched or currently-held evidence cannot close it. No external replay becomes an official capture or writes live Team state.",
+  catches: ["hourly-only redline detection", "manual triage gate returns", "unknown clears an observed incident", "unrelated unknown evidence keeps a verified return open", "historical release alone closes current unresolved debt", "repeat-hour responsibility changes without evidence", "replay mutates native quality history"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py quality alerts --snapshot", "spacebuilder.py build"],
   surfaces: ["team-template", "filesystem"], requiredArtifacts: [], requirements,
@@ -69,6 +69,48 @@ defineSpecialty({
   t.assertions.assert(recurred.steps[2].new.length===1 && recurred.steps[2].new[0]!==id
     && Object.values(recurred.state.incidents).some((x:any)=>x.status==="open"),
     "a genuinely recurring native breach was suppressed by its archived instance");
+  const resources = (end: number, released?: number, basis?: string, held: boolean | null = true): any => {
+    const f = delivery(end), item = f.workItems[0];
+    Object.assign(item, { id: "resource.returned", deliveredAtMs: ready+60000,
+      resourceRequired: true, resourceHeld: held, releasedAtMs: released, releaseTimeBasis: basis });
+    f.workItems.push({ ...item, id: "resource.other", resourceHeld: end === ready+11*60000 ? true : null,
+      releasedAtMs: undefined, releaseTimeBasis: undefined });
+    return f;
+  };
+  const owed = resources(ready+11*60000), returned = resources(ready+30*60000, ready+20*60000, "verified-release", null);
+  const outstanding = replay([owed]);
+  const resourceId = (work: string) => Object.values(outstanding.state.incidents).find((x: any) => x.rule === "R5" && x.workItemId === work) as any;
+  const returnedId = resourceId("resource.returned").id, otherId = resourceId("resource.other").id;
+  const partial = replay([owed, returned]);
+  t.assertions.assert(partial.state.incidents[returnedId].status === "closed"
+    && partial.state.incidents[returnedId].closedAtMs === ready+20*60000
+    && partial.state.incidents[returnedId].resolution.nativeFactsSha256
+    && partial.state.incidents[returnedId].resolution.ruleCoverageKnown === false
+    && partial.state.incidents[otherId].status === "open",
+    "verified return stayed open behind unrelated unknown evidence, or cleared unrelated debt/global coverage");
+  writeFileSync(file, JSON.stringify(returned));
+  const historical = spawnSync(python, [join(output, "tools/run.py"), "quality", "alerts", "--snapshot", file], { env, cwd: output, encoding: "utf8", timeout: 15000 });
+  t.assertions.assert(historical.status === 0, historical.stdout+historical.stderr);
+  const physical = JSON.parse(historical.stdout);
+  t.assertions.assert(physical.ruleCoverage.R5 === false && physical.redLines.some((x: any) => x.rule === "R5" && x.workItemId === "resource.returned"),
+    "closing current debt erased the observed historical R5 breach or promoted unknown coverage");
+  const noItem = resources(ready+31*60000); noItem.workItems.shift();
+  const wrongOperation = structuredClone(returned); wrongOperation.workItems[0].id = "resource.different";
+  const wrongDue = structuredClone(returned); wrongDue.workItems[0].conclusionAtMs += 60000;
+  for (const uncertain of [noItem, wrongOperation, wrongDue,
+    resources(ready+30*60000, ready+20*60000, "observed-absence-upper-bound", null),
+    resources(ready+30*60000, ready+20*60000, undefined, null),
+    resources(ready+30*60000, ready+40*60000, "verified-release", null),
+    resources(ready+30*60000, ready+20*60000, "verified-release", true)]) {
+    t.assertions.assert(replay([owed, uncertain]).state.incidents[returnedId].status === "open",
+      "missing, unverified, mismatched, future or currently-held resource evidence closed an observed obligation");
+  }
+  const staleResolution = replay([owed, resources(ready+30*60000, ready+40*60000, "verified-release", null), resources(ready+45*60000, undefined, undefined, null)]);
+  t.assertions.assert(staleResolution.state.incidents[returnedId].status === "open", "a stored resolution timestamp replaced fresh return evidence");
+  const heldAgain = replay([owed, returned, resources(ready+45*60000)]);
+  t.assertions.assert(heldAgain.steps[2].new.length === 1 && heldAgain.state.incidents[returnedId].status === "closed"
+    && Object.values(heldAgain.state.incidents).some((x: any) => x.rule === "R5" && x.workItemId === "resource.returned" && x.status === "open" && x.id !== returnedId),
+    "a genuinely observed new resource obligation was suppressed by its resolved historical occurrence");
   const quiet = replay([facts(base+22*h)]);
   t.assertions.assert(!Object.keys(quiet.state.incidents).length && !existsSync(join(output, ".genethub/team/quality/live-alerts.json")), "quiet external replay created an incident or wrote native Team state");
   const shortTier=parallel(base+19*h+30*60000);shortTier.r6Basis="task-agent-hours/2";

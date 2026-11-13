@@ -61,7 +61,7 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.team-programmatic-upgrade",
   title: "Automatic upgrade validates one latest Git candidate, preserves local patches and wakes only on actionable failure",
-  oracle: "Actual Team CLI adopts only the latest verified Git candidate. Dirty source bytes/HEAD stay intact and reach existing native reflection once per target despite further edits. Identical builtin changes integrate without a false conflict; different builtin patches remain protected, with the current public maintainer argv in the handoff. No live Team or project is changed.",
+  oracle: "Actual Team CLI adopts only the latest verified Git candidate. Dirty source bytes/HEAD stay intact and reach existing native reflection once per target despite further edits. The actionable payload is visible in public notes list and its native briefing, alongside the current maintainer argv. Identical builtin changes integrate; different builtin patches remain protected. No live Team or project is changed.",
   catches: ["one manual upgrade per release", "platform baseline mistaken for adoption", "dirty source overwritten or silently abandoned", "source edits repeatedly wake reflection", "identical builtin bytes treated as incompatible", "local resultDelivery-style builtin patch silently merged", "successful upgrade wakes reflection", "conflict leaves a legacy caller without a usable maintenance entry"],
   tags: ["core", "team-upgrade"], llm: { default: "none" },
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
@@ -83,10 +83,12 @@ defineSpecialty({
     t.assertions.assert(result.status === 0, result.stderr + result.stdout); return JSON.parse(result.stdout);
   };
   const notes = () => existsSync(r.state("notes")) ? readdirSync(r.state("notes")).filter(x => x.endsWith(".json")) : [];
-  const seesNote = (view: Awaited<ReturnType<typeof r.snapshot>>, id: string) => view.items.some(item => {
+  const seesNote = (view: Awaited<ReturnType<typeof r.snapshot>>, id: string, excerpt?: string) => view.items.some(item => {
     if (item.type !== "userMessage") return false;
     const brief = /^简报:\s*(.+)$/m.exec(item.text)?.[1];
-    return Boolean(brief && dirname(brief) === r.state("briefings") && readFileSync(brief, "utf8").includes(id));
+    if (!brief || dirname(brief) !== r.state("briefings")) return false;
+    const content = readFileSync(brief, "utf8");
+    return content.includes(id) && content.includes("run.py notes ls") && (!excerpt || content.includes(excerpt));
   });
   const settle = async () => {
     let value: any;
@@ -158,6 +160,11 @@ defineSpecialty({
     t.assertions.assert(dirtyContext.dirtyPaths.includes("memory.md")
       && JSON.stringify(dirtyContext.maintenanceArgv.slice(2, 6)) === JSON.stringify([join(platform, "tools/run.py"), "--team-root", r.root, "upgrade"]),
       "dirty-source handoff lacks the actual public maintainer or changed paths");
+    const visibleNote = r.ok(["notes", "ls"]);
+    t.assertions.assert(typeof dirtyNote.quote === "string" && dirtyNote.quote.trim().length > 24
+      && visibleNote.includes(dirtyNote.id) && visibleNote.includes(dirtyNote.quote)
+      && visibleNote.includes(join(platform, "tools/run.py")),
+      "public notes list suppressed the actionable upgrade payload behind its metadata");
     writeFileSync(memory, Buffer.concat([original, Buffer.from("\nFurther uncommitted user work.\n")]));
     const editedBytes = readFileSync(memory);
     execute(["upgrade"]); execute(["upgrade"]);
@@ -169,8 +176,8 @@ defineSpecialty({
       "source blocker waited behind the ordinary reflection gap instead of using the existing urgent upgrade channel");
     await t.tools.waitUntil(async () => (await r.snapshot(dirtyReflect.sessionId)).summary.status === "idle", 20000);
     const dirtyView = await r.snapshot(dirtyReflect.sessionId);
-    t.assertions.assert(seesNote(dirtyView, dirtyNote.id),
-      "source blocker note never reached a real native reflection input");
+    t.assertions.assert(seesNote(dirtyView, dirtyNote.id, dirtyNote.quote.slice(0, 24)),
+      "source blocker payload never reached the real native reflection briefing");
     execute(["upgrade"]); r.ok(["hook"], { TEAM_TEMPLATE: platform });
     t.assertions.assert(JSON.parse(readFileSync(r.state("reflect.json"), "utf8")).sessionId === dirtyReflect.sessionId
       && notes().length === beforeNotes + 1, "handled source-blocker notification wakes another reflection without new work");
