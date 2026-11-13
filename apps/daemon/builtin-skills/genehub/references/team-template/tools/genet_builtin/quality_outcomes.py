@@ -57,7 +57,8 @@ def adoption(work, tasks, log, native, cutoff):
     for item in work:
         consumed = item.get('consumedAtMs')
         evidence = [x for x in declarations if x.get('taskId') == item.get('taskId')
-                    and x.get('sessionId') == item.get('requester') and x.get('outcome') == 'success'
+                    and x.get('sessionId') == item.get('requester')
+                    and x.get('outcome') in ('success', 'failed', 'blocked')
                     and item['id'] in x.get('uses', []) and number(consumed)
                     and number(x.get('atMs')) and consumed <= x['atMs'] <= cutoff]
         requester = native.get(item.get('requester'), {})
