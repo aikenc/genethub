@@ -58,7 +58,12 @@ def store(t, root, row, status=None, **fields):
         t.add_note(root, {'kind': 'upgrade' if source_changes else 'upgrade-' + kind, 'from': 'platform',
                          'session': None, 'quote': '', 'context': json.dumps(
                              context, ensure_ascii=False),
-                         'text': '平台升级等待未提交源修改处理' if source_changes else '平台升级需要处理：' + status},
+                         'text': ('平台升级被未提交源修改阻塞，单纯等待不会消除这些修改。'
+                                  '请团队反思审阅所列路径，保留本地成果并完成整合、验证和本队提交；'
+                                  '再使用 context.maintenanceArgv 的当前公共入口继续升级。'
+                                  '确有进行中的编辑时先确认该工作的收尾承接，不自动提交或清除它。'
+                                  '留言已读只代表收到；采用仍以完整源端、执行制品和自然卡验证为准。')
+                                 if source_changes else '平台升级需要处理：' + status},
                    'upgrade', row['target'], kind, row.get('reason', ''))
     return row
 
