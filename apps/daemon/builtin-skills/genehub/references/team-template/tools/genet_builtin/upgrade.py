@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
@@ -25,6 +26,7 @@ def register(sub):
     command = sub.add_parser('upgrade', help='merge, verify and install the latest compatible platform template')
     command.add_argument('--status', action='store_true', help='read the latest upgrade outcome')
     command.add_argument('--worker', help='resume the durable generation selected by the timer')
+    command.add_argument('--base', help='full ancestor commit explicitly reviewed by the Team for legacy unrelated history')
 
 
 def location(t, root):
@@ -136,7 +138,22 @@ def selection(t, root):
     return template, t.template_digest(template)
 
 
-def schedule(t, root):
+def reviewed_base(t, root, head, base):
+    if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base):
+        raise Conflict([], 'invalid-reviewed-baseline; provide a full immutable ancestor commit')
+    result = t.git(root, 'rev-parse', '--verify', base + '^{commit}', check=False)
+    if result.returncode:
+        raise Conflict([], 'invalid-reviewed-baseline; commit not found')
+    base = result.stdout.decode().strip()
+    result = t.git(root, 'merge-base', '--is-ancestor', base, head, check=False)
+    if result.returncode == 1:
+        raise Conflict([], 'reviewed-baseline-not-ancestor; retain the original source')
+    if result.returncode:
+        raise RuntimeError('baseline ancestry check failed: ' + result.stderr.decode('utf-8', 'replace')[-1600:])
+    return base
+
+
+def schedule(t, root, base=None):
     if t.is_deployed_output(root):
         return {'status': 'waiting-safe-point', 'reason': 'managed-at-definition-source'}
     with t.inbox_lock(root, 'upgrade-worker', purpose='平台升级'):
@@ -157,8 +174,19 @@ def schedule(t, root):
             waiting = previous if previous.get('sourceApplied') and previous.get('target') == target else dict(schema='team-upgrade/1', target=target, head=head)
             return store(t, root, waiting,
                          'waiting-safe-point', reason='uncommitted-source-changes')
+        # A choice belongs only to this platform target, never to future
+        # releases. Ordinary timer retries may resume the exact prior choice.
+        if base is None and previous.get('target') == target:
+            base = previous.get('reviewedBase')
+        if base is not None:
+            try:
+                base = reviewed_base(t, root, head, base)
+            except Conflict as error:
+                return store(t, root, dict(schema='team-upgrade/1', target=target, head=head),
+                             'conflict', reason=str(error), conflictFiles=error.files)
         inputs = source_identity(t, root, head)
         if (previous.get('target') == target and previous.get('status') in ('conflict', 'test-failure')
+                and previous.get('reviewedBase') == base
                 and previous.get('sourceIdentity') == inputs):
             return previous  # recording the failure is not a new repair attempt
         if (previous.get('sourceApplied') and previous.get('target') == target
@@ -168,17 +196,22 @@ def schedule(t, root):
         else:
             row = None
         if (previous.get('target') == target and previous.get('head') == head
+                and previous.get('reviewedBase') == base
                 and previous.get('status') in ('adopted', 'conflict', 'test-failure')):
             return previous
         row = row or dict(schema='team-upgrade/1', target=target, head=head, template=template,
                           startedAtMs=t.now_ms(), sourceIdentity=inputs,
-                          generation=hashlib.sha256((target + '\0' + head).encode()).hexdigest()[:24])
+                          generation=hashlib.sha256((target + '\0' + head + '\0' + (base or '')).encode()).hexdigest()[:24])
+        if base is not None:
+            row['reviewedBase'] = base
         row['delegatedNotes'] = sorted(set(row.get('delegatedNotes', [])) | set(delegated))
         directory = Path(t.state_dir(root, 'upgrade', row['generation']))
         directory.mkdir(parents=True, exist_ok=True)
         store(t, root, row, 'waiting-safe-point', reason='validating-candidate')
         with (directory/'worker.log').open('ab') as log:
-            process = subprocess.Popen([sys.executable, '-B', str(Path(root)/'tools/run.py'),
+            entry = Path(sys.argv[0]).resolve()
+            selector = [] if entry == (Path(root)/'tools/run.py').resolve() else ['--team-root', str(root)]
+            process = subprocess.Popen([sys.executable, '-B', str(entry), *selector,
                                         'upgrade', '--worker', row['generation']], cwd=root,
                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         row['workerPid'] = process.pid
@@ -191,10 +224,16 @@ def merge_tree(t, root, row, directory):
     platform = t.git_text(root, 'rev-parse', t.platform_ref(root))
     ancestry = t.git(root, 'merge-base', row['head'], platform, check=False)
     if ancestry.returncode == 1:
-        raise Conflict([], 'no-common-ancestor; manual three-way integration required')
-    if ancestry.returncode:
+        if not row.get('reviewedBase'):
+            raise Conflict([], 'no-common-ancestor; review the original platform baseline, then upgrade --base <full-ancestor-commit>')
+        base = reviewed_base(t, root, row['head'], row['reviewedBase'])
+        row['mergeBaseMode'] = 'reviewed'
+    elif ancestry.returncode:
         raise RuntimeError('merge-base failed: ' + ancestry.stderr.decode('utf-8', 'replace')[-1600:])
-    base = ancestry.stdout.decode().strip()
+    else:
+        base = ancestry.stdout.decode().strip()
+        row['mergeBaseMode'] = 'common-ancestor'
+    row['mergeBase'] = base
     local = set(git(t, root, 'diff', '--name-only', '-z', base, row['head']).decode().split('\0'))
     changed = set(git(t, root, 'diff', '--name-only', '-z', base, platform).decode().split('\0'))
     builtin = ('tools/genet_builtin/', 'skills/genet_builtin/')
@@ -360,7 +399,22 @@ def apply_source(t, root, row, platform, tree, builder):
             raise SafePointBusy('newer-template-or-source-change')
         original = row['head']
         try:
-            git(t, root, 'merge', '--no-ff', '--no-edit', '-m', 'upgrade: ' + row['target'], platform)
+            if row.get('mergeBaseMode') == 'reviewed':
+                # Both histories remain intact. The explicit comparison base
+                # is not fabricated ancestry; only the validated tree is used.
+                applied = git(t, root, 'commit-tree', tree, '-p', original, '-p', platform,
+                              '-m', 'upgrade: ' + row['target'] + '\n\nReviewed baseline: ' + row['mergeBase']).decode().strip()
+                git(t, root, 'read-tree', '-m', '-u', original, tree)
+                try:
+                    git(t, root, 'update-ref', 'HEAD', applied, original)
+                except t.ExpertError:
+                    if (t.git_text(root, 'rev-parse', 'HEAD') == original
+                            and t.git(root, 'diff', '--quiet', check=False).returncode == 0
+                            and t.git_text(root, 'write-tree') == tree):
+                        git(t, root, 'read-tree', '-m', '-u', tree, original)
+                    raise
+            else:
+                git(t, root, 'merge', '--no-ff', '--no-edit', '-m', 'upgrade: ' + row['target'], platform)
             applied = t.git_text(root, 'rev-parse', 'HEAD')
             row['appliedCommit'] = applied
             if t.git_text(root, 'rev-parse', 'HEAD^{tree}') != tree:
@@ -437,5 +491,5 @@ def command(t, args):
     elif args.worker:
         value = worker(t, root, args.worker)
     else:
-        value = schedule(t, root)
+        value = schedule(t, root, args.base)
     print(json.dumps(value, ensure_ascii=False))
