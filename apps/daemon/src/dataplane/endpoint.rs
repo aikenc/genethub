@@ -9,6 +9,7 @@ use genehub_proto::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, Role};
 pub use super::authenticated_channel::{carrier_channels, Carrier};
@@ -679,8 +680,32 @@ pub(crate) async fn serve_streams(
     }
     .await;
 
+    tracing::info!(
+        event = "data_endpoint_ended",
+        logical_id = access.logical_id.as_deref(),
+        transport = carrier_kind.as_str(),
+        idle_ms = last_received.elapsed().as_millis() as u64,
+        outcome = if outcome.is_ok() { "closed" } else { "error" },
+        "physical data endpoint ended"
+    );
     if let Err(error) = &outcome {
-        tracing::debug!(%error, "data endpoint ended");
+        let message = error.to_string();
+        let reason = if message.contains("heartbeat") {
+            "heartbeat_timeout"
+        } else if message.contains("writer") {
+            "writer_failed"
+        } else if message.contains("revok") || message.contains("expired") {
+            "admission_ended"
+        } else {
+            "carrier_failed"
+        };
+        tracing::warn!(
+            logical_id = access.logical_id.as_deref(),
+            transport = carrier_kind.as_str(),
+            reason,
+            "data endpoint failed"
+        );
+        tracing::debug!(%error, "data endpoint failure detail");
     }
     peer.handlers.abort_all();
     while peer.handlers.join_next().await.is_some() {}
@@ -1201,6 +1226,13 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             }
         }
     }
+    let span = tracing::warn_span!(
+        "rpc_read_context",
+        request_id = diagnostic_id(&stream.head.metadata),
+        logical_id = services.access.logical_id.as_deref(),
+        transport = services.carrier_kind.as_str(),
+        stream_id = stream.id,
+    );
     let handled = router::handle_in_workspace(
         &services.state,
         services.access.transport,
@@ -1212,6 +1244,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         },
         request,
     )
+    .instrument(span)
     .await;
     match handled.reply {
         Ok(reply) => {

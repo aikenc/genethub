@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use genehub_proto::{HubStatus, RemoteAccess, SupportDiagnosticEvent, SupportDiagnostics};
 
+pub(crate) mod read;
 pub mod work;
 
 const MAX_EVENTS: usize = 256;

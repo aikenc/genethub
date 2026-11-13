@@ -975,6 +975,7 @@ fn prune_home(homes: &mut Homes, root: &Path) {
 struct PageCatalog {
     generation: u64,
     write_revision: u64,
+    observation_revision: u64,
     homes_revision: u64,
     checked_at: Option<std::time::Instant>,
     initialized: bool,
@@ -989,6 +990,9 @@ struct PageCatalog {
     watches: HashMap<PathBuf, crate::fs_stamp::Watch>,
     /// One per physical `sessions/` directory, keyed by that directory.
     homes: HashMap<PathBuf, HomeSweep>,
+    /// Serialize observations of one physical directory, including aliases.
+    /// Weak entries retain no idle project locks.
+    home_sweeps: HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>,
     changes: ChangeLog,
 }
 
@@ -1079,6 +1083,7 @@ struct HomeSeen {
 }
 
 struct HomeSweep {
+    observation_revision: u64,
     seen: HomeSeen,
     listing: crate::fs_stamp::Watch,
     tombstones: crate::fs_stamp::Watch,
@@ -1200,6 +1205,8 @@ impl PageCatalog {
         now: std::time::Instant,
     ) {
         use crate::fs_stamp::Watch;
+        self.observation_revision = self.observation_revision.wrapping_add(1);
+        let observation_revision = self.observation_revision;
         let HomeLooked {
             sessions,
             scopes,
@@ -1242,6 +1249,7 @@ impl PageCatalog {
             .homes
             .entry(sessions.clone())
             .or_insert_with(|| HomeSweep {
+                observation_revision,
                 listing: Watch::now(now),
                 tombstones: Watch::now(now),
                 seen: seen.clone(),
@@ -1273,6 +1281,7 @@ impl PageCatalog {
             );
         }
         entry.seen = seen;
+        entry.observation_revision = observation_revision;
         if validated {
             entry.validated = Some(now);
         }
@@ -1462,8 +1471,8 @@ pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
     catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Arc<CatalogScan>>>,
-    /// One sweep or catalog load at a time; readers wait for it rather than
-    /// starting another walk.
+    /// Coalesce global sweeps and the initial catalog load. Scoped reads
+    /// synchronize only with scans of the same physical sessions directory.
     sweep: Arc<tokio::sync::Mutex<()>>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
     catalog_wake: Arc<tokio::sync::Notify>,
@@ -2404,7 +2413,10 @@ impl Store {
     /// (see [`CATALOG_CADENCE`]). Durable recovery continues to use
     /// fresh_metadata_scan independently of presentation snapshots.
     pub(super) async fn reconcile_catalog(&self) -> Result<()> {
-        let _sweep = self.sweep.lock().await;
+        let _sweep = crate::diagnostics::read::observe("catalog_global_lock", None, None, async {
+            Ok(self.sweep.lock().await)
+        })
+        .await?;
         loop {
             let revision = self
                 .homes
@@ -2426,7 +2438,13 @@ impl Store {
                 (cache.generation, cache.initialized)
             };
             let applied = if initialized {
-                self.sweep_catalog(None, revision, generation).await?
+                crate::diagnostics::read::observe(
+                    "catalog_global_refresh",
+                    None,
+                    None,
+                    self.sweep_catalog(None, revision, generation),
+                )
+                .await?
             } else {
                 self.load_catalog(revision, generation).await?
             };
@@ -2442,7 +2460,6 @@ impl Store {
     /// at the cost of looking at that project's files at most once per
     /// [`SCOPE_REUSE`]. Unscoped reads are served from the index as it is.
     async fn validate_scope(&self, workspace: &str) -> Result<()> {
-        let _sweep = self.sweep.lock().await;
         loop {
             let revision = self
                 .homes
@@ -2470,9 +2487,13 @@ impl Store {
                 }
                 cache.generation
             };
-            if self
-                .sweep_catalog(Some(workspace), revision, generation)
-                .await?
+            if crate::diagnostics::read::observe(
+                "catalog_scope_refresh",
+                Some(workspace),
+                None,
+                self.sweep_catalog(Some(workspace), revision, generation),
+            )
+            .await?
             {
                 return Ok(());
             }
@@ -2488,7 +2509,14 @@ impl Store {
         // Recovery always asks for a fresh durable observation. A cold
         // presentation read may share that in-flight scan, never its old
         // cached result, so boot does not walk every file twice.
-        let mut scan = (*self.fresh_metadata_scan(None).await?).clone();
+        let mut scan = (*crate::diagnostics::read::observe(
+            "catalog_initial_scan",
+            None,
+            None,
+            self.fresh_metadata_scan(None),
+        )
+        .await?)
+            .clone();
         let mut cache = self
             .page_catalog
             .lock()
@@ -2574,6 +2602,7 @@ impl Store {
             cache.homes.insert(
                 sessions.clone(),
                 HomeSweep {
+                    observation_revision: 0,
                     listing: crate::fs_stamp::Watch::first(
                         &sessions,
                         seen.listing.as_ref(),
@@ -2618,75 +2647,154 @@ impl Store {
             .iter()
             .map(|(_, sessions)| sessions.clone())
             .collect();
-        let (plans, write_revision) = {
-            let cache = self
-                .page_catalog
-                .lock()
-                .map_err(|_| anyhow!("page catalog poisoned"))?;
-            let force = scope.is_some();
-            let mut plans = Vec::new();
-            for (projects, sessions) in registered {
+        let mut budget = crate::blocking::WorkBudget::new();
+        let mut yield_wait = std::time::Duration::ZERO;
+        let mut lock_wait = std::time::Duration::ZERO;
+        let mut counts = SweepCounts::default();
+        let mut looked = Vec::new();
+        for (projects, sessions) in registered {
+            yield_wait += budget.checkpoint().await;
+            let gate = {
+                let mut cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                cache.home_sweeps.retain(|_, gate| gate.strong_count() > 0);
+                let gate = cache
+                    .home_sweeps
+                    .get(&sessions)
+                    .and_then(std::sync::Weak::upgrade)
+                    .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+                cache
+                    .home_sweeps
+                    .insert(sessions.clone(), Arc::downgrade(&gate));
+                gate
+            };
+            let lock_started = std::time::Instant::now();
+            let _home = crate::diagnostics::read::observe(
+                "catalog_home_lock",
+                scope,
+                Some(&sessions),
+                async { Ok(gate.lock().await) },
+            )
+            .await?;
+            lock_wait += lock_started.elapsed();
+            // Only this home is serialized. A background observation records
+            // its revision so a later scoped refresh wins at publication.
+            let (plan, write_revision, observation_revision) = {
+                let cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                if cache.generation != generation
+                    || self
+                        .homes
+                        .revision
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != revision
+                {
+                    return Ok(false);
+                }
+                let force = scope.is_some();
                 let owners = home_owners(&projects);
-                let Some(home) = cache
+                let plan = if let Some(home) = cache
                     .homes
                     .get(&sessions)
                     .filter(|home| home.seen.owners == owners)
-                else {
-                    plans.push(HomePlan {
+                {
+                    // Another reader of this home may have refreshed it while
+                    // this request was waiting for the same directory.
+                    if force && home.validated.is_some_and(|at| at.elapsed() < SCOPE_REUSE) {
+                        continue;
+                    }
+                    let entries: Vec<_> = home
+                        .seen
+                        .sessions
+                        .iter()
+                        .filter(|id| !home.seen.deleted.contains(*id))
+                        .filter_map(|id| {
+                            let path = sessions.join(id).join("meta.json");
+                            let due =
+                                force || cache.watches.get(&path).is_none_or(|w| w.due(started));
+                            due.then(|| {
+                                let file = cache.files.get(&path);
+                                let stamp = file.and_then(|f| f.stamp);
+                                // This daemon's write holds the session writer
+                                // lock, so its stamp needs no settling.
+                                let trusted =
+                                    file.is_some_and(|f| f.changed > 0 && f.error.is_none());
+                                let failed = file.is_some_and(|f| f.error.is_some());
+                                (id.clone(), stamp, trusted && !failed)
+                            })
+                        })
+                        .collect();
+                    let list = force || home.listing.due(started);
+                    let tombstones = force || home.tombstones.due(started);
+                    if !list && !tombstones && entries.is_empty() {
+                        continue;
+                    }
+                    HomePlan {
+                        sessions,
+                        projects,
+                        prior: Some(home.seen.clone()),
+                        list,
+                        tombstones,
+                        entries,
+                    }
+                } else {
+                    HomePlan {
                         sessions,
                         projects,
                         prior: None,
                         list: true,
                         tombstones: true,
                         entries: Vec::new(),
-                    });
-                    continue;
+                    }
                 };
-                let entries: Vec<_> = home
-                    .seen
-                    .sessions
-                    .iter()
-                    .filter(|id| !home.seen.deleted.contains(*id))
-                    .filter_map(|id| {
-                        let path = sessions.join(id).join("meta.json");
-                        let due = force || cache.watches.get(&path).is_none_or(|w| w.due(started));
-                        due.then(|| {
-                            let file = cache.files.get(&path);
-                            let stamp = file.and_then(|f| f.stamp);
-                            // This daemon's own write holds the session's
-                            // writer lock, so its stamp needs no settling.
-                            let trusted = file.is_some_and(|f| f.changed > 0 && f.error.is_none());
-                            let failed = file.is_some_and(|f| f.error.is_some());
-                            (id.clone(), stamp, trusted && !failed)
-                        })
-                    })
-                    .collect();
-                let list = force || home.listing.due(started);
-                let tombstones = force || home.tombstones.due(started);
-                if !list && !tombstones && entries.is_empty() {
-                    continue;
-                }
-                plans.push(HomePlan {
-                    sessions,
-                    projects,
-                    prior: Some(home.seen.clone()),
-                    list,
-                    tombstones,
-                    entries,
-                });
-            }
-            (plans, cache.write_revision)
-        };
-        let mut budget = crate::blocking::WorkBudget::new();
-        let mut yield_wait = std::time::Duration::ZERO;
-        let mut counts = SweepCounts::default();
-        let mut looked = Vec::with_capacity(plans.len());
-        for plan in plans {
-            yield_wait += budget.checkpoint().await;
-            looked.push(
-                self.sweep_home(plan, &mut budget, &mut yield_wait, &mut counts)
-                    .await,
+                let observation_revision = cache
+                    .homes
+                    .get(&plan.sessions)
+                    .map(|home| home.observation_revision);
+                (plan, cache.write_revision, observation_revision)
+            };
+            let home_path = plan.sessions.clone();
+            let home = crate::diagnostics::read::observe(
+                "catalog_home_scan",
+                scope,
+                Some(&home_path),
+                async {
+                    Ok(self
+                        .sweep_home(plan, &mut budget, &mut yield_wait, &mut counts)
+                        .await)
+                },
+            )
+            .await?;
+            tracing::debug!(
+                event = "session_catalog_home_observed",
+                scoped = scope.is_some(),
+                home_key = crate::diagnostics::read::key(&home_path),
+                observation_revision,
+                observations = home.looked.len(),
+                "session directory observation ready for publication"
             );
+            let mut cache = self
+                .page_catalog
+                .lock()
+                .map_err(|_| anyhow!("page catalog poisoned"))?;
+            if cache.generation != generation
+                || self
+                    .homes
+                    .revision
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != revision
+            {
+                return Ok(false);
+            }
+            if scope.is_some() {
+                cache.apply_home(home, write_revision, true, std::time::Instant::now());
+            } else {
+                looked.push((home, write_revision, observation_revision));
+            }
         }
         let mut cache = self
             .page_catalog
@@ -2702,8 +2810,17 @@ impl Store {
             return Ok(false);
         }
         let now = std::time::Instant::now();
-        for home in looked {
-            cache.apply_home(home, write_revision, scope.is_some(), now);
+        // Keep global publication atomic, as before. A scoped refresh that
+        // completed after one of these observations must not be overwritten.
+        for (home, write_revision, observed) in looked {
+            if cache
+                .homes
+                .get(&home.sessions)
+                .map(|home| home.observation_revision)
+                == observed
+            {
+                cache.apply_home(home, write_revision, false, now);
+            }
         }
         if scope.is_none() {
             let stale: Vec<PathBuf> = cache
@@ -2738,8 +2855,12 @@ impl Store {
                 listings = counts.listings,
                 stats = counts.stats,
                 metadata_read = counts.reads,
+                lock_wait_ms = lock_wait.as_millis() as u64,
                 yield_wait_ms = yield_wait.as_millis() as u64,
-                inline_ms = elapsed.saturating_sub(yield_wait).as_millis() as u64,
+                inline_ms = elapsed
+                    .saturating_sub(yield_wait)
+                    .saturating_sub(lock_wait)
+                    .as_millis() as u64,
                 elapsed_ms = elapsed.as_millis() as u64,
                 "session metadata sweep exceeded one second"
             );

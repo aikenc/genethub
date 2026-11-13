@@ -1154,6 +1154,7 @@ async fn execute(
             {
                 let mut cursor = None;
                 let mut seen = std::collections::HashSet::new();
+                let mut restarts = 0;
                 loop {
                     let reply = rpc
                         .call(Request::SessionPage {
@@ -1180,6 +1181,21 @@ async fn execute(
                     }
                     let page = pages.remove(0);
                     if let Some(error) = page.error {
+                        // This is a read-only, complete activity query. A
+                        // changed cursor invalidates every earlier page, so
+                        // discard the whole pass, just as the public client
+                        // does. Never reconnect/replay mutations or return a
+                        // partial set as complete, and keep retries bounded.
+                        if active
+                            && error == "activity changed; restart activity pages"
+                            && restarts < 2
+                        {
+                            restarts += 1;
+                            sessions.clear();
+                            seen.clear();
+                            cursor = None;
+                            continue;
+                        }
                         return Err(CliFailure::business("sessionPageFailed", error, None));
                     }
                     sessions.extend(page.sessions);

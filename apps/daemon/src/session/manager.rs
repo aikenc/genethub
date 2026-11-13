@@ -2112,10 +2112,15 @@ impl SessionManager {
         // share projection work just like the legacy list, without retaining
         // a snapshot after its last reader leaves. Include the full query so
         // cursors, activity, archives and conditional replies stay isolated.
-        crate::blocking::coalesce(
-            &self.page_reads,
-            serde_json::to_string(&(request, include_archived))?,
-            || self.read_page(request, include_archived),
+        crate::diagnostics::read::observe(
+            "session_page",
+            request.workspace_id.as_deref(),
+            None,
+            crate::blocking::coalesce(
+                &self.page_reads,
+                serde_json::to_string(&(request, include_archived))?,
+                || self.read_page(request, include_archived),
+            ),
         )
         .await
     }
@@ -2159,21 +2164,29 @@ impl SessionManager {
                 Ok(cursor)
             })
             .transpose()?;
-        let mut metadata = if request.active_only.unwrap_or(false) {
-            self.activity_metadata(request.workspace_id.as_deref(), true)
-                .await?
-        } else {
-            self.store
-                .metadata_window(
-                    request.workspace_id.as_deref(),
-                    include_archived,
-                    cursor
-                        .as_ref()
-                        .map(|c| (c.at, c.id.clone(), c.owner.clone())),
-                    request.limit as usize + 1,
-                )
-                .await?
-        };
+        let mut metadata = crate::diagnostics::read::observe(
+            "page_metadata",
+            request.workspace_id.as_deref(),
+            None,
+            async {
+                if request.active_only.unwrap_or(false) {
+                    self.activity_metadata(request.workspace_id.as_deref(), true)
+                        .await
+                } else {
+                    self.store
+                        .metadata_window(
+                            request.workspace_id.as_deref(),
+                            include_archived,
+                            cursor
+                                .as_ref()
+                                .map(|c| (c.at, c.id.clone(), c.owner.clone())),
+                            request.limit as usize + 1,
+                        )
+                        .await
+                }
+            },
+        )
+        .await?;
         metadata.retain(|meta| {
             (include_archived || !meta.archived)
                 && (request.active_only.unwrap_or(false)
@@ -2217,12 +2230,27 @@ impl SessionManager {
                         .collect::<Vec<_>>()
                 )?)
             );
-            anyhow::ensure!(
-                cursor
-                    .as_ref()
-                    .is_none_or(|c| c.activity_revision.as_deref() == Some(digest.as_str())),
-                "activity changed; restart activity pages"
-            );
+            if cursor
+                .as_ref()
+                .is_some_and(|c| c.activity_revision.as_deref() != Some(digest.as_str()))
+            {
+                if crate::diagnostics::read::failure_allowed("activity_page_changed") {
+                    tracing::warn!(
+                        event = "session_activity_page_changed",
+                        scope_key = request
+                            .workspace_id
+                            .as_deref()
+                            .map(crate::diagnostics::read::key),
+                        expected_revision =
+                            cursor.as_ref().and_then(|c| c.activity_revision.as_deref()),
+                        actual_revision = digest.as_str(),
+                        selected_count = selected.len(),
+                        catalog_revision,
+                        "activity changed between pages; restart the complete read"
+                    );
+                }
+                anyhow::bail!("activity changed; restart activity pages");
+            }
             activity_revision = Some(digest);
             let pairs = selected
                 .into_iter()
@@ -2260,17 +2288,31 @@ impl SessionManager {
         } else {
             None
         };
+        if request.active_only.unwrap_or(false) {
+            tracing::debug!(
+                event = "session_activity_page_served",
+                continuation = cursor.is_some(),
+                more = next_cursor.is_some(),
+                rows = metadata.len(),
+                "activity page prepared"
+            );
+        }
         let metadata_ms = started.elapsed().as_millis() as u64;
         let mut sessions = if request.active_only.unwrap_or(false) {
             active_summaries
         } else {
-            self.project_list(
-                metadata,
+            crate::diagnostics::read::observe(
+                "page_projection",
                 request.workspace_id.as_deref(),
-                include_archived,
-                true,
-                started,
-                metadata_ms,
+                None,
+                self.project_list(
+                    metadata,
+                    request.workspace_id.as_deref(),
+                    include_archived,
+                    true,
+                    started,
+                    metadata_ms,
+                ),
             )
             .await?
         };
