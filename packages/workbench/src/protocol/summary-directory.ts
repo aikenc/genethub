@@ -408,7 +408,8 @@ export class MachineSummaryDirectory {
     this.watches.delete(id); watch.stop(); clientSources.delete(client);
     const row = this.rows.find(row => row.target.id === id);
     if (!row || !this.canPublish(row) || reason === "disposed") return;
-    row.cached = true; row.refreshing = false; row.activityComplete = false;
+    // An interrupted first read has no prior snapshot to label as cached.
+    row.cached = Boolean(row.updatedAt); row.refreshing = false; row.activityComplete = false;
     row.catalogGeneration = (row.catalogGeneration ?? 0) + 1;
     this.diagnostic("summary.source", `retired-${reason}`, row.target.deviceHandle ?? id);
     this.emit();
@@ -443,7 +444,7 @@ export class MachineSummaryDirectory {
         const row = current(), owner = this.watches.get(target.id);
         if (!row || !this.canPublish(row) || owner && owner.client !== client) return;
         row.activityComplete=false; row.catalogGeneration=(row.catalogGeneration ?? 0)+1;
-        row.refreshing=!error && client.connectionState === "ready"; row.cached=true;
+        row.refreshing=!error && client.connectionState === "ready"; row.cached=Boolean(row.updatedAt);
         if (error && client.connectionState === "ready") row.state=classify(error);
         this.emit();
       },
