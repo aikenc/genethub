@@ -7,7 +7,7 @@ import { defineSpecialty, connectProductClient, registerControlledAgent, parseJs
 defineSpecialty({
   id: "specialty.daemon.team-remote-dispatch",
   title: "Fixed team targets dispatch once and hold the executor's writer lock until reconciliation",
-  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release; a >8KiB task and restored 300-reference coordination snapshot reach the real remote runtime",
+  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release; a >8KiB task and restored 300-reference coordination snapshot reach the real remote runtime; diagnostic routing retains original machine identity beyond metric samples and refuses conflicting creation bindings",
   catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation", "a declared remote role is rerouted by --machine or silently runs locally", "an executor accepts a role not installed for it", "remote install needs hand-written paths or scripts", "JSON business content exceeds the small command head", "Timer success hides a failed remote projection"],
   stages: ["initial-result", "resumed-result", "paused-reservation", "resumed-release"],
   tags: ["core", "expert", "team-remote"], llm: { default: "mock" },
@@ -538,6 +538,57 @@ sys.exit(r.returncode)
     const noLeaseWork=(await qualityFacts()).workItems.find((x:any)=>x.sessionId===secondOwner);
     const noLeaseBound=releaseEvents().find(e=>e.kind==="resource-release-observed"&&e.sessionId===secondOwner);
     t.assertions.assert(!!noLeaseBound && noLeaseBound.atMs>=secondReleaseObservedAfter && noLeaseWork?.releasedAtMs===noLeaseBound.atMs && noLeaseWork.releaseTimeBasis==="observed-absence-upper-bound", "hourly collection lost or relabeled the real remote release observation");
+    // Restored source-only metric checkpoint: an old completed contribution
+    // no longer supplies an indicator sample, but its native creation receipt
+    // must still route a later uncreated requester's reads. No native Session,
+    // history, accepted input or original dispatch receipt is fabricated/aged;
+    // this diagnostic fixture makes no historical execution or score claim.
+    const oldTaskPath=path.join(sourceRoot,".genethub/team/tasks",secondTask.taskId+".json");
+    const oldTaskBytes=readFileSync(oldTaskPath);
+    const historicalTask=JSON.parse(oldTaskBytes.toString());
+    const oldFinish=Date.now()-25*3600000;
+    historicalTask.createdAtMs=oldFinish-60000;
+    historicalTask.finished={...historicalTask.finished,atMs:oldFinish};
+    const requesterPath=path.join(intentsRoot,"restored-requester-route-fixture.json");
+    const conflictPath=path.join(intentsRoot,"restored-conflicting-route-fixture.json");
+    const originalIntent=readdirSync(intentsRoot).map(f=>JSON.parse(readFileSync(path.join(intentsRoot,f),"utf8"))).find(v=>v.sessionId===secondOwner);
+    t.assertions.assert(originalIntent?.pending?.sessionId===secondOwner
+      &&originalIntent.pending.remoteDispatch.id===originalIntent.operationId,
+      "real remote creation binding missing before metric checkpoint");
+    try {
+      writeFileSync(oldTaskPath,JSON.stringify(historicalTask));
+      writeFileSync(requesterPath,JSON.stringify({operationId:"restored.requester.route",createdAtMs:Date.now(),state:"withdrawn",withdrawnAtMs:Date.now(),
+        request:{taskId:secondTask.taskId,role:"qa",requester:secondOwner,machine},fixture:"source-only uncreated requester; no execution/receipt claim"}));
+      const localMissing=await sourceCli(["session","get",secondOwner,"--summary"]);
+      const targetSummary=(await cliJson(["session","get",secondOwner,"--summary"],true)).summary;
+      t.assertions.assert(localMissing.code!==0&&targetSummary.id===secondOwner,
+        "remote routing oracle accidentally used a local Session");
+      const routed=await qualityFacts();
+      const executor=(await cliJson(["context"],true)).daemon.machineId;
+      const cached=JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/quality/native",secondOwner+".json"),"utf8"));
+      t.assertions.assert(!routed.workItems.some((x:any)=>x.id===originalIntent.operationId),
+        "restored metric checkpoint did not exclude the original contribution sample");
+      t.assertions.assert(!routed.issues.some((x:any)=>x.sessionId===secondOwner)
+        &&cached.kernel.machineId===executor&&routed.turns.some((x:any)=>x.sessionId===secondOwner),
+        "expired remote contribution lost its immutable machine binding for a still-referenced requester");
+      // Contradictory restored routing is corrupt source evidence, never a
+      // reason to pick the first peer or borrow the healthy remote cache.
+      const contradictory=JSON.parse(JSON.stringify(originalIntent));
+      contradictory.operationId="restored.conflicting.route";
+      contradictory.request.machine=reverse.machine.machineId;
+      contradictory.pending.operationId=contradictory.operationId;
+      contradictory.pending.remoteDispatch.id=contradictory.operationId;
+      contradictory.pending.remoteDispatch.target.machineId=reverse.machine.machineId;
+      writeFileSync(conflictPath,JSON.stringify(contradictory));
+      const ambiguous=await qualityFacts();
+      t.assertions.assert(ambiguous.evidenceCoverage.nativeComplete===false
+        &&ambiguous.issues.some((x:any)=>x.kind==="native-route-conflict"&&x.sessionId===secondOwner)
+        &&!ambiguous.turns.some((x:any)=>x.sessionId===secondOwner),
+        "contradictory source routing reused a healthy cache or guessed a machine");
+    } finally {
+      writeFileSync(oldTaskPath,oldTaskBytes);unlinkSync(requesterPath);
+      if(existsSync(conflictPath))unlinkSync(conflictPath);
+    }
     // An external old CLI grammar rejects the mandatory new protocol before
     // native creation. Restoring a pre-upgrade source intent then uses the old
     // exact envelope against a real prepared receiver, without changing its ID.
@@ -711,7 +762,10 @@ sys.exit(r.returncode)
     }
     const explicitRetry=await callTask(callerSid,sourceRoot,explicitArgs);
     t.assertions.assert(explicitRetry.code===0 && JSON.parse(explicitRetry.out.trim().split("\n").at(-1)!).owner.sessionId===explicitOwner,
-      "same explicit Task retry created a new executor Session");
+      "same explicit Task retry created a new executor Session: "+JSON.stringify({code:explicitRetry.code,error:explicitRetry.err,reply:explicitRetry.out.slice(-1500)}));
+    const retriedIntent=JSON.parse(readFileSync(path.join(intentsRoot,explicitIntent.operationId+".json"),"utf8"));
+    t.assertions.assert(JSON.stringify(retriedIntent.request.acceptanceUnit)===JSON.stringify(explicitIntent.request.acceptanceUnit),
+      "same Task retry changed its original acceptance unit after Owner activation");
     const explicitDone=await callTask(explicitOwner,targetRoot,["task","finish",explicitTask.taskId,"--outcome","success","Independent executor workstation complete"],true);
     t.assertions.assert(explicitDone.code===0,"explicit remote Task did not finish");
     await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw new Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",explicitTask.taskId+".json"),"utf8")).state==="delivered";},30000);
@@ -797,6 +851,8 @@ sys.exit(r.returncode)
     const runtimeRoot=path.join(t.env.root,"artifact-only-runtime"), portable=path.join(t.env.root,"portable-output");
     mkdirSync(path.join(runtimeRoot,".genethub"),{recursive:true});
     writeFileSync(path.join(runtimeRoot,".genethub/open.env"),"TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\n");
+    const authorSkill=path.join(sourceRoot,"skills/author-only/SKILL.md");mkdirSync(path.dirname(authorSkill),{recursive:true});
+    writeFileSync(authorSkill,"Author-owned source must not be packaged as a builtin runtime dependency.");
     const sourceDescriptor=path.join(sourceRoot,"agent-space.genet.json"), raw=JSON.parse(readFileSync(sourceDescriptor,"utf8"));
     raw.buildHooks={post:[{cwd:".",args:["{python}","tools/install_remote.py","{outputRoot}","qa",machine,runtimeRoot]}]};
     writeFileSync(sourceDescriptor,JSON.stringify(raw));
@@ -805,7 +861,13 @@ sys.exit(r.returncode)
     t.assertions.assert(localBuild.status===0&&!existsSync(path.join(runtimeRoot,".genethub/install-receipt.json")),"ordinary build installed remotely or broke local identity compilation: "+localBuild.stdout+localBuild.stderr);
     let installed=buildArtifact();t.assertions.assert(installed.status===0,"build post did not install: "+installed.stdout+installed.stderr);
     const installedBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
-    t.assertions.assert(installedBinding.machineId===o.client.identity!.machineId&&!existsSync(path.join(runtimeRoot,"skills"))&&!existsSync(path.join(runtimeRoot,"soul.md"))&&existsSync(path.join(runtimeRoot,".spacebuilder/output-lock.json")),"remote runtime carries author inputs or a route instead of identity");
+    const runtimeSkills=path.join(runtimeRoot,"skills"), builtinReference="genet_builtin/team-core/references/quality.md";
+    t.assertions.assert(installedBinding.machineId===o.client.identity!.machineId
+      &&JSON.stringify(readdirSync(runtimeSkills))===JSON.stringify(["genet_builtin"])
+      &&readFileSync(path.join(runtimeSkills,builtinReference)).equals(readFileSync(path.join(sourceRoot,"skills",builtinReference)))
+      &&!existsSync(path.join(runtimeSkills,"author-only"))&&!existsSync(path.join(runtimeRoot,"soul.md"))
+      &&existsSync(path.join(runtimeRoot,".spacebuilder/output-lock.json")),
+      "remote runtime lost its builtin identity dependencies or carried author sources / a route instead of native identity");
     const adopted=(await cliJson(["workspace","list"],true)).workspaces.filter((w:any)=>w.folders?.[0]?.root.startsWith(runtimeRoot+path.sep));
     t.assertions.assert(adopted.length===1&&adopted[0].id===installedBinding.workspaceId,"installer registered extra remote roles/front");
     t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.folders?.[0]?.root===path.join(sourceRoot,"spaces/qa")),"ordinary build restored a source QA execution workspace");
