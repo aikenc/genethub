@@ -38,6 +38,10 @@ def store(t, root, row, status=None, **fields):
     row.update(fields, updatedAtMs=t.now_ms())
     if status:
         row['status'] = status
+    if status == 'adopted':
+        # Installation may commit new member bindings. Cache the verified
+        # final source, not just its builtin package or pre-merge inputs.
+        row['adoptedSourceIdentity'] = source_identity(t, root, row['head'])
     t.write_json(str(location(t, root)), row)
     source_changes = status == 'waiting-safe-point' and row.get('reason') == 'uncommitted-source-changes'
     if status in ('conflict', 'test-failure') or source_changes:
@@ -201,7 +205,8 @@ def schedule(t, root, base=None):
         head = t.git_text(root, 'rev-parse', 'HEAD') if t.has_repo(root) else None
         if previous.get('status') == 'adopted' and previous.get('target') == target:
             from .template_version import fingerprint
-            if fingerprint(root)[0] == previous.get('templateId'):
+            if (head and clean(t, root) and fingerprint(root)[0] == previous.get('templateId')
+                    and source_identity(t, root, head) == previous.get('adoptedSourceIdentity')):
                 return previous  # normal memory/identity commits are not another platform version
         if not head or not t.platform_ref(root):
             row = dict(schema='team-upgrade/1', target=target, head=head)
@@ -222,7 +227,8 @@ def schedule(t, root, base=None):
                          dirtyPathsTruncated=len(paths) > 64 or any(len(x) > 512 for x in paths))
         # A choice belongs only to this platform target, never to future
         # releases. Ordinary timer retries may resume the exact prior choice.
-        if base is None and previous.get('target') == target:
+        if (base is None and previous.get('target') == target
+                and previous.get('status') != 'adopted' and not previous.get('sourceApplied')):
             base = previous.get('reviewedBase')
         if base is not None:
             try:
@@ -244,7 +250,7 @@ def schedule(t, root, base=None):
         if (previous.get('target') == target and previous.get('head') == head
                 and previous.get('reviewedBase') == base
                 and previous.get('sourceIdentity') == inputs
-                and previous.get('status') in ('adopted', 'conflict', 'test-failure')):
+                and previous.get('status') in ('conflict', 'test-failure')):
             return previous
         row = row or dict(schema='team-upgrade/1', target=target, head=head, template=template,
                           startedAtMs=t.now_ms(), sourceIdentity=inputs,
