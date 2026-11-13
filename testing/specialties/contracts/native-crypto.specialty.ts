@@ -11,6 +11,7 @@ defineSpecialty({
   tags: ["contract", "network-risk-v2", "native-crypto", "workbench-baseline"], llm: { default: "none" },
   expectedDurationMs: 30000, timeoutMs: 300000,
   resources: { environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0 },
+  requiredArtifacts: ["genet-daemon-lib-tests"],
   surfaces: ["native-channel-crypto", "os-process"],
 }, async t => {
   try {

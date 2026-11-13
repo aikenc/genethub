@@ -123,6 +123,28 @@ defineSpecialty({ ...common,
     const evidence = log().slice(before);
     t.assertions.assert(evidence.includes("session_activity_page_changed") && evidence.includes("expected_revision") && evidence.includes("actual_revision"), "the controlled drift was not independently witnessed with revision fingerprints");
     t.assertions.assert(evidence.split("\n").some(line => line.includes("session_read_wait") && field(line, "outcome", "error")), "fast page error was not observable");
-    t.note("1000 unique active rows, witnessed mid-pagination rename/cursor rejection, complete native CLI recovery and classified failure diagnostics");
+    // A busy source may invalidate every pass. Witness all three public
+    // attempts and require an explicit error without a partial success body.
+    const churnStart = log().length;
+    const firstPasses = () => log().slice(churnStart).split("\n").filter(line => line.includes("session_activity_page_served") && field(line, "continuation", "false") && field(line, "more", "true")).length;
+    const churning = runGenetAsync(o.daemon.genet, ["session", "list", "--active", "--include-archived"], o.daemon.env);
+    let stopped: Awaited<typeof churning> | undefined;
+    void churning.then(reply => { stopped = reply; });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await t.tools.waitUntil(() => {
+        if (firstPasses() >= attempt) return true;
+        if (stopped) throw new Error(`CLI ended before witnessed activity attempt ${attempt}: exit=${stopped.code}`);
+        return false;
+      }, 30_000, { intervalMs: 2 });
+      const changed = await o.client.call({ type: "session.rename", payload: { sessionId: seed, title: `activity churn ${attempt}` } });
+      t.assertions.assert(changed?.type === "session", "public churn rename failed");
+    }
+    const exhausted = await churning;
+    const failure = parseJson(exhausted.stdout) as { error?: { code?: string; message?: string }; data?: { sessions?: unknown[]; complete?: boolean } };
+    t.assertions.assert(exhausted.code !== 0 && failure.error?.code === "sessionPageFailed"
+      && failure.error.message === "activity changed; restart activity pages"
+      && !failure.data?.sessions && failure.data?.complete !== true && firstPasses() === 3,
+    `activity CLI did not bound exhaustion without partial success: ${JSON.stringify({ exit: exhausted.code, code: failure.error?.code, passes: firstPasses(), partial: !!failure.data?.sessions })}`);
+    t.note("1000 unique active rows recovered after witnessed cursor drift; sustained public churn exhausted exactly three attempts with explicit error and no partial success; classified diagnostics retained");
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

@@ -16,6 +16,7 @@ defineSpecialty({
   llm: { default: "none" },
   expectedDurationMs: 60000, timeoutMs: 300000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
+  requiredArtifacts: ["genet-daemon-lib-tests-debug"],
   surfaces: ["protocol-codec", "rust-u64", "workbench-dataplane"],
 }, async (t) => {
   const run = promisify(execFile);

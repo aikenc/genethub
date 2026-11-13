@@ -35,6 +35,7 @@ defineSpecialty({
   expectedDurationMs: 45_000,
   timeoutMs: 300_000,
   resources: { environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0 },
+  requiredArtifacts: ["genet-daemon-lib-tests"],
   surfaces: ["daemon", "session"],
   productInterfaces: ["settings.agentPreferences", "session.switchAgent"],
 }, async t => {

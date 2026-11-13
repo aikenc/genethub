@@ -18,6 +18,16 @@ const PROFILES = ["iterate", "debug", "release"] as const;
 export const GENET = "genet";
 export const HOST = "genehub-host-local";
 export const DAEMON_COMPONENT = "genehub_guest.wasm";
+export const DAEMON_TESTS = "genet-daemon-lib-tests";
+export const DAEMON_DEBUG_TESTS = "genet-daemon-lib-tests-debug";
+// Cargo owns hashed test executable names. Only a successful build's JSON
+// compiler-artifact record can establish which executable belongs to this run.
+const preparedTests = new Map<string, string>();
+const testKey = (root: string, name: string) => `${path.resolve(root)}\0${name}`;
+export function preparedTestArtifacts(openRoot: string): string[] {
+  const prefix = path.resolve(openRoot) + "\0";
+  return [...preparedTests].filter(([key]) => key.startsWith(prefix)).map(([, file]) => file);
+}
 
 interface ArtifactSpec {
   /** Candidate file names, most specific first. */
@@ -31,9 +41,20 @@ interface ArtifactSpec {
    * builds the `iterate` profile because that is what they try first.
    */
   build: string[];
+  testExecutable?: boolean;
 }
 
 const SPECS: Record<string, ArtifactSpec> = {
+  [DAEMON_TESTS]: {
+    names: [], profileDir: () => ["iterate", "deps"], overrides: [],
+    build: ["test", "--locked", "--profile", "iterate", "-p", "genet-daemon", "--lib", "--no-run", "--message-format=json"],
+    testExecutable: true,
+  },
+  [DAEMON_DEBUG_TESTS]: {
+    names: [], profileDir: () => ["debug", "deps"], overrides: [],
+    build: ["test", "--locked", "-p", "genet-daemon", "--lib", "--no-run", "--message-format=json"],
+    testExecutable: true,
+  },
   [GENET]: {
     names: ["genet-local", "genet-dev", "genet-beta", "genet"],
     profileDir: (profile) => [profile],
@@ -101,6 +122,10 @@ export function runtimeArtifactCandidates(openRoot: string, name: string): strin
 export function locateRuntimeArtifact(openRoot: string, name: string): RuntimeArtifact {
   const found = spec(name);
   const buildCommand = `cargo ${found.build.join(" ")}`;
+  if (found.testExecutable) {
+    const selected = preparedTests.get(testKey(openRoot, name));
+    return { name, path: selected ? fileAt(selected) ?? null : null, overridden: false, buildCommand };
+  }
   for (const variable of found.overrides) {
     const override = process.env[variable]?.trim();
     if (!override) continue;
@@ -152,6 +177,10 @@ export function ensureRuntimeArtifacts(
       continue;
     }
     if (options.build) {
+      if (spec(name).testExecutable) {
+        preparedTests.delete(testKey(openRoot, name));
+        process.stderr.write(`[testctl] preparing ${name} before case timing\n`);
+      }
       const built = spawnSync(cargo, spec(name).build, {
         cwd: openRoot,
         encoding: "utf8",
@@ -166,6 +195,22 @@ export function ensureRuntimeArtifacts(
           buildCommand: artifact.buildCommand,
         });
         continue;
+      }
+      if (spec(name).testExecutable) {
+        const executables = (built.stdout ?? "").split("\n").filter(Boolean).flatMap(line => {
+          try {
+            const row = JSON.parse(line);
+            return row.reason === "compiler-artifact" && row.profile?.test === true
+              && row.target?.name === "genet_daemon" && row.target?.kind?.includes("lib")
+              && typeof row.executable === "string" ? [row.executable as string] : [];
+          } catch { return []; }
+        });
+        const selected = [...new Set(executables)];
+        if (selected.length !== 1 || !path.isAbsolute(selected[0]!) || !fileAt(selected[0]!)) {
+          problems.push({name, detail: "Cargo did not identify exactly one existing owning-library test executable", buildCommand: artifact.buildCommand});
+          continue;
+        }
+        preparedTests.set(testKey(openRoot, name), path.resolve(selected[0]!));
       }
     }
     if (!locateRuntimeArtifact(openRoot, name).path) {

@@ -10,6 +10,7 @@ defineSpecialty({
   tags: ["contract", "network-risk-v2", "network-review-experiment"], llm: {default: "none"},
   expectedDurationMs: 30000, timeoutMs: 300000,
   resources: {environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0},
+  requiredArtifacts: ["genet-daemon-lib-tests"],
   surfaces: ["daemon-dataplane", "native-intrinsic", "relay-queue-properties"],
 }, async t => {
   for (const [owner, module] of [["genet-daemon", "dataplane::"], ["genet-daemon", "transport::fabric::"], ["genehub-proto", "data::tests"]] as const) {

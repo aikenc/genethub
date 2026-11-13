@@ -13,6 +13,7 @@ defineSpecialty({
   expectedDurationMs: 30_000,
   timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0 },
+  requiredArtifacts: ["genet-daemon-lib-tests"],
   surfaces: ["session-human-continuation", "workbench"],
   productInterfaces: ["session.respondPermission", "planApproval"],
 }, async (t) => {
