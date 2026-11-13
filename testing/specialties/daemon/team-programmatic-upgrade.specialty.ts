@@ -323,7 +323,7 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.team-upgrade-reviewed-baseline",
   title: "Explicit legacy baseline integrates validated source without rewriting either history",
-  oracle: "A real Team with independent Git roots rejects a nonancestor baseline and retains dirty edits. Explicit original-ancestor recovery keeps both parents, custom source and durable evidence and verifies a portable artifact. A locally retired file stays deleted when upstream is unchanged; a genuine delete/modify remains a conflict with source intact.",
+  oracle: "Explicit legacy recovery preserves both histories, dirty/custom source and portable verification. Same-platform committed custom code must reach a fresh executable output; dirty edits stay intact and narrative commits stay idempotent. Missing legacy adoption proof refreshes once. A local retirement with unchanged upstream stays deleted; true delete/modify remains a conflict.",
   catches: ["unrelated history has no recovery path", "baseline inferred from a commit label", "nonancestor baseline accepted", "installed maintenance entry operates on its own template", "validated tree differs from applied tree", "legacy recovery rewrites original history", "unchanged upstream revives retired files or falsely conflicts", "delete/modify silently overwrites a local retirement"],
   tags: ["core", "team-upgrade"], llm: { default: "none" },
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
@@ -331,7 +331,7 @@ defineSpecialty({
   productInterfaces: ["tools/run.py --team-root upgrade", "tools/run.py snapshot", "filesystem", "git"],
   surfaces: ["daemon", "team-template", "filesystem"],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
-  expectedDurationMs: 20000, timeoutMs: 120000,
+  expectedDurationMs: 40000, timeoutMs: 120000,
 }, async t => {
   const r = await openTeam(t, "upgrade-reviewed-baseline");
   const git = (...args: string[]) => {
@@ -392,6 +392,12 @@ defineSpecialty({
     t.assertions.assert(invalid.status === "conflict" && invalid.reason.includes("baseline-not-ancestor")
       && git("rev-parse", "HEAD") === originalHead, "unrelated baseline was applied: " + JSON.stringify(invalid));
     const custom = join(r.root, "tools/retained-local.txt"); writeFileSync(custom, "local customization\n");
+    const feature = "tools/local_feature.py";
+    const runFeature = (directory: string) => {
+      const result = spawnSync(process.env.GENEHUB_PYTHON!, [join(directory, feature)], { cwd: directory, env: r.env, encoding: "utf8", timeout: 10000 });
+      t.assertions.assert(result.status === 0, result.stderr); return result.stdout.trim();
+    };
+    writeFileSync(join(r.root, feature), "print('custom-v1')\n");
     git("rm", "--", retired);
     r.ok(["snapshot"], { TEAM_TEMPLATE: platform }); const sourceHead = git("rev-parse", "HEAD");
     const evidence = r.state("retained-operation.json"), retained = Buffer.from('{"fixture":"original durable operation"}'); writeFileSync(evidence, retained);
@@ -404,10 +410,40 @@ defineSpecialty({
     t.assertions.assert(readFileSync(join(r.root, "docs/new-platform.txt"), "utf8") === "new platform content\n"
       && readFileSync(custom, "utf8") === "local customization\n" && readFileSync(evidence).equals(retained)
       && !existsSync(join(r.root, retired))
+      && runFeature(adopted.output) === "custom-v1"
       && existsSync(join(adopted.output, ".spacebuilder/output-lock.json")), "adoption lost custom source, evidence or portable verification");
     const again = execute([]);
     t.assertions.assert(again.status === "adopted" && !again.workerPid && again.generation === adopted.generation,
       "maintenance entry repeated a completed integration");
+    writeFileSync(join(r.root, feature), "print('custom-v2')\n"); r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    const currentAncestor = git("merge-base", "HEAD", "platform");
+    execute([]); const updated = await settle();
+    t.assertions.assert(updated.status === "adopted" && updated.target === adopted.target
+      && updated.generation !== adopted.generation && runFeature(updated.output) === "custom-v2",
+      "same-platform cached adoption ignored a committed custom source change: " + JSON.stringify(updated));
+    t.assertions.assert(updated.mergeBase === currentAncestor && updated.mergeBaseMode === "common-ancestor",
+      "an already-adopted legacy comparison base replaced the actual common ancestor");
+    const updatedHead = git("rev-parse", "HEAD"); writeFileSync(join(r.root, feature), "print('unfinished-custom-v3')\n");
+    const customDirty = execute([]);
+    t.assertions.assert(customDirty.status === "waiting-safe-point" && customDirty.reason === "uncommitted-source-changes"
+      && git("rev-parse", "HEAD") === updatedHead && runFeature(r.root) === "unfinished-custom-v3",
+      "custom uncommitted edits were cached as adopted or overwritten");
+    writeFileSync(join(r.root, feature), "print('custom-v2')\n"); execute([]); const restored = await settle();
+    t.assertions.assert(restored.status === "adopted" && runFeature(restored.output) === "custom-v2", "restored source could not finish verified installation");
+    writeFileSync(join(r.root, "memory.md"), readFileSync(join(r.root, "memory.md"), "utf8")+"\nRecorded completed custom-source adoption.\n");
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    const narrative = execute([]);
+    t.assertions.assert(narrative.status === "adopted" && !narrative.workerPid && narrative.generation === restored.generation,
+      "a narrative-only commit restarted unchanged custom-source deployment");
+    // A genuine old adopted receipt without the new full-source cache proof.
+    const legacyAdopted = JSON.parse(readFileSync(r.state("upgrade/latest.json"), "utf8"));
+    delete legacyAdopted.adoptedSourceIdentity; writeFileSync(r.state("upgrade/latest.json"), JSON.stringify(legacyAdopted));
+    execute([]); const refreshedAdoption = await settle();
+    t.assertions.assert(refreshedAdoption.status === "adopted" && /^[0-9a-f]{64}$/.test(refreshedAdoption.adoptedSourceIdentity)
+      && runFeature(refreshedAdoption.output) === "custom-v2", "legacy adopted cache was reused without a verified full-source identity");
+    const refreshedAgain = execute([]);
+    t.assertions.assert(refreshedAgain.status === "adopted" && !refreshedAgain.workerPid && refreshedAgain.generation === refreshedAdoption.generation,
+      "legacy cache refresh repeated after its verified source proof was recorded");
     git("rm", "--", modifiedRetirement); r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
     const deletedHead = git("rev-parse", "HEAD");
     writeFileSync(join(platform, modifiedRetirement), "A real upstream modification must be reviewed.\n");
