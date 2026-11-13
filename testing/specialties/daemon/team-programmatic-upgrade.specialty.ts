@@ -208,10 +208,15 @@ defineSpecialty({
       .find(note => note.kind === "upgrade-conflict");
     t.assertions.assert(conflictNote && JSON.parse(conflictNote.context).maintenanceArgv.includes("--team-root"),
       "conflict handoff sends maintainers back to an obsolete private entry");
+    const guide = JSON.parse(conflictNote.context).maintenanceGuidePath;
+    t.assertions.assert(typeof guide === "string" && existsSync(guide)
+      && readFileSync(guide, "utf8").includes("隔离候选")
+      && conflictNote.quote.length <= 60 && conflictNote.quote.includes("候选通过不算采用"),
+      "legacy-visible handoff closes an unfinished upgrade at intermediate candidate validation or hides its current guide");
     r.ok(["hook"], { TEAM_TEMPLATE: platform });
     const reflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
     const view = await r.snapshot(reflect.sessionId);
-    t.assertions.assert(reflect.notifiedNotes?.includes(conflictNote.id) && seesNote(view, conflictNote.id),
+    t.assertions.assert(reflect.notifiedNotes?.includes(conflictNote.id) && seesNote(view, conflictNote.id, "候选通过不算采用"),
       "actionable upgrade conflict never reached a real native reflection session");
     t.note("Actual isolated Git merge/build/verify, latest-only adoption, dirty bytes/HEAD retained with one native reflection handoff despite content churn, identical builtin integration and protected different patches. Current public maintenance argv is supplied. Historical nine notices remain delegated, not falsely adopted. No live Team or formal-hour claim.");
   } finally { await r.dispose(); }
