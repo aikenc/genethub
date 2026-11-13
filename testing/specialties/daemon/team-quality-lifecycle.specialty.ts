@@ -507,5 +507,40 @@ sys.stdin.read(1)
       && readFileSync(legacyBaseline,"utf8")===oldBaselineBytes,
       "native full-unit costs missing, or old per-support baseline overwritten");
 
+
+    // Integration and the business outcome answer different questions. Use
+    // actual consumed child results; a failed overall goal must keep its
+    // failure without losing the one support the requester explicitly used.
+    for (const outcome of ["blocked", "failed"]) {
+      const partial=await ok(front,["task","start","--space","leader","--desc","integration with "+outcome+" overall goal",
+        "--request-id","quality.used-"+outcome,"Integrate available evidence while preserving the unsatisfied product goal"]);
+      const caller=partial.owner.sessionId;await idle(caller);
+      const support=await ok(caller,["task","support",partial.taskId,"--space","qa","--desc","used evidence artifact",
+        "--request-id","quality.used-child-"+outcome,"Return the bounded evidence artifact"]);
+      const untouched=await ok(caller,["task","support",partial.taskId,"--space","qa","--desc","read without integration",
+        "--request-id","quality.unused-child-"+outcome,"Return a separate evidence artifact"]);
+      await idle(support.collaborator);await idle(untouched.collaborator);
+      await ok(support.collaborator,["task","finish",partial.taskId,"--outcome","success","Evidence artifact delivered; project acceptance is separate"]);
+      await ok(untouched.collaborator,["task","finish",partial.taskId,"--outcome","success","Separate artifact delivered without use declaration"]);
+      r.ok(["tick"]);await idle(caller);
+      const dispatches=intentFiles().map(x=>JSON.parse(readFileSync(r.state("task-dispatch",x),"utf8")));
+      const usedOp=dispatches.find(x=>x.sessionId===support.collaborator).operationId;
+      const unusedOp=dispatches.find(x=>x.sessionId===untouched.collaborator).operationId;
+      const argv=["task","finish",partial.taskId,"--outcome",outcome,"--uses",usedOp,
+        "Integrated the declared evidence; the overall product goal remains "+outcome];
+      await ok(caller,argv);
+      const record=r.state("tasks",partial.taskId+".json"),beforeRetry=readFileSync(record);
+      await ok(caller,argv);
+      t.assertions.assert(readFileSync(record).equals(beforeRetry),"nonsuccess integration retry changed its source conclusion");
+      const snapshot=await ok(front,["quality","facts"]);
+      const usedResult=snapshot.workItems.find((x:any)=>x.id===usedOp);
+      const unusedResult=snapshot.workItems.find((x:any)=>x.id===unusedOp);
+      t.assertions.assert(usedResult.adoptionEvidence.state==="evidenced"
+        && usedResult.adoptionEvidence.sessionId===caller && usedResult.adoptionEvidence.operationId===usedOp
+        && usedResult.consumedAtMs<=usedResult.adoptionEvidence.atMs
+        && unusedResult.adoptionEvidence.state!=="evidenced"
+        && JSON.parse(readFileSync(record,"utf8")).finished.outcome===outcome,
+        "overall "+outcome+" erased explicit consumed support use, borrowed it for another artifact, or rewrote business acceptance");
+    }
   } finally { await r.dispose(); }
 });
