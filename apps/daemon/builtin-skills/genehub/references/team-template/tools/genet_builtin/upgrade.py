@@ -55,6 +55,8 @@ def store(t, root, row, status=None, **fields):
         context['maintenanceArgv'] = [sys.executable, '-B',
             str(Path(row.get('template') or t.template_dir(root))/'tools/run.py'),
             '--team-root', str(Path(root).resolve()), 'upgrade']
+        context['maintenanceGuidePath'] = str(Path(row.get('template') or t.template_dir(root))/
+            'skills/genet_builtin/team-reflect/references/upgrade.md')
         if row.get('reviewedBase'):
             context['maintenanceArgv'] += ['--base', row['reviewedBase']]
         # Existing Teams already recognize upgrade as urgent; a new note kind
@@ -63,7 +65,7 @@ def store(t, root, row, status=None, **fields):
         # instruction is hidden as soon as structured context is present.
         quote = ('未提交源修改须由反思保留成果并完成审阅、整合、验证提交；'
                  '用本留言公共入口续升，单纯等待不算处理。') if source_changes else (
-                 '请反思沿原维护项整合冲突或修复失败，再用本留言公共入口复验；确认已读不等于采用。')
+                 '沿原维护项继续：候选通过不算采用；可执行动作须推进到源整合、实包安装与复验，真实外部阻塞才等待。')
         t.add_note(root, {'kind': 'upgrade' if source_changes else 'upgrade-' + kind, 'from': 'platform',
                          'session': None, 'quote': quote, 'context': json.dumps(
                              context, ensure_ascii=False),
