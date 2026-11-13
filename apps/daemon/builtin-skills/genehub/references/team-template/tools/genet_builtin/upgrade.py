@@ -298,7 +298,9 @@ def merge_tree(t, root, row, directory):
     if index.exists():
         index.unlink()
     env = dict(os.environ, GIT_INDEX_FILE=str(index))
-    git(t, root, 'read-tree', '-i', '-m', base, row['head'], platform, env=env)
+    # Resolve Git's trivial unchanged/delete case, retaining local retirement.
+    # Real delete/modify and protected builtin differences still conflict.
+    git(t, root, 'read-tree', '-i', '-m', '--aggressive', base, row['head'], platform, env=env)
     unresolved = git(t, root, 'ls-files', '-u', '-z', env=env)
     groups = {}
     for value in unresolved.split(b'\0'):
