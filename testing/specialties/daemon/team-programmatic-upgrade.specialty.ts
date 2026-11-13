@@ -323,15 +323,15 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.team-upgrade-reviewed-baseline",
   title: "Explicit legacy baseline integrates validated source without rewriting either history",
-  oracle: "A real Team with independent Git roots rejects a nonancestor baseline and retains dirty user edits. Its maintainer then selects the original ancestor explicitly through the installed runner. A validated three-way integration keeps both original parents, custom source and durable evidence, produces a portable artifact and resumes idempotently.",
-  catches: ["unrelated history has no recovery path", "baseline inferred from a commit label", "nonancestor baseline accepted", "installed maintenance entry operates on its own template", "validated tree differs from applied tree", "legacy recovery rewrites original history"],
+  oracle: "A real Team with independent Git roots rejects a nonancestor baseline and retains dirty edits. Explicit original-ancestor recovery keeps both parents, custom source and durable evidence and verifies a portable artifact. A locally retired file stays deleted when upstream is unchanged; a genuine delete/modify remains a conflict with source intact.",
+  catches: ["unrelated history has no recovery path", "baseline inferred from a commit label", "nonancestor baseline accepted", "installed maintenance entry operates on its own template", "validated tree differs from applied tree", "legacy recovery rewrites original history", "unchanged upstream revives retired files or falsely conflicts", "delete/modify silently overwrites a local retirement"],
   tags: ["core", "team-upgrade"], llm: { default: "none" },
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   productInterfaces: ["tools/run.py --team-root upgrade", "tools/run.py snapshot", "filesystem", "git"],
   surfaces: ["daemon", "team-template", "filesystem"],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
-  expectedDurationMs: 15000, timeoutMs: 120000,
+  expectedDurationMs: 20000, timeoutMs: 120000,
 }, async t => {
   const r = await openTeam(t, "upgrade-reviewed-baseline");
   const git = (...args: string[]) => {
@@ -350,6 +350,12 @@ defineSpecialty({
     return value;
   };
   try {
+    const retired = "docs/retired-unchanged.txt", modifiedRetirement = "docs/retired-modified.txt";
+    for (const directory of [r.root, platform]) {
+      mkdirSync(join(directory, "docs"), { recursive: true });
+      writeFileSync(join(directory, retired), "Original file later retired locally.\n");
+      writeFileSync(join(directory, modifiedRetirement), "Original file with a later real upstream change.\n");
+    }
     r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
     const baseline = git("rev-parse", "platform"); let originalHead = git("rev-parse", "HEAD");
     const orphan = git("commit-tree", "platform^{tree}", "-m", "fixture independent template history");
@@ -386,6 +392,7 @@ defineSpecialty({
     t.assertions.assert(invalid.status === "conflict" && invalid.reason.includes("baseline-not-ancestor")
       && git("rev-parse", "HEAD") === originalHead, "unrelated baseline was applied: " + JSON.stringify(invalid));
     const custom = join(r.root, "tools/retained-local.txt"); writeFileSync(custom, "local customization\n");
+    git("rm", "--", retired);
     r.ok(["snapshot"], { TEAM_TEMPLATE: platform }); const sourceHead = git("rev-parse", "HEAD");
     const evidence = r.state("retained-operation.json"), retained = Buffer.from('{"fixture":"original durable operation"}'); writeFileSync(evidence, retained);
     execute(["--base", baseline]); const adopted = await settle();
@@ -396,10 +403,19 @@ defineSpecialty({
       "integration rewrote history or applied an unverified tree");
     t.assertions.assert(readFileSync(join(r.root, "docs/new-platform.txt"), "utf8") === "new platform content\n"
       && readFileSync(custom, "utf8") === "local customization\n" && readFileSync(evidence).equals(retained)
+      && !existsSync(join(r.root, retired))
       && existsSync(join(adopted.output, ".spacebuilder/output-lock.json")), "adoption lost custom source, evidence or portable verification");
     const again = execute([]);
     t.assertions.assert(again.status === "adopted" && !again.workerPid && again.generation === adopted.generation,
       "maintenance entry repeated a completed integration");
+    git("rm", "--", modifiedRetirement); r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    const deletedHead = git("rev-parse", "HEAD");
+    writeFileSync(join(platform, modifiedRetirement), "A real upstream modification must be reviewed.\n");
+    execute([]); const deleteConflict = await settle();
+    t.assertions.assert(deleteConflict.status === "conflict" && deleteConflict.conflictFiles?.includes(modifiedRetirement)
+      && git("rev-parse", "HEAD") === deletedHead && !existsSync(join(r.root, modifiedRetirement))
+      && readFileSync(custom, "utf8") === "local customization\n" && readFileSync(evidence).equals(retained),
+      "a genuine delete/modify silently overwrote source or lost its explicit conflict: " + JSON.stringify(deleteConflict));
     t.note("Explicit baseline selection and installed runner verified on isolated real Git/daemon. Live Team adoption and Mac deployment remain separate acceptance.");
   } finally { await r.dispose(); }
 });
