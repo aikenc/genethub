@@ -2246,7 +2246,10 @@ fn read_preview_entries(entry: &WorkspaceEntry) -> Vec<PreviewEntryInfo> {
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Vec::new();
     };
-    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_PREVIEW_ENTRIES_FILE_BYTES {
+    if meta.file_type().is_symlink()
+        || !meta.is_file()
+        || meta.len() > MAX_PREVIEW_ENTRIES_FILE_BYTES
+    {
         return Vec::new();
     }
     let Ok(body) = std::fs::read_to_string(&path) else {

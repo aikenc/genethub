@@ -46,7 +46,10 @@ pub async fn preview(args: &[String], selection: &Selection) -> i32 {
     }
 }
 
-async fn workspace(selection: &Selection, explicit: Option<String>) -> Result<WorkspaceInfo, CliFailure> {
+async fn workspace(
+    selection: &Selection,
+    explicit: Option<String>,
+) -> Result<WorkspaceInfo, CliFailure> {
     let rpc = query::connect_selected(selection).await?;
     let workspace_id = super::project::resolve_workspace(&rpc, explicit).await?;
     let workspaces = query::list_workspaces(&rpc).await?;
@@ -65,7 +68,9 @@ fn project_root(info: &WorkspaceInfo) -> PathBuf {
 }
 
 fn entries_path(info: &WorkspaceInfo) -> PathBuf {
-    project_root(info).join(".genethub").join("preview-entries.json")
+    project_root(info)
+        .join(".genethub")
+        .join("preview-entries.json")
 }
 
 fn read_entries(path: &Path) -> Result<Vec<Value>, CliFailure> {
@@ -74,8 +79,8 @@ fn read_entries(path: &Path) -> Result<Vec<Value>, CliFailure> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(business(format!("读取入口清单失败：{error}"))),
     };
-    let value: Value =
-        serde_json::from_str(&body).map_err(|error| business(format!("入口清单不是有效 JSON：{error}")))?;
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| business(format!("入口清单不是有效 JSON：{error}")))?;
     Ok(value
         .get("entries")
         .and_then(Value::as_array)
@@ -88,7 +93,8 @@ fn write_entries(info: &WorkspaceInfo, entries: &[Value]) -> Result<(), CliFailu
     let directory = path
         .parent()
         .ok_or_else(|| business("入口清单没有父目录"))?;
-    std::fs::create_dir_all(directory).map_err(|error| business(format!("创建 .genethub 失败：{error}")))?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| business(format!("创建 .genethub 失败：{error}")))?;
     let body = json!({"schema": "genet.preview-entries.v1", "entries": entries});
     crate::config::save_private(&path, body.to_string().as_bytes())
         .map_err(|error| business(format!("写入入口清单失败：{error}")))
@@ -151,7 +157,9 @@ async fn add(args: &[String], selection: &Selection) -> Result<(String, Value), 
     let title = title.ok_or_else(|| CliFailure::invalid_args(USAGE))?;
     let entry = entry.ok_or_else(|| CliFailure::invalid_args(USAGE))?;
     if !matches!(open_mode.as_str(), "fullscreen" | "float") {
-        return Err(CliFailure::invalid_args("--open must be fullscreen or float"));
+        return Err(CliFailure::invalid_args(
+            "--open must be fullscreen or float",
+        ));
     }
     if !matches!(kind.as_str(), "file" | "service") {
         return Err(CliFailure::invalid_args("--kind must be file or service"));
@@ -162,14 +170,18 @@ async fn add(args: &[String], selection: &Selection) -> Result<(String, Value), 
     }
     let relative = entry.trim().replace('\\', "/");
     if relative.is_empty() || relative.starts_with('/') {
-        return Err(CliFailure::invalid_args("--entry must be a workspace-relative path"));
+        return Err(CliFailure::invalid_args(
+            "--entry must be a workspace-relative path",
+        ));
     }
     if relative
         .split('/')
         .any(|part| part.is_empty() || part == "." || part == "..")
         || relative.split('/').next() == Some(".genethub")
     {
-        return Err(CliFailure::invalid_args("--entry must not escape the project folder"));
+        return Err(CliFailure::invalid_args(
+            "--entry must not escape the project folder",
+        ));
     }
     let info = workspace(selection, workspace_id).await?;
     let folder = info
@@ -193,16 +205,21 @@ async fn add(args: &[String], selection: &Selection) -> Result<(String, Value), 
         .iter()
         .any(|existing| existing.get("entry").and_then(Value::as_str) == Some(relative.as_str()))
     {
-        return Err(business("这个入口文件已经固定过了；用 preview remove 后再改"));
+        return Err(business(
+            "这个入口文件已经固定过了；用 preview remove 后再改",
+        ));
     }
     let id = match id {
         Some(id) => {
             if id.is_empty()
                 || id.len() > 64
-                || !id.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 || !id
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                || !id.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                })
             {
                 return Err(CliFailure::invalid_args(
                     "--id must match [a-z0-9][a-z0-9._-]{0,63}",
@@ -212,17 +229,26 @@ async fn add(args: &[String], selection: &Selection) -> Result<(String, Value), 
         }
         None => {
             let base = slug(title);
-            let base = if base.is_empty() { "entry".to_string() } else { base };
+            let base = if base.is_empty() {
+                "entry".to_string()
+            } else {
+                base
+            };
             let mut candidate = base.clone();
             let mut suffix = 2;
-            while entries.iter().any(|existing| existing.get("id").and_then(Value::as_str) == Some(candidate.as_str())) {
+            while entries.iter().any(|existing| {
+                existing.get("id").and_then(Value::as_str) == Some(candidate.as_str())
+            }) {
                 candidate = format!("{base}-{suffix}");
                 suffix += 1;
             }
             candidate
         }
     };
-    if entries.iter().any(|existing| existing.get("id").and_then(Value::as_str) == Some(id.as_str())) {
+    if entries
+        .iter()
+        .any(|existing| existing.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    {
         return Err(business("这个入口 id 已经存在"));
     }
     entries.push(json!({
