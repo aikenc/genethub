@@ -301,7 +301,7 @@ defineSpecialty({
   };
   try {
     r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
-    const baseline = git("rev-parse", "platform"), originalHead = git("rev-parse", "HEAD");
+    const baseline = git("rev-parse", "platform"); let originalHead = git("rev-parse", "HEAD");
     const orphan = git("commit-tree", "platform^{tree}", "-m", "fixture independent template history");
     git("update-ref", "refs/heads/platform", orphan);
     mkdirSync(join(platform, "docs"), { recursive: true }); writeFileSync(join(platform, "docs/new-platform.txt"), "new platform content\n");
@@ -316,6 +316,16 @@ defineSpecialty({
     t.assertions.assert(refreshed.status === "conflict" && refreshed.reason.includes("no-common-ancestor")
       && Boolean(refreshed.sourceIdentity) && git("rev-parse", "HEAD") === originalHead,
       "installed maintenance reused an unverified legacy failure: " + JSON.stringify(refreshed));
+    const teamDoc = join(r.root, "docs/team-context.txt");
+    mkdirSync(join(r.root, "docs"), { recursive: true }); writeFileSync(teamDoc, "Team-owned context, never a platform removal.\n");
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform }); originalHead = git("rev-parse", "HEAD");
+    // Actual legacy repos contain full Team trees with platform-looking labels.
+    const contaminated = git("commit-tree", "HEAD^{tree}", "-p", originalHead, "-m", git("show", "-s", "--format=%s", baseline));
+    git("update-ref", "HEAD", contaminated, originalHead); originalHead = contaminated;
+    execute(["--base", contaminated]); const rejected = await settle();
+    t.assertions.assert(rejected.status === "conflict" && rejected.reason.includes("unverified-platform-baseline")
+      && git("rev-parse", "HEAD") === originalHead && readFileSync(teamDoc, "utf8") === "Team-owned context, never a platform removal.\n",
+      "an unverified platform-looking Team ancestor reached the merge instead of being rejected: " + JSON.stringify(rejected));
     const originalMemory = readFileSync(join(r.root, "memory.md"));
     writeFileSync(join(r.root, "memory.md"), Buffer.concat([originalMemory, Buffer.from("\nUncommitted user work.\n")]));
     const dirty = execute(["--base", baseline]);
