@@ -427,14 +427,18 @@ async fn read_process_snapshot(
     }
     let mut candidates: Vec<(Run, Vec<(String, String)>)> = Vec::new();
     let mut budget = crate::blocking::WorkBudget::new();
-    for info in state.workspaces.list().await {
-        if workspace.is_some_and(|w| w != info.id) {
+    // Inventory needs registered project roots, not preview-menu and Space
+    // health projections for every project. Resolve each matching entry below
+    // so current root mappings and per-project path validation remain fresh.
+    for info in state.workspaces.catalog().await.workspaces {
+        let workspace_id = info.local_workspace_id;
+        if workspace.is_some_and(|w| w != workspace_id) {
             continue;
         }
         // Registry size is user-controlled; a global process observer must
         // leave room for conversation reads and peer handshakes.
         budget.checkpoint().await;
-        let entry = state.workspaces.get(&info.id).await?;
+        let entry = state.workspaces.get(&workspace_id).await?;
         let folders: Vec<_> = entry
             .folders
             .iter()
@@ -455,16 +459,16 @@ async fn read_process_snapshot(
                     folder.root_handle,
                     relative.to_string_lossy().replace('\\', "/")
                 );
-                if let Ok(Some(verified)) = load_entry(state, &info.id, &path).await {
+                if let Ok(Some(verified)) = load_entry(state, &workspace_id, &path).await {
                     // Each project still validates its own path and current
                     // registration. Aliases of the identical Run need only
                     // one authenticated health probe, not one per project.
                     if let Some((_, aliases)) =
                         candidates.iter_mut().find(|(run, _)| *run == verified)
                     {
-                        aliases.push((info.id.clone(), path));
+                        aliases.push((workspace_id.clone(), path));
                     } else {
-                        candidates.push((verified, vec![(info.id.clone(), path)]));
+                        candidates.push((verified, vec![(workspace_id.clone(), path)]));
                     }
                 }
                 break;
