@@ -63,22 +63,23 @@ async fn terminate_project(
     state: &Shared,
     caller: &crate::authz::Principal,
     workspace_id: &str,
-) -> Result<Vec<String>, Handled> {
+) -> Result<Vec<String>, ProtocolError> {
     let planned = state
         .workspaces
         .set_terminated(workspace_id, true)
         .await
-        .map_err(|error| Handled::err(ErrorCode::BadRequest, format!("{error:#}")))?;
+        .map_err(|error| ProtocolError {
+            code: ErrorCode::BadRequest,
+            message: format!("{error:#}"),
+        })?;
     state.hooks.stop(&planned);
     let closed = state
         .sessions
         .stop_workspaces(&planned)
         .await
-        .map_err(|error| {
-            Handled::err(
-                ErrorCode::Conflict,
-                format!("项目已终止，但有会话未能完全停下（{error:#}）；可再次终止以重试。"),
-            )
+        .map_err(|error| ProtocolError {
+            code: ErrorCode::Conflict,
+            message: format!("项目已终止，但有会话未能完全停下（{error:#}）；可再次终止以重试。"),
         })?;
     tracing::info!(workspace = %workspace_id, ?caller, members = planned.len(), closed, "workspace.terminate");
     Ok(planned)
@@ -2325,8 +2326,8 @@ async fn dispatch(
         }).await,
 
         Request::WorkspaceTerminate { workspace_id } => Box::pin(async move {
-            if let Err(handled) = terminate_project(state, caller, &workspace_id).await {
-                return handled;
+            if let Err(error) = terminate_project(state, caller, &workspace_id).await {
+                return Handled { reply: Err(error), effect: SideEffect::None };
             }
             Handled::ok(Reply::Workspaces(state.workspaces.list().await))
         }).await,
