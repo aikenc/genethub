@@ -57,8 +57,21 @@ def project(facts):
     for stall in observed.get('stalls', []):
         if stall.get('endAtMs',0) >= now:
             warn('R4',{'id':stall['taskId']},stall.get('startAtMs'),480000)
+    # A verified discrete return proves this obligation ended even when some
+    # other resource cannot be observed. Absence/upper bounds and stored old
+    # incident timestamps are not current evidence. Keep the historical breach
+    # in redLines and the global rule coverage unchanged.
+    resolutions = []
+    for item in facts.get('workItems', []):
+        released, concluded = item.get('releasedAtMs'), item.get('conclusionAtMs')
+        if (item.get('resourceRequired') is True and item.get('resourceHeld') is not True
+                and item.get('releaseTimeBasis') == 'verified-release'
+                and number(concluded) and number(released) and concluded <= released <= now):
+            resolutions.append(dict(rule='R5', workItemId=item['id'], dueAtMs=concluded+600000,
+                                    resolvedAtMs=released))
     return {'schema':'team-quality-live-alerts/1','asOfMs':facts['capturedAtMs'],
             'redLines':red,'warnings':warnings,
+            'instanceResolutions':resolutions,
             'windowEndMs':now,
             'nativeFactsSha256':hashlib.sha256(canonical(facts).encode()).hexdigest(),
             'ruleCoverage':{rule:(v['coverageKnown'] and (rule != 'R6' or facts.get('taskTreesSourceComplete') is True and all(x['state']!='unknown' for x in card.get('taskParallelism') or []))) for rule,v in card['redLines'].items()},
@@ -108,11 +121,23 @@ def advance(state, sample):
         if number(signal.get('resolvedAtMs')):
             row['symptomResolvedAtMs'] = max(row.get('symptomResolvedAtMs') or 0,signal['resolvedAtMs'])
         row['notification'] = notification(row)
-    # Historical hourly signals feed audit only. Closure needs the
-    # current complete native rule observation, never absence from a failed read.
+    # Historical hourly signals feed audit only. Closure needs either current
+    # complete rule coverage or an explicit matching native return, never
+    # absence from a failed read. Historical card signals cannot add returns.
     current = [x for x in sample['redLines'] if x.get('sourceWindowEndMs') == sample.get('windowEndMs')]
     for row in state['incidents'].values():
-        if row['status'] != 'open' or (sample.get('ruleCoverage') or {}).get(row['rule']) is not True:
+        if row['status'] != 'open':
+            continue
+        verified = [x for x in sample.get('instanceResolutions', []) if same_occurrence(row,x)
+                    and number(x.get('resolvedAtMs')) and x['resolvedAtMs'] <= now]
+        if verified:
+            row.update(status='closed', closedAtMs=max(x['resolvedAtMs'] for x in verified),
+                       resolution={'basis':'native-instance-return/1', 'observedAtMs':now,
+                                   'nativeFactsSha256':sample.get('nativeFactsSha256'),
+                                   'ruleCoverageKnown':(sample.get('ruleCoverage') or {}).get(row['rule']) is True,
+                                   'instanceCoverageKnown':True})
+            continue
+        if (sample.get('ruleCoverage') or {}).get(row['rule']) is not True:
             continue
         matching = [x for x in current if same_occurrence(row,x)]
         if any(not number(x.get('resolvedAtMs')) or x['resolvedAtMs'] > now for x in matching):

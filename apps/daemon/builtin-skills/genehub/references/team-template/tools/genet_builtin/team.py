@@ -3975,7 +3975,7 @@ def briefing(root, mine, reason):
     else:
         lines.append("上次改动验收: 未知；没有处理记录，不能据此宣称有效。")
     notes = pending_notes(root)
-    lines += ["留言 %d 条（全文用 run.py notes list 按编号读取）:" % len(notes)]
+    lines += ["留言 %d 条（全文用 run.py notes ls 按编号读取）:" % len(notes)]
     for note in notes[:12]:
         lines.append("- %s [%s] %s ref=%s" % (note["id"], note.get("kind"), note.get("session") or "-", compact(note.get("ref"), 140)))
         lines.append("  %s %s" % (compact(note.get("quote"), 60), compact(note.get("context") or note.get("text"), 160)))

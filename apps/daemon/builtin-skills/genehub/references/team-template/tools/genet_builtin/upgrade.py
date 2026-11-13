@@ -55,8 +55,13 @@ def store(t, root, row, status=None, **fields):
             context['maintenanceArgv'] += ['--base', row['reviewedBase']]
         # Existing Teams already recognize upgrade as urgent; a new note kind
         # would itself require adoption before it could wake their old hook.
+        # Legacy notes list and briefings render quote/context. A text-only
+        # instruction is hidden as soon as structured context is present.
+        quote = ('未提交源修改须由反思保留成果并完成审阅、整合、验证提交；'
+                 '用本留言公共入口续升，单纯等待不算处理。') if source_changes else (
+                 '请反思沿原维护项整合冲突或修复失败，再用本留言公共入口复验；确认已读不等于采用。')
         t.add_note(root, {'kind': 'upgrade' if source_changes else 'upgrade-' + kind, 'from': 'platform',
-                         'session': None, 'quote': '', 'context': json.dumps(
+                         'session': None, 'quote': quote, 'context': json.dumps(
                              context, ensure_ascii=False),
                          'text': ('平台升级被未提交源修改阻塞，单纯等待不会消除这些修改。'
                                   '请团队反思审阅所列路径，保留本地成果并完成整合、验证和本队提交；'
