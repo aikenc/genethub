@@ -214,9 +214,13 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         request['standing'] = True
     from .acceptance_units import link
     try:
-        unit = (None if saved and not saved.get('request', {}).get('acceptanceUnit')
-                and unit_of is None and unit_stage is None else
-                link(t, root, task, op_id, requester, follows, unit_of, unit_stage))
+        # Ownership can activate or hand over after the first prepare. A retry
+        # reads that operation's original unit; it cannot infer a new link from
+        # the Task's current participants. Explicit changed links still compare
+        # against the complete saved request below.
+        unit = (saved.get('request', {}).get('acceptanceUnit')
+                if saved and unit_of is None and unit_stage is None and follows is None
+                else link(t, root, task, op_id, requester, follows, unit_of, unit_stage))
     except ValueError as error:
         raise TeamConfigurationError(str(error)) from error
     if unit:
