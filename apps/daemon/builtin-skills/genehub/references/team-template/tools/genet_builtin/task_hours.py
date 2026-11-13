@@ -78,8 +78,13 @@ def evaluate(trees, start, end, basis=LEGACY_BASIS):
                 or not numeric(opened) or not numeric(stopped) or stopped < opened):
             raise ValueError('invalid or duplicate task-hour task')
         task_ids.add(task_id)
-        total = subtract(clipped([[opened, stopped]], opened, end),
-                         intervals(tree.get('excluded', [])))
+        excluded = intervals(tree.get('excluded', []))
+        if basis == BASIS:
+            # Effective unit wall excludes settled waiting gaps. This optional
+            # native fact does not remove real Agent effort from time costs,
+            # and older frozen /1 or /2 calculations keep their old meaning.
+            excluded = union(excluded + intervals(tree.get('concludedIntervals', [])))
+        total = subtract(clipped([[opened, stopped]], opened, end), excluded)
         wall = clipped(total, start, end)
         total_ms, wall_ms = length(total), length(wall)
         people = tree.get('sessions')

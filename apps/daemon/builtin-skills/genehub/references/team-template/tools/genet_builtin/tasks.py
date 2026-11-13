@@ -21,7 +21,10 @@ from . import resources, quality_events
 PREPARE_SETTLE_AFTER_MS = 120_000
 CONCLUSION_POLICY = {'version':'task-settlement/2','successRequiresSupports':True,
                      'nonSuccessPreservesUnresolvedSupports':True,
-                     'allOutcomesRequireDeliveredInputsRead':True}
+                     'allOutcomesRequireDeliveredInputsRead':True,
+                     'explicitResumePreservesConclusions':True,
+                     'messageAcceptanceResumesTask':False}
+CONTINUATION_VERSION = 'task-continuation/1'
 
 
 def identity(value):
@@ -494,7 +497,8 @@ def command(t, args, root=None, sender=None):
         return control(t, root, task, args, sid)
     if action == 'support':
         if task.get('state') != 'active' or task.get('finished'):
-            raise t.ExpertError('任务已收尾', '没有新增协作', '新目标建立新任务')
+            raise t.ExpertError('任务当前不能新增协作', '原结论、支持与资源保留',
+                                '原目标有明确继续要求时，由原前台查询状态后显式 task resume，旧结论保存在 conclusionHistory；新目标才新建任务')
         if not args.request_id:
             raise t.ExpertError('支持请求需要 --request-id', '没有派单', '重试复用本次支持编号')
         op = task['taskId'] + ':support:' + args.request_id
@@ -557,7 +561,11 @@ def command(t, args, root=None, sender=None):
             t.deliver_or_notice(root, owner['sessionId'], 'human', sid, input_request['text'],
                                 task['taskId'], args.request_id, machine=owner.get('machine'))
             prior['state'] = 'accepted'; t.write_json(send_path, prior)
-        print(json.dumps(dict(taskId=task['taskId'], accepted=True), ensure_ascii=False))
+        task = read_task(t, root, task['taskId'])
+        print(json.dumps(dict(taskId=task['taskId'], accepted=True,
+                              recordedOutcome=(task.get('finished') or {}).get('outcome'),
+                              conclusionPolicy=CONCLUSION_POLICY,
+                              capacityBudgetView=capacity_budget(t, root, task)), ensure_ascii=False))
     elif action == 'bind-directory':
         print(json.dumps(bind_directory(t, root, task['taskId'], sid, args.directory), ensure_ascii=False))
 
@@ -592,7 +600,8 @@ def notify_settlement_changes(t, root):
     """Surface a compatible completion contract when a real failure is stuck.
 
     This is status, never a second result or permission to resume/release work.
-    Normal result publication runs first; only its unresolved debt qualifies.
+    Normal result publication runs first. The original front can also discover
+    history-preserving continuation; this never supplies Human authorization.
     """
     deadline=time.monotonic()+4
     def observe(sid,machine):
@@ -604,7 +613,50 @@ def notify_settlement_changes(t, root):
         if (child.get('done') or {}).get('outcome')=='failed' and not (child.get('resultDelivery') or {}).get('queued'):
             by_owner.setdefault(child.get('requester'),[]).append(child)
     count=0
-    for snapshot in records(t,root,'tasks'):
+    tasks=records(t,root,'tasks')
+    informed={n.get('recipient') for task in tasks
+              for n in task.get('settlementNotices',{}).values()
+              if n.get('version')==CONTINUATION_VERSION and n.get('state')=='inbox'}
+    checked=set(informed)
+    # One compatible capability per front, not one wake for every old stage.
+    for snapshot in sorted(tasks,key=lambda x:x.get('createdAtMs',0),reverse=True):
+        sid=snapshot.get('front')
+        if (not sid or sid in checked or snapshot.get('state')!='active'
+                or (snapshot.get('finished') or {}).get('outcome') not in ('blocked','failed')):continue
+        if count>=2 or time.monotonic()>=deadline:break
+        checked.add(sid)
+        count+=1
+        try:
+            with t.inbox_lock(root,snapshot['taskId'],purpose='原结论续接能力提示'):
+                task=read_task(t,root,snapshot['taskId'])
+                if task.get('front')!=sid or task.get('state')!='active' or not task.get('finished'):continue
+                current=observe(sid,None)
+                if current is None:break
+                inputs=current.get('inputSummary') or {}
+                if (current.get('status')!='idle' or inputs.get('paused') or inputs.get('pendingMessageIds')
+                        or (current.get('interactionSummary') or {}).get('requests')):continue
+                key=identity(CONTINUATION_VERSION+':'+sid)
+                notices=task.setdefault('settlementNotices',{});notice=notices.get(key)
+                if not notice:
+                    text=('工具状态更新 '+CONTINUATION_VERSION+'；任务 '+task['taskId']+'。\n'
+                          'task send 的 accepted 只表示补充消息受理，不恢复已结论任务。原前台在已有明确用户继续要求时，'
+                          '可查询 task status 后显式 task resume：原完整结论及证据保存在 conclusionHistory，'
+                          '恢复负责人继续工作，不把旧失败改为成功，也不自动重试独立暂停的支持。'
+                          '派单容量仍单独按 task budget 核对，由原前台在原用户预算内明确决定，不自动续配。'
+                          '没有用户继续要求、已取消或整体到期时仍停止；这条状态不是新用户指令、验收批准或自动恢复。')
+                    notice=dict(version=CONTINUATION_VERSION,recipient=sid,machine=None,text=text,
+                                ref=task['taskId'],state='prepared',
+                                messageId=t.message_id(sid,'status',task['taskId'],CONTINUATION_VERSION))
+                    notices[key]=notice;t.write_json(task_path(t,root,task['taskId']),task)
+                t.push_session_inbox(root,sid,'status','system:task',notice['text'],ref=notice['ref'],
+                                     machine=None,delivery_id=notice['messageId'])
+                notice['state']='inbox';notice['enqueuedAtMs']=t.now_ms()
+                t.write_json(task_path(t,root,task['taskId']),task);informed.add(sid)
+                quality_events.emit(t,root,'continuation-contract-enqueued',notice['messageId'],
+                                    taskId=task['taskId'],sessionId=sid,messageId=notice['messageId'],contract=CONTINUATION_VERSION)
+        except (t.ExpertError,TeamConfigurationError,OSError,subprocess.TimeoutExpired) as error:
+            t.record_system_issue(root,'continuation-notice',str(error)[:300],snapshot['taskId'])
+    for snapshot in tasks:
         owner=snapshot.get('owner') or {};sid=owner.get('sessionId')
         children=by_owner.get(sid,[])
         if not children or snapshot.get('finished') or snapshot.get('state')!='active':continue
@@ -737,6 +789,8 @@ def control(t, root, task, args, sender):
                 raise t.ExpertError('任务版本已变化', '没有改变归属', '先 task status 再决定')
             if task.get('state') in ('delivered', 'canceled'):
                 raise t.ExpertError('任务已终结', '没有自动恢复已交付或取消的工作', '新的用户目标建立新任务并引用原成果')
+            if args.task_action in ('resume','handover') and not isinstance(task.get('conclusionHistory',[]),list):
+                raise t.ExpertError('原任务结论历史不可读', '没有恢复或覆盖旧结论', '保留原记录，核对结论历史后重试')
             if args.task_action == 'handover':
                 if args.machine or (task.get('owner') or {}).get('machine'):
                     raise t.ExpertError('跨机Owner接手需要显式成果和执行端资源交接', '原Owner未被中断，归属和资源保留', '本版只支持同机独立会话接手；跨机先核对产物和原执行端释放回执')
@@ -746,9 +800,11 @@ def control(t, root, task, args, sender):
                 if target_summary.get('status') != 'idle' or (target_summary.get('inputSummary') or {}).get('paused') or (target_summary.get('inputSummary') or {}).get('pendingMessageIds'):
                     raise t.ExpertError('接手会话有运行或待处理输入', '未中断原Owner', '等待新会话空闲再明确接手')
             targets = [dict(sessionId=task['owner']['sessionId'], machine=task['owner'].get('machine'))] if task.get('owner') else []
+            continuing = args.task_action == 'resume' and bool(task.get('finished'))
             targets += [dict(sessionId=x['sessionId'], machine=x.get('machine')) for x in task.get('collaborators', [])
-                        if args.task_action != 'handover' and not x.get('finished')]
-            operation = dict(request=request, targets=targets, completed=[], complete=False, sender=sender)
+                        if args.task_action != 'handover' and not continuing and not x.get('finished')]
+            operation = dict(request=request, targets=targets, completed=[], complete=False, sender=sender,
+                             continuingConclusion=continuing)
             task['control'] = operation
             task['state'] = {'pause': 'pausing', 'resume': 'resuming', 'cancel': 'canceling', 'handover': 'handing-over'}[args.task_action]
             t.write_json(path, task)
@@ -771,6 +827,9 @@ def _reconcile_control(t, root, task):
         return
     request = operation['request']
     action = request['action']
+    if action in ('resume','handover') and not isinstance(task.get('conclusionHistory',[]),list):
+        raise t.ExpertError('原任务结论历史不可读', '没有恢复或覆盖旧结论', '保留原记录，核对结论历史后重试')
+    continuing = operation.get('continuingConclusion',False)
     intents = [x for x in records(t, root, 'task-dispatch') if x.get('request', {}).get('taskId') == task['taskId']]
     for intent in intents:
         if intent.get('state') == 'creating' and intent.get('createAttempted'):
@@ -783,12 +842,12 @@ def _reconcile_control(t, root, task):
     known = {(x.get('machine'), x['sessionId']) for x in operation['targets']}
     for intent in intents:
         address = (intent.get('request', {}).get('machine'), intent.get('sessionId'))
-        if action != 'handover' and address[1] and address not in known:
+        if action != 'handover' and not continuing and address[1] and address not in known:
             record = receipt(t, root, address[1])
             if record and not record.get('done'):
                 operation['targets'].append(dict(machine=address[0], sessionId=address[1])); known.add(address)
     for item in task.get('collaborators', []):
-        if action != 'handover' and not item.get('finished') and (item.get('machine'), item['sessionId']) not in known:
+        if action != 'handover' and not continuing and not item.get('finished') and (item.get('machine'), item['sessionId']) not in known:
             operation['targets'].append(dict(machine=item.get('machine'), sessionId=item['sessionId']))
     for target in operation['targets']:
         key = (target.get('machine') or '') + ':' + target['sessionId']
@@ -811,7 +870,7 @@ def _reconcile_control(t, root, task):
             text = request['words'] or ['继续原任务并核对未完成协作与资源。']
             args = SimpleNamespace(to=target['sessionId'], kind='human', text=text,
                                    message_id='taskresume.' + identity(task['taskId'] + request['id'] + key))
-            t.send_explicit_resume(root, args, operation['sender'], target.get('machine'))
+            t.send_explicit_resume(root, args, operation['sender'], target.get('machine'), allow_active=continuing)
         operation['completed'].append(key)
         t.write_json(task_path(t, root, task['taskId']), task)
     if action == 'handover':
@@ -857,7 +916,6 @@ def _reconcile_control(t, root, task):
                     elif entry.get('requester') == previous_sid:
                         entry['requester'] = new_sid
                     t.write_json(t.state_dir(root, 'pending', entry['sessionId'] + '.json'), entry)
-            task.pop('finished', None)
             # Track the new owner's final conclusion using the existing pending path.
             pending = dict(sessionId=new_sid, requester=task['front'], batch=task['taskId'], kind='work',
                            desc=task['request']['desc'], createdAtMs=t.now_ms(), baseline=(summary.get('latestReply') or {}).get('itemId'),
@@ -897,7 +955,12 @@ def _reconcile_control(t, root, task):
     task['revision'] += 1
     operation['complete'] = True
     task['state'] = {'pause': 'paused', 'resume': 'active', 'cancel': 'canceled', 'handover': 'active'}[action]
-    if action == 'resume': task.pop('finished', None)
+    if action in ('resume','handover') and task.get('finished'):
+        # Commit history and the new active view in one Task write. Replaying
+        # this completed control cannot append or relabel the old conclusion.
+        task.setdefault('conclusionHistory',[]).append(dict(conclusion=task.pop('finished'),
+            control=dict(action=action,requestId=request['id'],revision=task['revision'],
+                         actorSessionId=operation['sender'],atMs=t.now_ms())))
     t.write_json(task_path(t, root, task['taskId']), task)
     quality_events.emit(t, root, 'control', task['taskId'] + ':' + str(task['revision']),
                         taskId=task['taskId'], action=action, state=task['state'], revision=task['revision'])

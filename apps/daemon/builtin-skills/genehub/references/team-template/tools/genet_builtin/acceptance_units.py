@@ -118,6 +118,7 @@ def collect(tasks, intents, work, trees, native, end):
             known = bool(origin or boundary)
             made.append(dict(unitId=unit_id, taskId=task_id, openedAtMs=opened, endedAtMs=stopped,
                              excluded=copy.deepcopy(tree['excluded']), sessions=sessions,
+                             concludedIntervals=copy.deepcopy(tree.get('concludedIntervals',[])),
                              boundaryKnown=known, boundaryBasis=BASIS,
                              boundaryReason=None if known else 'legacy-open-goal-has-no-native-iteration-boundary',
                              conclusion=boundary, operationIds=sorted(x['operationId'] for x in members)))

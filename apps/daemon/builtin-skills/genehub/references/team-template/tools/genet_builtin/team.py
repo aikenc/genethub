@@ -1834,16 +1834,16 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
 
 # ---------------------------------------------------------------- commands
 
-def send_explicit_resume(root, args, sender, machine):
+def send_explicit_resume(root, args, sender, machine, allow_active=False):
     # The ID is global to this Team, including retries that name another target.
     # Keep one owner through native delivery so late failures cannot overwrite an
     # accepted receipt. The pending lock is held only for short metadata writes.
     key = hashlib.sha256((args.message_id or "").encode("utf-8")).hexdigest()
     with inbox_lock(root, "resume-" + key, purpose="恢复操作"):
-        return _send_explicit_resume(root, args, sender, machine)
+        return _send_explicit_resume(root, args, sender, machine, allow_active=allow_active)
 
 
-def _send_explicit_resume(root, args, sender, machine):
+def _send_explicit_resume(root, args, sender, machine, allow_active=False):
     """Explicit continuation is one attributed input plus a durable result subscription.
 
     The operation receipt is addressed directly by ID, never found by scanning history.
@@ -1854,7 +1854,9 @@ def _send_explicit_resume(root, args, sender, machine):
     if args.kind != "human" or not SESSION_ID.match(target) or not SESSION_ID.match(sender or "") or target == sender or not args.message_id:
         raise ExpertError("明确恢复需要 human 用途、原会话 ID 和稳定 --message-id", "没有恢复或新建会话", "用户明确要求继续后，由前台署名向原会话投递")
     body = " ".join(args.text)
-    digest = hashlib.sha256(json.dumps([target, sender, machine, body], ensure_ascii=False).encode("utf-8")).hexdigest()
+    identity = [target, sender, machine, body]
+    if allow_active: identity.append('explicit-task-conclusion-continuation')
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode("utf-8")).hexdigest()
     operation_path = state_dir(root, "resumes", hashlib.sha256(args.message_id.encode("utf-8")).hexdigest() + ".json")
     pending_path = state_dir(root, "pending", target + ".json")
     with inbox_lock(root, "pending-" + target, purpose="恢复回执"):
@@ -1881,7 +1883,10 @@ def _send_explicit_resume(root, args, sender, machine):
             if not machine and current and current.get("machine"):
                 raise ExpertError("原派单属于远端机器", "没有按本机会话处理", "沿用原回执中的 --machine")
             summary = session_summary(target, machine, fresh=failed_notice)
-            if not (summary.get("inputSummary") or {}).get("paused"):
+            # Only an explicit concluded-Task control uses this mode. A native
+            # Owner may be idle after reporting blocked; it need not be paused
+            # just to continue. Standalone send --resume keeps its strict guard.
+            if not allow_active and not (summary.get("inputSummary") or {}).get("paused"):
                 raise ExpertError("目标当前没有暂停", "没有额外投递恢复消息", "未暂停的继续要求使用普通 team.py send，保留团队结果跟踪")
             if failed_notice:
                 # A delivered execution failure is a notification, not a business

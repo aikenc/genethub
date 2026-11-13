@@ -7,11 +7,17 @@
 - `task start --space ROLE --desc TEXT --request-id ID [--directory ABS] [--machine MACHINE] [--tier T|--model MODEL] GOAL`：前台建立稳定任务及 Owner 会话。重复 ID 和原参数读取原结果；不同内容拒绝。
 - `task support TASK --space ROLE --desc TEXT --request-id ID ... GOAL`：Owner/子负责人发出支持请求，结果回到精确请求会话。默认等待本组必需支持全部结算；失败结算不等于成功。
 - `task status TASK`：核对当前 Owner、版本、协作与控制回执。
-- `task send TASK --request-id ID TEXT`：把追加要求投给该任务的精确 Owner。
+- `task send TASK --request-id ID TEXT`：把追加要求投给该任务的精确 Owner。`accepted` 只代表消息受理，不恢复已结论的任务；同时核对返回的 `recordedOutcome` 与 `capacityBudgetView`。
 - `task bind-directory TASK --directory ABS`：当前 Owner 或协作者为自己的执行会话认领写工位，不独占整个 Space；远端路径由原接单回执指向的执行端认领，源端不创建同名目录。
 - `task finish TASK --outcome success|failed|blocked EVIDENCE`：提交本会话负责工作的明确结论；尚有未结算支持时不得宣称 success。整合结论可重复加 `--uses <子派单operationId>` 引用本会话实际采用的已读产物；只能引用本任务中由自己请求且已结论的子项。可省略，不另做逐项审批；引用不是独立项目验收。长目标未结束时，可在已有整合回复单独写 `采用：ghref:item:...`（结果原引用），只声明实际采用的产物，不另发登记消息。
 - `task pause|resume|cancel TASK --request-id ID --expected-revision N [用户原话]`：前台转达明确用户要求，保留原操作与协作树。暂停/取消发送成功不等于全部执行已停止，查询实际回执。
 - `task handover TASK --session SID --request-id ID --expected-revision N`：原执行停止、资源核对后接手同一个任务；不重发已完成副作用。本版仅支持同机独立会话接手；跨机请求在中断旧Owner前拒绝，迁移需先显式交接产物和执行端资源。
+
+旧 `blocked/failed` 是该阶段的真实结论，不是永久禁止继续。用户明确继续同一未完成目标后，原前台先查询状态，以原 Task 和当前 revision 显式 `task resume`；恢复会在 `conclusionHistory` 原样保留完整旧结论、证据及控制来源，再开放负责人后续工作。负责人原生会话即使没有暂停也可继续；独立支持的原暂停、失败输入及资源不会随已结论任务的续接自动重试。未结论任务的整树暂停/恢复仍遵循原控制合同。恢复及接手不清空原创建时间、累计投入或原目标，不代表旧失败改判或验收通过；真正的新目标才另建任务。
+
+派单配额与用户期限分开核对。显式恢复不自动续配容量，原前台按下述 `task budget` 在已给定用户范围内明确决定。`task-continuation/1` 只向空闲且未暂停的原前台提示一次这项兼容能力，不是新的用户继续要求；没有既有明确继续要求时不得据此恢复。
+
+计时沿原单元累计，不从恢复时重置。`conclusionHistory` 的原结论至恢复之间属于已结论等待区间：新 `/3` 事实以 `concludedIntervals` 单独保留，R6有效时长和停滞观测排除它；期间真实执行的支持或负责人投入仍进入完整单元的 Agent 时间成本。它不是所有后台已停止的证明，原资源和输入债务继续核对。旧 `/1`、`/2` 回放不解释这一新可选字段，已冻结事实与卡片不改写。
 
 ## 长任务的并行默认与决策信息
 

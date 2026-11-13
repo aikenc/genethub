@@ -443,7 +443,33 @@ def wake_observations(native, machines, log, start, end, complete, failure_times
 
 
 
-def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
+def task_continuations(tasks, end):
+    """Read preserved conclusion/control bounds without resetting unit origins.
+
+    These are inactive goal periods, not proof that every support stopped.
+    Keep them separate from user task pauses so actual Agent costs survive.
+    The local task view also retains its true conclusion before a later resume.
+    """
+    periods={}
+    for task_id,task in tasks.items():
+        history=task.get('conclusionHistory',[])
+        if not isinstance(history,list):raise ValueError('invalid task conclusion history')
+        previous=[]
+        for row in history:
+            if not isinstance(row,dict):raise ValueError('invalid task conclusion history entry')
+            conclusion=row.get('conclusion') or {};control=row.get('control') or {}
+            if not isinstance(conclusion,dict) or not isinstance(control,dict):raise ValueError('invalid task continuation source')
+            a,b=conclusion.get('atMs'),control.get('atMs')
+            if (not number(a) or not number(b) or b<a
+                    or control.get('action') not in ('resume','handover')):
+                raise ValueError('unproven task conclusion continuation bounds')
+            if a<=end<b:previous.append(conclusion)
+            if b<=end and b>a:periods.setdefault(task_id,[]).append((a,b))
+        if previous:task['finished']=max(previous,key=lambda x:x['atMs'])
+    return periods
+
+
+def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=(), conclusion_periods=None):
     """Root Owner plus every support, using task controls and native rounds.
 
     A task pause controls the goal wall; pausing one support only removes that
@@ -487,7 +513,8 @@ def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
             if number(joined):person['openedAtMs']=joined
             sessions.append(person)
         result.append(dict(taskId=task_id,openedAtMs=opened,endedAtMs=stopped,
-                           excluded=union_intervals(excluded),sessions=sessions))
+                           excluded=union_intervals(excluded),sessions=sessions,
+                           concludedIntervals=union_intervals((conclusion_periods or {}).get(task_id,[]))))
     return result
 
 
@@ -539,6 +566,7 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     version_before = running_version(root, cutoff)
     log = events(root, cutoff)
     tasks = {v['taskId']: v for v in records(state/'tasks')}
+    conclusion_periods = task_continuations(tasks,end)
     intents = records(state/'task-dispatch')
     pending = {v['sessionId']: v for area in ['pending', 'done'] for v in records(state/area)}
     issues, work, wanted = [], [], {}
@@ -577,7 +605,8 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
         observed_complete = observed_complete and complete
         # Integrate observed task control and native wait/pause segments, then
         # union goals so concurrent goals cannot multiply the denominator.
-        changes = [(created, 'active')]+[(x['atMs'], x['state']) for x in controls if x.get('taskId')==task['taskId']]
+        changes = sorted([(created, 'active')]+[(x['atMs'], x['state']) for x in controls if x.get('taskId')==task['taskId']]
+                         +[(at,state) for a,b in conclusion_periods.get(task['taskId'],[]) for at,state in ((a,'concluded'),(b,'active'))])
         boundaries = sorted({a,b,*[min(b,max(a,t)) for t,_ in changes],*[min(b,max(a,x['atMs'])) for x in relevant_points]})
         for left,right in zip(boundaries,boundaries[1:]):
             status = next((s for t,s in reversed(changes) if t <= left), 'active')
@@ -897,7 +926,18 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     team_version = running_version(root, cutoff)
     if team_version.get('id') != version_before.get('id'):
         team_version.update(id=None,releaseVersion=None,status='changed-during-capture')
-    trees = task_trees(tasks,goal_tasks,controls,native,end,intents,log)
+    trees = task_trees(tasks,goal_tasks,controls,native,end,intents,log,conclusion_periods=conclusion_periods)
+    # A resumed goal's old concluded interval is not an idle stall. Existing
+    # input/resource obligations remain work facts and are not erased here.
+    from .task_hours import subtract
+    active_stalls=[]
+    for row in stalls:
+        inactive=conclusion_periods.get(row.get('taskId'),[])
+        if not inactive or not number(row.get('startAtMs')) or not number(row.get('endAtMs')) or row['endAtMs']<=row['startAtMs']:
+            active_stalls.append(row);continue
+        active_stalls.extend(dict(row,startAtMs=a,endAtMs=b)
+                             for a,b in subtract([(row['startAtMs'],row['endAtMs'])],inactive))
+    stalls=active_stalls
     from .acceptance_units import collect as collect_units, BASIS as UNIT_BASIS
     from .execution_facts import SCORE_BASIS as EXECUTION_BASIS
     units = collect_units(tasks,intents,work,trees,native,end)
