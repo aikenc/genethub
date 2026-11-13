@@ -7,7 +7,7 @@ import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.preview.inventory-project-aliases",
   title: "One real preview stays visible through many projects without multiplying its failed health probe",
-  oracle: "A shipped Python application is exposed by 33 actual workspace roots. Suspending only that application makes all aliases unreachable in under three seconds; resuming it restores every alias, scoped isolation and authenticated shutdown without reusing the failed observation.",
+  oracle: "A shipped Python application is exposed by 97 actual workspace roots, 96 with 32 pinned previews. Suspending only that application makes all aliases unreachable in under three seconds; resuming it restores every alias, scoped isolation and authenticated shutdown without reusing the failed observation.",
   catches: ["one timeout per alias turns a process inventory into seconds of waves", "deduplication drops legitimate project entries", "a completed failed probe is cached after app recovery", "aliases borrow another project's service metadata"],
   tags: ["core", "service-preview", "session-catalog", "preview-inventory-aliases"],
   llm: { default: "none" }, expectedDurationMs: 20000, timeoutMs: 90000,
@@ -30,16 +30,21 @@ defineSpecialty({
   const app = spawn(python, [join(adapter, "app.py"), "--entry", entry, "--daemon-root", t.env.data], { cwd: adapter, stdio: "ignore" });
   const aliases = [{ id: o.workspaceId, entryPath: `${o.rootHandle}/index.html` }];
   try {
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 96; i++) {
       const definitionRoot = join(t.env.root, "alias-definition-" + i);
       await mkdir(definitionRoot);
       const definition = join(definitionRoot, "project.code-workspace");
       await writeFile(definition, JSON.stringify({ folders: [{ path: t.env.workspace }, { path: definitionRoot }] }));
+      await mkdir(join(definitionRoot, ".genethub"));
+      await writeFile(join(definitionRoot, ".genethub", "preview-entries.json"), JSON.stringify({
+        entries: Array.from({ length: 32 }, (_, n) => ({ id: "pin-" + n, title: "Actual pinned preview " + n, entry: "index.html" })),
+      }));
       const opened = await o.client.call({ type: "workspace.open", payload: { root: definition } });
       if (opened?.type !== "workspace") throw new Error("real alias workspace did not open");
+      t.assertions.assert(opened.data.previewEntries?.length === 32, "real project menu did not expose all pinned preview fixtures");
       aliases.push({ id: opened.data.id, entryPath: `${opened.data.folders[0]!.rootHandle}/index.html` });
     }
-    t.assertions.assert(new Set(aliases.map(a => a.id)).size === 33, "fixture aliases collapsed into one project");
+    t.assertions.assert(new Set(aliases.map(a => a.id)).size === 97, "fixture aliases collapsed into one project");
     const otherRoot = join(t.env.root, "unrelated-project"); await mkdir(otherRoot);
     const other = await o.client.call({ type: "workspace.open", payload: { root: otherRoot } });
     if (other?.type !== "workspace") throw new Error("unrelated project did not open");
@@ -60,7 +65,10 @@ defineSpecialty({
       t.assertions.assert(rows.length === aliases.length && aliases.every(alias => rows.some(p => p.workspaceId === alias.id && p.pid === app.pid && p.service?.entryPath === alias.entryPath && p.service.reachable === reachable && p.service.canStop === reachable)), "native Run lost aliases, changed scope or retained a stale health result");
       t.assertions.assert(!JSON.stringify(reply).includes('"secret"') && !JSON.stringify(reply).includes('"port"'), "process inventory exposed registration credentials");
     };
+    const liveStarted = performance.now();
     await checkAliases(true);
+    const liveMs = Math.round(performance.now() - liveStarted);
+    t.assertions.assert(liveMs < 3000, "populated project metadata starves live process inventory: " + liveMs);
     // Real fault in our own external SDK application. The daemon, registry,
     // protocol responses and timeouts are untouched.
     t.assertions.assert(app.kill("SIGSTOP"), "could not suspend actual SDK app");
@@ -79,6 +87,6 @@ defineSpecialty({
     await t.tools.waitUntil(() => app.exitCode !== null, 10000);
     const stopped = await list();
     t.assertions.assert(stopped?.type === "processes" && !stopped.data.some(p => p.service?.runId === runId), "authenticated alias stop left a retained Run");
-    t.note(JSON.stringify({ realRuns: 1, legitimateProjectAliases: aliases.length, unavailableMs, resumedFresh: true, isolated: true, stopped: true }));
+    t.note(JSON.stringify({ realRuns: 1, legitimateProjectAliases: aliases.length, pinnedPreviewsPerProject: 32, liveMs, unavailableMs, resumedFresh: true, isolated: true, stopped: true }));
   } finally { app.kill("SIGCONT"); app.kill("SIGTERM"); o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });
