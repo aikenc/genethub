@@ -305,6 +305,17 @@ defineSpecialty({
     const orphan = git("commit-tree", "platform^{tree}", "-m", "fixture independent template history");
     git("update-ref", "refs/heads/platform", orphan);
     mkdirSync(join(platform, "docs"), { recursive: true }); writeFileSync(join(platform, "docs/new-platform.txt"), "new platform content\n");
+    execute([]); const conflict = await settle();
+    t.assertions.assert(conflict.status === "conflict" && conflict.reason.includes("no-common-ancestor"), JSON.stringify(conflict));
+    // Legacy durable upgrader result, matching the observed pre-fingerprint
+    // DS shape. This is a migration input, never a native delivery receipt.
+    const legacy = { ...conflict, status: "test-failure", reason: "legacy git merge-base failed" };
+    delete legacy.sourceIdentity;
+    writeFileSync(r.state("upgrade/latest.json"), JSON.stringify(legacy));
+    execute([]); const refreshed = await settle();
+    t.assertions.assert(refreshed.status === "conflict" && refreshed.reason.includes("no-common-ancestor")
+      && Boolean(refreshed.sourceIdentity) && git("rev-parse", "HEAD") === originalHead,
+      "installed maintenance reused an unverified legacy failure: " + JSON.stringify(refreshed));
     const originalMemory = readFileSync(join(r.root, "memory.md"));
     writeFileSync(join(r.root, "memory.md"), Buffer.concat([originalMemory, Buffer.from("\nUncommitted user work.\n")]));
     const dirty = execute(["--base", baseline]);
