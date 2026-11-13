@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
@@ -61,15 +61,15 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.team-programmatic-upgrade",
   title: "Automatic upgrade validates one latest Git candidate, preserves local patches and wakes only on actionable failure",
-  oracle: "Actual Team CLI upgrades a case-owned source from a real Git platform baseline after nine available template changes. Only the latest content reaches the source, with a verified portable output, no success reflection, and no invented release label for an explicit template override. A dirty source waits unchanged; a committed builtin patch overlapping a platform change produces a conflict and one real native reflection wake. No live Team or project is changed.",
-  catches: ["one manual upgrade per release", "platform baseline mistaken for adoption", "dirty source overwritten", "local resultDelivery-style builtin patch silently merged", "successful/waiting upgrade wakes reflection", "conflict does not reach native reflection"],
+  oracle: "Actual Team CLI adopts only the latest verified Git candidate. Dirty source bytes/HEAD stay intact and reach existing native reflection once per target despite further edits. Identical builtin changes integrate without a false conflict; different builtin patches remain protected, with the current public maintainer argv in the handoff. No live Team or project is changed.",
+  catches: ["one manual upgrade per release", "platform baseline mistaken for adoption", "dirty source overwritten or silently abandoned", "source edits repeatedly wake reflection", "identical builtin bytes treated as incompatible", "local resultDelivery-style builtin patch silently merged", "successful upgrade wakes reflection", "conflict leaves a legacy caller without a usable maintenance entry"],
   tags: ["core", "team-upgrade"], llm: { default: "none" },
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   productInterfaces: ["tools/run.py upgrade", "tools/run.py snapshot", "tools/run.py hook", "session.get", "filesystem", "git"],
   surfaces: ["daemon", "team-template", "filesystem"],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
-  expectedDurationMs: 35000, timeoutMs: 180000,
+  expectedDurationMs: 70000, timeoutMs: 180000,
 }, async t => {
   const r = await openTeam(t, "automatic-upgrade");
   let templatePath = "";
@@ -83,6 +83,11 @@ defineSpecialty({
     t.assertions.assert(result.status === 0, result.stderr + result.stdout); return JSON.parse(result.stdout);
   };
   const notes = () => existsSync(r.state("notes")) ? readdirSync(r.state("notes")).filter(x => x.endsWith(".json")) : [];
+  const seesNote = (view: Awaited<ReturnType<typeof r.snapshot>>, id: string) => view.items.some(item => {
+    if (item.type !== "userMessage") return false;
+    const brief = /^简报:\s*(.+)$/m.exec(item.text)?.[1];
+    return Boolean(brief && dirname(brief) === r.state("briefings") && readFileSync(brief, "utf8").includes(id));
+  });
   const settle = async () => {
     let value: any;
     await t.tools.waitUntil(async () => {
@@ -136,15 +141,49 @@ defineSpecialty({
     t.assertions.assert(afterMemory.status === "adopted" && !afterMemory.workerPid
       && afterMemory.generation === duplicate.generation && notes().length === beforeNotes,
       "ordinary memory commit restarted an unchanged platform package upgrade");
+    r.ok(["reflect", "now", "Observe this explicit request before a later upgrade blocker"]);
+    const recentReflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
+    await t.tools.waitUntil(async () => (await r.snapshot(recentReflect.sessionId)).summary.status === "idle", 20000);
     const memory = join(r.root, "memory.md"), original = readFileSync(memory);
     writeFileSync(memory, Buffer.concat([original, Buffer.from("\nUncommitted user definition change.\n")]));
     writeFileSync(join(platform, marker), "available-10\n");
     const stableHead = git("rev-parse", "HEAD"), waiting = execute(["upgrade"]);
     t.assertions.assert(waiting.status === "waiting-safe-point" && waiting.reason === "uncommitted-source-changes"
       && git("rev-parse", "HEAD") === stableHead && readFileSync(join(r.root, marker), "utf8") === "available-9\n"
-      && notes().length === beforeNotes, "dirty source was applied or created reflection work");
+      && notes().length === beforeNotes + 1, "dirty source was applied or its actionable blocker never reached reflection");
+    const dirtyNote = notes().map(name => JSON.parse(readFileSync(r.state("notes", name), "utf8")))
+      .find(note => note.kind === "upgrade" && JSON.parse(note.context || "{}").reason === "uncommitted-source-changes");
+    t.assertions.assert(Boolean(dirtyNote), "source blocker has no durable handoff note");
+    const dirtyContext = JSON.parse(dirtyNote.context);
+    t.assertions.assert(dirtyContext.dirtyPaths.includes("memory.md")
+      && JSON.stringify(dirtyContext.maintenanceArgv.slice(2, 6)) === JSON.stringify([join(platform, "tools/run.py"), "--team-root", r.root, "upgrade"]),
+      "dirty-source handoff lacks the actual public maintainer or changed paths");
+    writeFileSync(memory, Buffer.concat([original, Buffer.from("\nFurther uncommitted user work.\n")]));
+    const editedBytes = readFileSync(memory);
+    execute(["upgrade"]); execute(["upgrade"]);
+    t.assertions.assert(notes().length === beforeNotes + 1 && git("rev-parse", "HEAD") === stableHead
+      && readFileSync(memory).equals(editedBytes), "further edits duplicate the target handoff or change uncommitted work");
+    r.ok(["hook"], { TEAM_TEMPLATE: platform });
+    const dirtyReflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
+    t.assertions.assert(dirtyReflect.sessionId !== recentReflect.sessionId && dirtyReflect.notifiedNotes?.includes(dirtyNote.id),
+      "source blocker waited behind the ordinary reflection gap instead of using the existing urgent upgrade channel");
+    await t.tools.waitUntil(async () => (await r.snapshot(dirtyReflect.sessionId)).summary.status === "idle", 20000);
+    const dirtyView = await r.snapshot(dirtyReflect.sessionId);
+    t.assertions.assert(seesNote(dirtyView, dirtyNote.id),
+      "source blocker note never reached a real native reflection input");
+    execute(["upgrade"]); r.ok(["hook"], { TEAM_TEMPLATE: platform });
+    t.assertions.assert(JSON.parse(readFileSync(r.state("reflect.json"), "utf8")).sessionId === dirtyReflect.sessionId
+      && notes().length === beforeNotes + 1, "handled source-blocker notification wakes another reflection without new work");
+    t.assertions.assert(git("rev-parse", "HEAD") === stableHead && readFileSync(memory).equals(editedBytes),
+      "reflection startup committed or discarded uncommitted user work");
     writeFileSync(memory, original);
     const relative = "tools/genet_builtin/quality_events.py", tool = join(r.root, relative);
+    const identical = readFileSync(tool, "utf8") + "\n# Identical change on both branches.\n";
+    writeFileSync(tool, identical); writeFileSync(join(platform, relative), identical);
+    r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
+    execute(["upgrade"]); const sameBytes = await settle();
+    t.assertions.assert(sameBytes.status === "adopted" && readFileSync(tool, "utf8") === identical
+      && notes().length === beforeNotes + 1, "identical builtin blob/mode created a false protected conflict or success wake");
     writeFileSync(tool, readFileSync(tool, "utf8") + "\n# case-owned legacy resultDelivery compatibility patch\n");
     r.ok(["snapshot"], { TEAM_TEMPLATE: platform });
     const patchedBytes = readFileSync(tool), patchedHead = git("rev-parse", "HEAD");
@@ -156,14 +195,18 @@ defineSpecialty({
       "overlapping builtin semantic patch was not preserved as an explicit conflict");
     const conflictNotes = notes().length;
     execute(["upgrade"]);
-    t.assertions.assert(notes().length === conflictNotes && conflictNotes === beforeNotes + 1,
+    t.assertions.assert(notes().length === conflictNotes && conflictNotes === beforeNotes + 2,
       "unchanged conflict generated repeated reflection notes");
+    const conflictNote = notes().map(name => JSON.parse(readFileSync(r.state("notes", name), "utf8")))
+      .find(note => note.kind === "upgrade-conflict");
+    t.assertions.assert(conflictNote && JSON.parse(conflictNote.context).maintenanceArgv.includes("--team-root"),
+      "conflict handoff sends maintainers back to an obsolete private entry");
     r.ok(["hook"], { TEAM_TEMPLATE: platform });
     const reflect = JSON.parse(readFileSync(r.state("reflect.json"), "utf8"));
     const view = await r.snapshot(reflect.sessionId);
-    t.assertions.assert(view.items.some(x => x.type === "userMessage" && x.text.includes("反思")),
+    t.assertions.assert(reflect.notifiedNotes?.includes(conflictNote.id) && seesNote(view, conflictNote.id),
       "actionable upgrade conflict never reached a real native reflection session");
-    t.note("Actual isolated Git merge, candidate regression/build/verify, latest-only source adoption, dirty-source wait, preserved builtin conflict and native reflection. Nine template revisions are explicit fixtures; nine original HY notification projections are frozen historical inputs, archived as delegated rather than falsely adopted. No live Team or formal-hour claim.");
+    t.note("Actual isolated Git merge/build/verify, latest-only adoption, dirty bytes/HEAD retained with one native reflection handoff despite content churn, identical builtin integration and protected different patches. Current public maintenance argv is supplied. Historical nine notices remain delegated, not falsely adopted. No live Team or formal-hour claim.");
   } finally { await r.dispose(); }
 });
 
