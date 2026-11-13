@@ -6,7 +6,7 @@ import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/publi
 defineSpecialty({
   id: "specialty.daemon.team-overview",
   title: "A 35-role Team separates current work from bounded scoped progress history",
-  oracle: "One active snapshot retains all 35 native roles without expanding the two completed Agent conversations; progress uses explicitly bounded Team Space pages, counts one business round and excludes reflection; malformed responses preserve the prior status.",
+  oracle: "One active snapshot retains all 35 native roles; hook metadata synchronization bootstraps only these Team Spaces and then reuses its persisted incremental cursor; progress uses explicitly bounded history pages, counts one business round and excludes reflection; malformed responses preserve prior status.",
   catches: ["board refresh queries every role", "progress uses unbounded machine-wide history", "reflection counts as business progress", "malformed overview erases last good status"],
   tags: ["core", "expert", "performance"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -89,11 +89,22 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     t.assertions.assert(progress.seen.rounds === 1, `Reflection counted as business progress: ${JSON.stringify(progress.seen)}`);
     queries = listQueries();
     const scopes = new Set(spaces.filter((w: any) => w.root === root || w.root.startsWith(join(root, "spaces") + "/")).map((w: any) => w.id));
-    const history = queries.filter(a => !a.includes("--active"));
-    t.assertions.assert(queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 1
-      && history.every(a => scopes.has(a[a.indexOf("--workspace") + 1]) && a.includes("--limit")
+    const incremental = queries.filter(a => a.includes("--since"));
+    const history = queries.filter(a => !a.includes("--active") && !a.includes("--since"));
+    const withinTeam = (args: string[]) => {
+      const requested = args.flatMap((arg, i) => arg === "--workspace" ? [args[i + 1]!] : []);
+      return requested.length > 0 && requested.length <= scopes.size && requested.every(id => scopes.has(id)) && !args.includes("--machine");
+    };
+    t.assertions.assert(incremental.length === 1 && incremental.every(withinTeam)
+      && queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 1
+      && history.every(a => withinTeam(a) && a.includes("--limit")
         && Number(a[a.indexOf("--limit") + 1]) > 0 && Number(a[a.indexOf("--limit") + 1]) <= 500),
       `Hook used unbounded or unrelated history: ${JSON.stringify(queries)}`);
+    const again = command("hook"); t.assertions.assert(again.status === 0, again.stderr);
+    const continued = listQueries().filter(a => a.includes("--since"));
+    t.assertions.assert(continued.length === 1 && withinTeam(continued[0]!) && continued[0]![continued[0]!.indexOf("--since") + 1] !== "start", "the next hook restarted a full metadata bootstrap or escaped its Team scope");
+    const repeated = JSON.parse(readFileSync(join(root, ".genethub/team/reflect.json"), "utf8"));
+    t.assertions.assert(repeated.seen.rounds === 1, "incremental hook double-counted the completed business round");
     t.assertions.assert(o.mock.requests.length === modelRequestsBeforeHook, "Hook unexpectedly started automatic model work");
     writeFileSync(mode, "missing-sessions");
     command("board", "refresh");

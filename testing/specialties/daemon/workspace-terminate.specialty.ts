@@ -229,6 +229,7 @@ defineSpecialty({
     const busyRoot = path.join(t.env.root, "spaces", "busy-target");
     const stoppedSid = await waitingSession(t, opened, stopped);
     const busySid = await waitingSession(t, opened, busy);
+    await opened.client.call({ type: "session.rename", payload: { sessionId: stoppedSid, title: "Removal bystander conversation" } });
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, stoppedSid, { viewport: { width: 1280, height: 900 } }, { trace: false }, {
       targets: () => [{ id: "terminate-source", deviceHandle: opened.client.identity!.machineId, fingerprint: opened.client.identity!.fingerprint, label: "Terminate source", kind: "local", online: true }],
       endpoint: () => daemonEndpoint(opened.daemon),
@@ -259,11 +260,15 @@ defineSpecialty({
     await remove.getByRole("button", { name: "确认移除 1 项", exact: true }).click();
     await busyProject.waitFor({ state: "detached", timeout: 15_000 });
     await projects.getByText("1 项已移除", { exact: true }).waitFor({ timeout: 5_000 });
+    await page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
+    await page.getByRole("heading", { name: "Removal bystander conversation", exact: true }).waitFor();
     const listed = await opened.client.call({ type: "workspace.list" });
     t.assertions.assert(listed?.type === "workspaces" && !listed.data.some(w => w.id === busy), "the busy project is still registered");
     const reopened = await opened.client.call({ type: "workspace.open", payload: { root: busyRoot } });
     t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === busy && reopened.data.terminatedAtMs === undefined, "the removal left the busy project terminated");
     t.assertions.assert(!["waiting", "running"].includes((await status(opened.client, busySid)) ?? ""), "the removed project's session still waited");
+    const history = await opened.client.call({ type: "session.get", payload: { sessionId: busySid } });
+    t.assertions.assert(history?.type === "snapshot" && history.data.items.some(item => item.type === "userMessage" && item.text.includes("请先确认再继续")), "registration removal erased conversation history");
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });
 

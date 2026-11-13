@@ -394,11 +394,14 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
         false,
       );
 
-      const sessionsWhileRemoved = await client.call({
+      // An unregistered scope is unavailable, rather than a successful empty
+      // catalog. Reopening it below must still recover the original history.
+      await expect(client.call({
         type: "session.list",
         payload: { workspaceId, includeArchived: true, lean: true },
+      })).rejects.toMatchObject({
+        name: "ProtocolError", detail: { message: `no such workspace: ${workspaceId}` },
       });
-      expect(sessionsWhileRemoved).toEqual({ type: "sessions", data: [] });
 
       const reopened = await client.call({
         type: "workspace.open",

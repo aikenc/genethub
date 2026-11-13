@@ -63,7 +63,9 @@ defineSpecialty({
     t.assertions.assert(response.status() === 201 && performance.now() - start < 8_000, "feedback submission was blocked by stalled log collection");
     const { id } = await response.json() as { id: string };
     const submitted = response.request().postDataJSON() as { diagnostics: { machineId?: string; machineLogs?: unknown[] } };
-    t.assertions.assert(submitted.diagnostics.machineId === machine && !submitted.diagnostics.machineLogs?.length, "initial report did not identify the unavailable original machine");
+    t.assertions.assert(await response.request().headerValue("x-genehub-feedback-machine-id") === machine
+      && !("machineId" in submitted.diagnostics) && !submitted.diagnostics.machineLogs?.length,
+    "original machine was not carried in the optional diagnostic header with the legacy JSON body intact");
     await t.tools.waitUntil(async () => page.evaluate(() => !!localStorage.getItem("genehub.feedback.log-recovery.v1")), 5_000);
     const queue = await page.evaluate(() => localStorage.getItem("genehub.feedback.log-recovery.v1"));
     t.assertions.assert(!!queue && queue.includes(id) && !queue.includes("text") && !queue.includes("cookie"), "recovery queue was missing or persisted log/credential content");

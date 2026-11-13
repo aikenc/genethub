@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync } from "node:fs";
 import path from "node:path";
 import {
   defineSpecialty,
@@ -108,10 +108,15 @@ contractCase(
     const checkpoint = path.join(directory, "open-turn.jsonl");
     const reopenings: Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>[] = [];
     let obstructed = false;
+    const containsSavedAnswer = (file: string, id: string) => existsSync(file) && readFileSync(file, "utf8").trim().split("\n").filter(Boolean).some(line => {
+      const row = JSON.parse(line) as { item?: { id?: string; text?: string } };
+      return row.item?.id === id && row.item.text?.includes("checkpoint-prefix") && row.item.text.includes("checkpoint-tail");
+    });
     try {
       await t.flows.main.sendPrompt(session.client, session.sessionId, "Preserve the first execution.");
       await t.tools.waitUntil(async () => JSON.stringify((await snapshot(session)).items).includes("checkpoint-tail"), 15_000);
-      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      const firstId = (await snapshot(session)).items.filter(item => item.type === "assistantMessage" && item.text.includes("checkpoint-tail")).at(-1)!.id;
+      await t.tools.waitUntil(() => containsSavedAnswer(checkpoint, firstId), 15_000);
       t.assertions.assert(existsSync(checkpoint), "no recovery copy exists before the fault");
       renameSync(chat, saved);
       mkdirSync(chat); // A real filesystem error, including when tests run as root.
@@ -123,6 +128,10 @@ contractCase(
       await t.flows.main.sendPrompt(session.client, session.sessionId, "Preserve the second execution too.");
       await t.tools.waitUntil(async () => (await snapshot(session)).items.filter((item) => item.type === "assistantMessage"
         && item.text.includes("checkpoint-tail")).length === 2, 15_000);
+      const secondId = (await snapshot(session)).items.filter(item => item.type === "assistantMessage" && item.text.includes("checkpoint-tail")).at(-1)!.id;
+      // The stream is visible before the periodic checkpoint is durable.
+      // Stop at independently witnessed disk state, never a scheduling sleep.
+      await t.tools.waitUntil(() => containsSavedAnswer(chat, firstId) && containsSavedAnswer(checkpoint, secondId), 15_000);
       session.client.close(); session.daemon.stop();
       for (let i = 0; i < 2; i += 1) {
         const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -130,7 +139,8 @@ contractCase(
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: session.sessionId } });
         const kept = reply?.type === "snapshot" ? reply.data.items.filter((item) => item.type === "assistantMessage"
           && item.text.includes("checkpoint-prefix") && item.text.includes("checkpoint-tail")) : [];
-        t.assertions.assert(kept.length === 2, `recovery ${i + 1} lost or duplicated an execution after an append failure`);
+        t.assertions.assert(kept.length === 2 && new Set(kept.map(item => item.id)).size === 2
+          && kept.some(item => item.id === firstId) && kept.some(item => item.id === secondId), `recovery ${i + 1} lost or duplicated an execution after an append failure`);
         opened.client.close(); opened.daemon.stop();
       }
     } finally {

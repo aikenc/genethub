@@ -2508,7 +2508,7 @@ describe("renaming a workspace", () => {
 });
 
 describe("removing a workspace registration", () => {
-  it("drops its local navigation state while preserving historical sessions", async () => {
+  it("drops removed-project navigation and cached rows while retaining the other project", async () => {
     const first = {
       id: "w1",
       name: "first",
@@ -2557,7 +2557,9 @@ describe("removing a workspace registration", () => {
     await useWorkbench.getState().removeWorkspace("w1");
 
     expect(useWorkbench.getState().workspaces).toEqual([second]);
-    expect(useWorkbench.getState().sessions).toEqual([SESSION, other]);
+    // Removing registration clears presentation caches; durable history is
+    // independently exercised through the real daemon/browser removal case.
+    expect(useWorkbench.getState().sessions).toEqual([other]);
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
     expect(unsubscribe).toHaveBeenCalledWith("s1");
