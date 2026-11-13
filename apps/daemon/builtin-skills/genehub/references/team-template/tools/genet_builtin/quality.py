@@ -491,6 +491,42 @@ def task_trees(tasks, goal_tasks, controls, native, end, intents=(), log=()):
     return result
 
 
+def session_routes(team, intents, tasks, pending, end):
+    """Creation identity outlives a rolling indicator sample.
+
+    Only matching durable source receipts bind a Session to its machine. A
+    later requester or current role membership does not relocate that Session.
+    Conflicting creation receipts are unknown; never probe peers by Session ID.
+    """
+    routes, conflicts = {}, set()
+    for intent in intents:
+        request = intent.get('request') or {}
+        sid, operation = intent.get('sessionId'), intent.get('operationId')
+        created = intent.get('createdAtMs')
+        if (not isinstance(sid, str) or not team.SESSION_ID.fullmatch(sid)
+                or not operation or request.get('taskId') not in tasks
+                or not number(created) or created >= end):
+            continue
+        binding = intent.get('pending') or pending.get(sid, {})
+        if binding.get('sessionId') != sid or binding.get('operationId') != operation:
+            continue
+        machine = request.get('machine')
+        remote = binding.get('remoteDispatch') or {}
+        if machine:
+            if (not isinstance(machine, str) or remote.get('id') != operation
+                    or (remote.get('target') or {}).get('machineId') != machine):
+                continue
+        elif remote:
+            continue
+        else:
+            machine = None
+        if sid in routes and routes[sid] != machine:
+            conflicts.add(sid)
+        else:
+            routes[sid] = machine
+    return routes, conflicts
+
+
 def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     state = Path(root)/'.genethub/team'
     store = state/'quality'
@@ -637,6 +673,15 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                 sid = person['sessionId']
                 wanted.setdefault(sid, person.get('machine'))
                 history_starts[sid] = min(history_starts.get(sid, metric_start), task['createdAtMs'])
+    # Filter samples above, then resolve only still-needed Session identities
+    # from all original receipts, including completed contributions outside24h.
+    routes, conflicts = session_routes(team, intents, tasks, pending, end)
+    for sid in list(wanted):
+        if sid in conflicts:
+            issues.append({'kind':'native-route-conflict', 'sessionId':sid})
+            del wanted[sid]  # Neither a peer nor a cached history can settle it.
+        elif sid in routes:
+            wanted[sid] = routes[sid]
     native, platforms, processes = {}, {}, {}
     for machine in sorted(set(wanted.values()),key=lambda x:x or ""):
         try:
