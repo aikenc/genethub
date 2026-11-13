@@ -119,7 +119,8 @@ async function page(port:number, accept:(page:Target)=>boolean):Promise<Target> 
   }
   throw new Error(`WebView2 navigation timed out: ${last}`);
 }
-async function evaluate<T>(target:Target,expression:string):Promise<T> {
+class DocumentNotReady extends Error {}
+async function evaluate<T>(target:Target,expression:string,phase:"offline-readiness"|"remote-readiness"|"remote-sdk"):Promise<T> {
   const ws=new WebSocket(target.webSocketDebuggerUrl);
   try {
     await new Promise<void>((ok,fail)=>{ws.addEventListener("open",()=>ok(),{once:true});ws.addEventListener("error",fail,{once:true});});
@@ -128,7 +129,14 @@ async function evaluate<T>(target:Target,expression:string):Promise<T> {
       ws.addEventListener("message",event=>{
         const r=JSON.parse(String(event.data)); if(r.id!==1)return;
         clearTimeout(timer);
-        if(r.error||r.result.exceptionDetails)fail(new Error("CDP page expression failed; URL credentials omitted"));
+        if(r.error||r.result?.exceptionDetails) {
+          const detail=String(r.error?.message??r.result?.exceptionDetails?.exception?.description??r.result?.exceptionDetails?.text??"unknown").split("\n")[0]!;
+          // A target URL may be visible while its document context is being
+          // replaced. Only DOM-readiness observations may wait for that context;
+          // the SDK invocation and all behavioral assertions still execute once.
+          if(phase!=="remote-sdk" && /(?:cannot find.*context|context.*(?:destroyed|not found|not available))/i.test(detail)) fail(new DocumentNotReady(`${phase}: document context not ready`));
+          else fail(new Error(`${phase}: ${detail.replace(/(?:https?|tauri):[^\s"'<>]+/g,"[url]").slice(0,250)}`));
+        }
         else ok(r.result.result.value);
       });
       ws.send(JSON.stringify({id:1,method:"Runtime.evaluate",params:{expression,returnByValue:true,awaitPromise:true}}));
@@ -156,13 +164,14 @@ try {
   await close(reservation);reservation=undefined;
   launch(port,apiOrigin);
   const boot=await page(port,p=>p.url.startsWith("http://tauri.localhost")||p.url.startsWith("tauri://"));
-  let state:{status:string;global:boolean}|undefined;
+  let state:{status:string;global:boolean;ready:string}|undefined;
   for(let attempt=0;attempt<40;attempt++){
-  state=await evaluate<{status:string;global:boolean}>(boot,"({status:document.getElementById('status')?.textContent??'',global:!!globalThis.__TAURI__})");
-  if(/官网暂时无法访问/.test(state.status))break; await pause(250);
+    try { state=await evaluate<{status:string;global:boolean;ready:string}>(boot,"({status:document.getElementById('status')?.textContent??'',global:!!globalThis.__TAURI__,ready:document.readyState})","offline-readiness"); }
+    catch(error) { if(!(error instanceof DocumentNotReady))throw error;state=undefined; }
+    if(state?.ready==="complete" && /官网暂时无法访问/.test(state.status))break; await pause(250);
   }
   check(state,"Offline boot document did not render");
-  check(/官网暂时无法访问/.test(state.status) && !state.global,`Offline boot page is blank or exposes native globals: ${JSON.stringify(state)}`);
+  check(state.ready==="complete" && /官网暂时无法访问/.test(state.status) && !state.global,`Offline boot page is blank or exposes native globals: ${JSON.stringify(state)}`);
   const rows=remember();
   const endpointFile=dataRoots.map(root=>join(root,"GeneHub-local/endpoint.json")).find(existsSync);
   check(endpointFile,"The isolated native daemon did not publish its endpoint");
@@ -183,14 +192,15 @@ try {
   // The same real shell must recover on its own ordinary route retry. No
   // debugger navigation or synthesized product directive participates.
   const remote=await page(port,p=>{const u=new URL(p.url);return u.origin===webOrigin&&u.pathname==="/setup";});
-  let rendered:{origin:string;path:string;marker:string}|undefined;
+  let rendered:{origin:string;path:string;marker:string;ready:string}|undefined;
   for(let attempt=0;attempt<40;attempt++){
-    rendered=await evaluate<{origin:string;path:string;marker:string}>(remote,"({origin:location.origin,path:location.pathname,marker:document.getElementById('remote')?.textContent??''})");
-    if(rendered.origin===webOrigin && rendered.path==="/setup" && rendered.marker==="remote")break;
+    try { rendered=await evaluate<{origin:string;path:string;marker:string;ready:string}>(remote,"({origin:location.origin,path:location.pathname,marker:document.getElementById('remote')?.textContent??'',ready:document.readyState})","remote-readiness"); }
+    catch(error) { if(!(error instanceof DocumentNotReady))throw error;rendered=undefined; }
+    if(rendered?.ready==="complete" && rendered.origin===webOrigin && rendered.path==="/setup" && rendered.marker==="remote")break;
     await pause(250);
   }
-  check(rendered?.origin===webOrigin && rendered.path==="/setup" && rendered.marker==="remote","Automatic route did not render the real remote document");
-  const remoteState=await evaluate<{origin:string;path:string;marker:string;global:boolean;denied:boolean}>(remote,`(async()=>{const sdk=await import('${webOrigin}/sdk/app.js');let denied=false;try{await sdk.getIdentifier()}catch{denied=true}return {origin:location.origin,path:location.pathname,marker:document.getElementById('remote')?.textContent,global:!!globalThis.__TAURI__,denied}})()`);
+  check(rendered?.ready==="complete" && rendered.origin===webOrigin && rendered.path==="/setup" && rendered.marker==="remote","Automatic route did not render the real remote document");
+  const remoteState=await evaluate<{origin:string;path:string;marker:string;global:boolean;denied:boolean}>(remote,`(async()=>{const sdk=await import('${webOrigin}/sdk/app.js');if(typeof sdk.getIdentifier!=='function')throw new Error('Public SDK getIdentifier missing');let denied=false;try{await sdk.getIdentifier()}catch{denied=true}return {origin:location.origin,path:location.pathname,marker:document.getElementById('remote')?.textContent,global:!!globalThis.__TAURI__,denied}})()`,"remote-sdk");
   check(remoteState.origin===webOrigin && remoteState.path==="/setup" && remoteState.marker==="remote" && !remoteState.global && remoteState.denied,"Remote document rendered incorrectly or public Tauri API succeeded");
   proof={schema:"genehub.windows-webview-proof.v1",sourceSha:expectedSource,cloudSourceSha:expectedCloudSource,cloudManifestSha256:hash(cloudManifestFile),manifestSha256:hash(manifestFile),offlineBoot:true,nativeDaemon:true,remoteDocument:true,publicNativeReadRejected:true};
 } finally {

@@ -30,7 +30,7 @@ defineE2e({
   const cloudSource=spawnSync("git",["-C",cloudRoot,"rev-parse","HEAD"],{encoding:"utf8"});
   t.assertions.assert(cloudSource.status===0 && /^[a-f0-9]{40}\s*$/.test(cloudSource.stdout),"Cannot bind Windows Hub source");
   const cloudSourceSha=cloudSource.stdout.trim();
-  const helperSha = createHash("sha256").update(readFileSync(path.join(t.openRoot, "testing/e2e/desktop/windows-webview.probe.ts"))).digest("hex");
+  const helperSha = createHash("sha256").update(readFileSync(path.join(t.openRoot, "testing/e2e/desktop/windows-webview.probe.ts"), "utf8").replace(/\r\n/g, "\n")).digest("hex");
   // The caller snapshot is transported in memory by the existing public
   // driver. The remote process receives only the explicit nonsecret context.
   const script = `import json,pathlib,subprocess,hashlib
@@ -41,7 +41,7 @@ def wsl(p):
  if len(p)<3 or p[1]!=':' or p[2] not in ['/', chr(92)]: raise ValueError('Explicit native Windows path required')
  return pathlib.Path('/mnt/'+p[0].lower()+p[2:].replace(chr(92),'/'))
 root=wsl(c['openRoot']); helper=root/'testing/e2e/desktop/windows-webview.probe.ts'; manifest=wsl(c['manifest'])
-assert hashlib.sha256(helper.read_bytes()).hexdigest()==${JSON.stringify(helperSha)}, 'Remote helper differs from candidate'
+assert hashlib.sha256(helper.read_bytes().replace(bytes([13,10]),bytes([10]))).hexdigest()==${JSON.stringify(helperSha)}, 'Remote helper differs from candidate'
 assert hashlib.sha256(manifest.read_bytes()).hexdigest()==c['manifestSha256'], 'Native manifest changed'
 assert hashlib.sha256(wsl(c['cloudManifest']).read_bytes()).hexdigest()==c['cloudManifestSha256'], 'Native Cloud manifest changed'
 assert subprocess.check_output([c['gitBinary'],'-C',c['openRoot'],'rev-parse','HEAD'],text=True).strip()==source, 'Native source mismatch'

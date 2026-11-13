@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client, type WebSocketLike } from "@genehub/workbench/client";
 import { WebSocket } from "ws";
-import { defineSpecialty, daemonEndpoint, startFaultLink, type CaseContext, BlockedError } from "../../framework/public.ts";
+import { defineSpecialty, daemonEndpoint, localGenetCli, startFaultLink, type CaseContext, BlockedError } from "../../framework/public.ts";
 
 const meta = (name: string, title: string, oracle: string, duration = 20000) => ({
   id: `specialty.multichannel.${name}`, title, oracle,
@@ -288,16 +288,56 @@ defineSpecialty(meta("slow-stream-cancel-fairness", "An unread infinite stream i
   });
 });
 
-defineSpecialty(meta("connection-churn-resources", "Repeated tab churn leaves bounded daemon resources",
-  "After ten warm-up clients and sixty measured public-client connect/RPC/close cycles, the same daemon has at most 64 MiB extra RSS and 8 extra file descriptors", 90000), async t => {
+defineSpecialty({ ...meta("connection-churn-resources", "Repeated tab churn leaves bounded daemon resources",
+  "After ten warm-up clients and sixty measured public-client connect/RPC/close cycles, whole-daemon samples between publicly witnessed timer-hook runs have at most 64 MiB extra RSS and 8 extra file descriptors; automatic timers remain enabled", 90000),
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
+}, async t => {
   if (process.platform !== "linux") throw new BlockedError("RSS and descriptor oracle requires Linux procfs");
   await withWorkspace(t, async o => {
     const pid = daemonEndpoint(o.daemon).localServerProof.pid;
+    const scopes = await o.client.call({ type: "workspace.list" });
+    t.assertions.assert(scopes?.type === "workspaces", "resource sample could not discover built-in automation");
+    if (scopes?.type !== "workspaces") throw new Error("workspace list did not return workspaces");
+    const builtin = scopes.data.filter(workspace => workspace.builtin).map(workspace => workspace.id);
+    const cli = localGenetCli(t.openRoot, t.env);
+    type HookObservation = { workspace: string; id: string; enabled: boolean; running: boolean; runs: number };
+    const hooks = (): HookObservation[] => builtin.flatMap(workspace => {
+      const reply = cli(["hook", "list", "--workspace", workspace]);
+      const rows = reply.envelope?.data?.hooks;
+      if (reply.code !== 0 || reply.envelope?.type !== "hook.list" || !Array.isArray(rows)) throw new Error("public hook state unavailable for resource attribution");
+      return rows.map((row: { id: string; enabled: boolean; running: boolean; runs: number }) => {
+        if (typeof row.id !== "string" || typeof row.enabled !== "boolean" || typeof row.running !== "boolean" || !Number.isInteger(row.runs)) throw new Error("public hook state malformed");
+        return { workspace, id: row.id, enabled: row.enabled, running: row.running, runs: row.runs };
+      });
+    }).sort((a, b) => `${a.workspace}/${a.id}`.localeCompare(`${b.workspace}/${b.id}`));
     const sample = () => {
       const status = readFileSync(`/proc/${pid}/status`, "utf8");
       const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
       if (!match) throw new BlockedError("daemon RSS is not observable");
-      return { rssKiB: Number(match[1]), fds: readdirSync(`/proc/${pid}/fd`).length };
+      const fds = readdirSync(`/proc/${pid}/fd`), kinds: Record<string, number> = {};
+      for (const fd of fds) {
+        let target: string;
+        try { target = readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { target = "vanished"; }
+        const kind = target.startsWith("socket:") ? "socket" : target.startsWith("pipe:") ? "pipe" : target.startsWith("anon_inode:") ? target : "file";
+        kinds[kind] = (kinds[kind] ?? 0) + 1;
+      }
+      return { rssKiB: Number(match[1]), fds: fds.length, kinds };
+    };
+    const quietSample = async () => {
+      let observed: (ReturnType<typeof sample> & { hooks: HookObservation[] }) | undefined;
+      // The mandatory admin timer runs during churn. Compare whole-process
+      // resources only between publicly witnessed hook runs; do not count a
+      // live hook's pipes/locks as retained connection resources. No descriptor
+      // is exempted, and neither timers nor product behavior are changed.
+      await t.tools.waitUntil(() => {
+        const first = hooks(), before = sample(), second = hooks(), after = sample();
+        if (first.every(row => !row.running) && second.every(row => !row.running)
+          && JSON.stringify(first) === JSON.stringify(second) && before.fds === after.fds) {
+          observed = { ...after, hooks: second }; return true;
+        }
+        return false;
+      }, 8000);
+      return observed!;
     };
     const cycle = async () => {
       const peer = await connect(t, o);
@@ -306,10 +346,11 @@ defineSpecialty(meta("connection-churn-resources", "Repeated tab churn leaves bo
       await new Promise(r => setTimeout(r, 100));
     };
     for (let i = 0; i < 10; i++) await cycle();
-    const before = sample();
+    const before = await quietSample();
     for (let i = 0; i < 60; i++) await cycle();
     await new Promise(r => setTimeout(r, 1500));
-    const after = sample();
+    const after = await quietSample();
+    t.note(JSON.stringify({ sample: "public hook idle window", fdKindsBefore: before.kinds, fdKindsAfter: after.kinds, hooksBefore: before.hooks, hooksAfter: after.hooks }));
     t.note(`cycles=60 rssGrowthKiB=${after.rssKiB - before.rssKiB} fdGrowth=${after.fds - before.fds}`);
     t.assertions.assert(after.rssKiB - before.rssKiB <= 64 * 1024 && after.fds - before.fds <= 8, "connection churn retained excessive daemon resources");
   });

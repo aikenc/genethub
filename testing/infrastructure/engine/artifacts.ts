@@ -20,6 +20,7 @@ export const HOST = "genehub-host-local";
 export const DAEMON_COMPONENT = "genehub_guest.wasm";
 export const DAEMON_TESTS = "genet-daemon-lib-tests";
 export const DAEMON_DEBUG_TESTS = "genet-daemon-lib-tests-debug";
+export const CAPTURE_TESTS = "genehub-capture-native-tests";
 // Cargo owns hashed test executable names. Only a successful build's JSON
 // compiler-artifact record can establish which executable belongs to this run.
 const preparedTests = new Map<string, string>();
@@ -41,19 +42,24 @@ interface ArtifactSpec {
    * builds the `iterate` profile because that is what they try first.
    */
   build: string[];
-  testExecutable?: boolean;
+  testExecutable?: { name: string; kind: "lib" | "bin" };
 }
 
 const SPECS: Record<string, ArtifactSpec> = {
   [DAEMON_TESTS]: {
     names: [], profileDir: () => ["iterate", "deps"], overrides: [],
     build: ["test", "--locked", "--profile", "iterate", "-p", "genet-daemon", "--lib", "--no-run", "--message-format=json"],
-    testExecutable: true,
+    testExecutable: { name: "genet_daemon", kind: "lib" },
   },
   [DAEMON_DEBUG_TESTS]: {
     names: [], profileDir: () => ["debug", "deps"], overrides: [],
     build: ["test", "--locked", "-p", "genet-daemon", "--lib", "--no-run", "--message-format=json"],
-    testExecutable: true,
+    testExecutable: { name: "genet_daemon", kind: "lib" },
+  },
+  [CAPTURE_TESTS]: {
+    names: [], profileDir: () => ["capture-native-tests", "debug", "deps"], overrides: [],
+    build: ["test", "--locked", "--manifest-path", "apps/capture/Cargo.toml", "--target-dir", "target/capture-native-tests", "--no-run", "--message-format=json"],
+    testExecutable: { name: "genehub-capture", kind: "bin" },
   },
   [GENET]: {
     names: ["genet-local", "genet-dev", "genet-beta", "genet"],
@@ -196,18 +202,19 @@ export function ensureRuntimeArtifacts(
         });
         continue;
       }
-      if (spec(name).testExecutable) {
+      const owningTarget = spec(name).testExecutable;
+      if (owningTarget) {
         const executables = (built.stdout ?? "").split("\n").filter(Boolean).flatMap(line => {
           try {
             const row = JSON.parse(line);
             return row.reason === "compiler-artifact" && row.profile?.test === true
-              && row.target?.name === "genet_daemon" && row.target?.kind?.includes("lib")
+              && row.target?.name === owningTarget.name && row.target?.kind?.includes(owningTarget.kind)
               && typeof row.executable === "string" ? [row.executable as string] : [];
           } catch { return []; }
         });
         const selected = [...new Set(executables)];
         if (selected.length !== 1 || !path.isAbsolute(selected[0]!) || !fileAt(selected[0]!)) {
-          problems.push({name, detail: "Cargo did not identify exactly one existing owning-library test executable", buildCommand: artifact.buildCommand});
+          problems.push({name, detail: "Cargo did not identify exactly one existing owning test executable", buildCommand: artifact.buildCommand});
           continue;
         }
         preparedTests.set(testKey(openRoot, name), path.resolve(selected[0]!));
