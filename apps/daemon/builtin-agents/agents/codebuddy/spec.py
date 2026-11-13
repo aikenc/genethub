@@ -24,6 +24,10 @@ CODEBUDDY = Flavor(
     # Without it the bypass flag still asks about high-risk tools.
     sandbox_env=("CODEBUDDY_IS_SANDBOX", "1"),
     project_encoding="codebuddy",
+    # On a cold context-cache resume, CBC's pre-message summary can stream
+    # internally for minutes before its first live frame. The 90s fresh-start
+    # guard otherwise kills productive compaction and repeats it on every retry.
+    continuation_first_frame_timeout=900.0,
 )
 
 API_KEY_VARIABLE = "CODEBUDDY_API_KEY"

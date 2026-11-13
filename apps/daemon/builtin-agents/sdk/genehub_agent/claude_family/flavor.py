@@ -48,6 +48,10 @@ class Flavor:
     home_dirs: Tuple[Tuple[str, ...], ...] = ((".local", "bin"),)
     help_args: Tuple[str, ...] = ("--help",)
     description_en: str = ""
+    # Some CLIs summarize an existing conversation before emitting any live
+    # stream-json frame. Keep that continuation wait bounded independently of
+    # the ordinary first-prompt protection. None uses the shared default.
+    continuation_first_frame_timeout: Optional[float] = None
 
     # -- files ------------------------------------------------------------
 

@@ -501,6 +501,14 @@ class FamilySession(Session):
         if self.turn is not None:
             raise RuntimeError(f"{self.flavor.label} 还在处理上一轮")
         state = translate.TurnState(turn_id)
+        # Capture before the process starts: a fresh init may save a new id
+        # before the watch runs, but that does not make its first prompt a
+        # continuation. A reused live process can also prepare old context.
+        first_frame_timeout = (
+            self.flavor.continuation_first_frame_timeout
+            if self.session_id and self.flavor.continuation_first_frame_timeout is not None
+            else FIRST_FRAME_TIMEOUT
+        )
         # Set before the first await: a Stop that lands while the process is
         # still starting ends this turn rather than being lost.
         self.turn = state
@@ -516,7 +524,9 @@ class FamilySession(Session):
             state.sent_at = time.monotonic()
             self.ctx.agent.log(f"{self.flavor.id} prompt written (turn {state.id})")
             self._stop_stall_watch()
-            self._stall = asyncio.ensure_future(self._stall_guard(state))
+            if first_frame_timeout != FIRST_FRAME_TIMEOUT:
+                self.ctx.agent.log(f"{self.flavor.id} continuation may prepare context before streaming; first live frame deadline {first_frame_timeout:g}s (turn {state.id})")
+            self._stall = asyncio.ensure_future(self._stall_guard(state, first_frame_timeout))
         except BaseException:
             if self.turn is state:
                 self.turn = None
@@ -546,12 +556,12 @@ class FamilySession(Session):
         if watchdog is not None and not watchdog.done() and watchdog is not asyncio.current_task():
             watchdog.cancel()
 
-    async def _stall_guard(self, state: translate.TurnState) -> None:
+    async def _stall_guard(self, state: translate.TurnState, timeout: float) -> None:
         """A prompt the CLI never answered. Long enough that a cold start and a
         queued first token fit inside it; after that the turn is ended rather
         than left open, so the person gets an error they can act on."""
         try:
-            await asyncio.sleep(FIRST_FRAME_TIMEOUT)
+            await asyncio.sleep(timeout)
         except asyncio.CancelledError:
             return
         if self.turn is not state:
@@ -565,7 +575,7 @@ class FamilySession(Session):
         self.turn = None
         self._stop_watchdog()
         self._drop_pending()
-        why = f"{self.flavor.label} 在 {FIRST_FRAME_TIMEOUT:g} 秒内没有任何回应，本轮已结束。可以重试，或换一个 Agent。"
+        why = f"{self.flavor.label} 在 {timeout:g} 秒内没有输出本轮响应，本轮已结束。可以重试，或换一个 Agent。"
         self.ctx.agent.log(why)
         self.process = None
         self.ctx.set_pid(None)
