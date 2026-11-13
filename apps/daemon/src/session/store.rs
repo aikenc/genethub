@@ -2654,6 +2654,35 @@ impl Store {
         let mut looked = Vec::new();
         for (projects, sessions) in registered {
             yield_wait += budget.checkpoint().await;
+            if scope.is_none() {
+                let cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                // Most registered homes are cold and have no work this tick.
+                // Avoid allocating a mutex and timed span for them. A due home
+                // still acquires its physical lock and replans after waiting;
+                // final generation/registry fences also cover skipped homes.
+                if cache.homes.get(&sessions).is_some_and(|home| {
+                    home.seen.owners == home_owners(&projects)
+                        && !home.listing.due(started)
+                        && !home.tombstones.due(started)
+                        && home
+                            .seen
+                            .sessions
+                            .iter()
+                            .filter(|id| !home.seen.deleted.contains(*id))
+                            .all(|id| {
+                                let path = sessions.join(id).join("meta.json");
+                                cache
+                                    .watches
+                                    .get(&path)
+                                    .is_some_and(|watch| !watch.due(started))
+                            })
+                }) {
+                    continue;
+                }
+            }
             let gate = {
                 let mut cache = self
                     .page_catalog
