@@ -1,7 +1,7 @@
 """Latest-only, resumable source upgrades; existing installer owns execution copies.
 
-Candidates are unregistered files, not Teams. Only a conflict or a failed
-regression becomes reflection work; an occupied/unknown safe point just waits.
+Candidates are unregistered files, not Teams. Conflicts, failed regression and
+source edits need reflection; an occupied/unknown execution safe point waits.
 """
 import hashlib
 import importlib.util
@@ -39,13 +39,27 @@ def store(t, root, row, status=None, **fields):
     if status:
         row['status'] = status
     t.write_json(str(location(t, root)), row)
-    if status in ('conflict', 'test-failure'):
-        # One signal for this exact candidate/cause. No success/wait messages.
-        t.add_note(root, {'kind': 'upgrade-' + status, 'from': 'platform',
+    source_changes = status == 'waiting-safe-point' and row.get('reason') == 'uncommitted-source-changes'
+    if status in ('conflict', 'test-failure') or source_changes:
+        # One signal for this exact candidate/cause. No success/transient wait messages.
+        # Source edits require an owner's decision, rather than a lock that
+        # becomes safe by waiting. Reuse the existing note lifecycle once per
+        # target: further WIP edits must not create another wake or auto-commit.
+        kind = 'source-changes' if source_changes else status
+        context = {k: row.get(k) for k in ('target', 'reason', 'conflictFiles', 'failedCommand',
+                                         'dirtyPaths', 'dirtyPathCount', 'dirtyPathsTruncated', 'reviewedBase')}
+        context['maintenanceArgv'] = [sys.executable, '-B',
+            str(Path(row.get('template') or t.template_dir(root))/'tools/run.py'),
+            '--team-root', str(Path(root).resolve()), 'upgrade']
+        if row.get('reviewedBase'):
+            context['maintenanceArgv'] += ['--base', row['reviewedBase']]
+        # Existing Teams already recognize upgrade as urgent; a new note kind
+        # would itself require adoption before it could wake their old hook.
+        t.add_note(root, {'kind': 'upgrade' if source_changes else 'upgrade-' + kind, 'from': 'platform',
                          'session': None, 'quote': '', 'context': json.dumps(
-                             {k: row.get(k) for k in ('target', 'reason', 'conflictFiles', 'failedCommand')},
-                             ensure_ascii=False), 'text': '平台升级需要处理：' + status},
-                   'upgrade', row['target'], status, row.get('reason', ''))
+                             context, ensure_ascii=False),
+                         'text': '平台升级等待未提交源修改处理' if source_changes else '平台升级需要处理：' + status},
+                   'upgrade', row['target'], kind, row.get('reason', ''))
     return row
 
 
@@ -184,8 +198,18 @@ def schedule(t, root, base=None):
             return store(t, root, row, 'conflict', reason='missing-platform-baseline', conflictFiles=[])
         if not clean(t, root):
             waiting = previous if previous.get('sourceApplied') and previous.get('target') == target else dict(schema='team-upgrade/1', target=target, head=head)
+            changes = iter(git(t, root, 'status', '--porcelain', '-z').decode().split('\0'))
+            paths = []
+            for entry in changes:
+                if not entry:
+                    continue
+                paths.append(entry[3:])
+                if 'R' in entry[:2] or 'C' in entry[:2]:
+                    next(changes, None)  # porcelain -z names the old path separately
             return store(t, root, waiting,
-                         'waiting-safe-point', reason='uncommitted-source-changes')
+                         'waiting-safe-point', reason='uncommitted-source-changes', template=template,
+                         dirtyPaths=[x[:512] for x in paths[:64]], dirtyPathCount=len(paths),
+                         dirtyPathsTruncated=len(paths) > 64 or any(len(x) > 512 for x in paths))
         # A choice belongs only to this platform target, never to future
         # releases. Ordinary timer retries may resume the exact prior choice.
         if base is None and previous.get('target') == target:
@@ -249,8 +273,12 @@ def merge_tree(t, root, row, directory):
     row['mergeBase'] = base
     local = set(git(t, root, 'diff', '--name-only', '-z', base, row['head']).decode().split('\0'))
     changed = set(git(t, root, 'diff', '--name-only', '-z', base, platform).decode().split('\0'))
+    different = set(git(t, root, 'diff', '--name-only', '-z', row['head'], platform).decode().split('\0'))
     builtin = ('tools/genet_builtin/', 'skills/genet_builtin/')
-    risks = sorted(p for p in local & changed if p.startswith(builtin) or p == 'tools/run.py')
+    # Exact blob+mode equality is already integrated, not a semantic merge.
+    # Different overlapping builtin patches remain explicit review work even
+    # when Git could combine their text without conflict markers.
+    risks = sorted(p for p in local & changed & different if p.startswith(builtin) or p == 'tools/run.py')
     if risks:
         raise Conflict(risks, 'local-builtin-patch-overlaps-platform; review protocol semantics before merging')
     # Old Git supports this read-only preflight, but not --write-tree.

@@ -2,7 +2,7 @@
 
 平台升级由 `python3 tools/run.py upgrade` 程序完成；timer 自动选择最新版，不逐版派单，也不需要升级通知消息。用 `upgrade --status` 查看结果：`adopted`（已采用）、`conflict`（有冲突）、`test-failure`（测试失败）、`waiting-safe-point`（等待安全点，含候选验证及执行端安装中）。
 
-程序先检查三方合并和本地内置补丁，在未注册的独立候选里跑本队回归、完整构建与 verify；源目录有未提交改动或验证期间变化时等待，不覆盖。兼容的远端安装复用独立版本目录，旧会话、执行目录与原回执继续保留。只有冲突和测试失败会唤醒反思，已采用或等待都不新增巡查报告。需要自定义回归时在 `agent-space.genet.json` 的 `team.settings.upgrade.regressionCommands` 写参数数组列表；默认运行已有的 `tools/tests/test_*.py`，并核对实际 Class/API/binding 和构建制品。
+程序先检查三方合并和本地内置补丁，在未注册的独立候选里跑本队回归、完整构建与 verify；源目录有未提交改动或验证期间变化时等待，不覆盖。两边文件的内容和模式完全相同时不算冲突；不同的内置补丁仍需审阅。兼容的远端安装复用独立版本目录，旧会话、执行目录与原回执继续保留。冲突和测试失败会唤醒反思；未提交源修改阻止新目标升级时，也按目标生成一次既有留言，列出修改路径及当前公共维护入口，后续编辑不重复唤醒，不自动提交或清除修改。短暂执行安全点、候选验证及已采用状态不新增巡查报告。需要自定义回归时在 `agent-space.genet.json` 的 `team.settings.upgrade.regressionCommands` 写参数数组列表；默认运行已有的 `tools/tests/test_*.py`，并核对实际 Class/API/binding 和构建制品。
 
 反思只处理结果里的冲突文件或失败命令：平台机制问题反馈平台，业务规则提取到项目 Class / Skill；修正并提交后程序自动重试。采用只看自然卡的 `versions.teamTemplate`，不能把 platform 比较基线或 daemon 安装版本当作采用；自定义模板来源没有可验证的发布号时保留未知。以下内容仅在解决冲突、首次旧式迁移时按需查阅，不再每版手工执行。
 
