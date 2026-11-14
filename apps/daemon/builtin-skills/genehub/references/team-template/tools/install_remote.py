@@ -170,11 +170,22 @@ def accept(config):
                         or source_route.get('source')!=config['source']
                         or any(source_route.get(k)!=config['returnTo'].get(k) for k in ('machineId','workspaceId'))):
                     raise RuntimeError('target-local settings have no matching source ownership receipt')
-                # Transfer only opaque target-local preferences. Never clone
-                # Sessions, dispatches, business data, worktrees or old results.
-                for relative in [Path('.genethub/open.env')]+[Path('spaces')/role/'.genethub/open.env' for role in roles]:
+                # Preserve only bounded local preferences and original GPU registration.
+                # Historical probe bytes are not a fresh rendering/performance claim.
+                # Never clone Sessions, dispatches, business data or old results.
+                local_paths = [Path('.genethub')/name for name in ('open.env', 'gpu-host.json')]
+                local_paths += [Path('spaces')/role/'.genethub'/name for role in roles
+                                for name in ('open.env', 'gpu-host.json')]
+                target_machine = None
+                for relative in local_paths:
                     preference=prior_root/relative
-                    if preference.is_symlink():raise RuntimeError('target-local preference alias retained; no new runtime installed')
+                    if any(part.is_symlink() for part in [preference, *preference.parents] if part != prior_root and prior_root in part.parents):
+                        raise RuntimeError('target-local preference alias retained; no new runtime installed')
+                    if preference.exists() and relative.name == 'gpu-host.json':
+                        target_machine = target_machine or (team.genet('context').get('daemon') or {}).get('machineId')
+                        members = installed_members(prior_install)
+                        if not target_machine or not members or any(m.get('machineId') != target_machine for m in members):
+                            raise RuntimeError('target-local GPU registration has no matching native machine ownership')
                     if preference.exists():
                         if not preference.is_file() or preference.stat().st_size>131072:
                             raise RuntimeError('target-local preferences must be bounded regular files')
