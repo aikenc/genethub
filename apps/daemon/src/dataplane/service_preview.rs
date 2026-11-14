@@ -358,7 +358,17 @@ async fn read_process_snapshot(
     }
     rows.retain(|r| workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w)));
     let ownership_ms = ownership_started.elapsed().as_millis() as u64;
-    let finish = |rows: Vec<genehub_proto::BackgroundProcess>| {
+    #[derive(Default)]
+    struct PreviewTiming {
+        registry_ms: u64,
+        mapping_ms: u64,
+        probe_ms: u64,
+        tree_ms: u64,
+        registrations: usize,
+        runs: usize,
+    }
+    let mut timing = PreviewTiming::default();
+    let finish = |rows: Vec<genehub_proto::BackgroundProcess>, timing: &PreviewTiming| {
         let total_ms = started.elapsed().as_millis() as u64;
         if total_ms >= 1000 {
             tracing::warn!(
@@ -368,6 +378,12 @@ async fn read_process_snapshot(
                 census_ms,
                 ownership_ms,
                 preview_ms = total_ms.saturating_sub(census_ms + ownership_ms),
+                registry_ms = timing.registry_ms,
+                mapping_ms = timing.mapping_ms,
+                probe_ms = timing.probe_ms,
+                tree_ms = timing.tree_ms,
+                registrations = timing.registrations,
+                runs = timing.runs,
                 total_ms,
                 unique_owners = owners.len(),
                 processes = rows.len(),
@@ -377,11 +393,12 @@ async fn read_process_snapshot(
         rows
     };
     if !full {
-        return Ok(finish(rows));
+        return Ok(finish(rows, &timing));
     }
+    let registry_started = std::time::Instant::now();
     let directory = state.paths.root.join("service-previews");
     if !directory.exists() {
-        return Ok(finish(rows));
+        return Ok(finish(rows, &timing));
     }
     crate::config::reject_link_or_reparse(
         &directory,
@@ -422,9 +439,12 @@ async fn read_process_snapshot(
             }
         }
     }
+    timing.registry_ms = registry_started.elapsed().as_millis() as u64;
+    timing.registrations = registrations.len();
     if registrations.is_empty() {
-        return Ok(finish(rows));
+        return Ok(finish(rows, &timing));
     }
+    let mapping_started = std::time::Instant::now();
     let mut candidates: Vec<(Run, Vec<(String, String)>)> = Vec::new();
     let mut budget = crate::blocking::WorkBudget::new();
     // Inventory needs registered project roots, not preview-menu and Space
@@ -475,6 +495,9 @@ async fn read_process_snapshot(
             }
         }
     }
+    timing.mapping_ms = mapping_started.elapsed().as_millis() as u64;
+    timing.runs = candidates.len();
+    let probe_started = std::time::Instant::now();
     let mut probes =
         futures_util::stream::iter(candidates.into_iter().map(|(run, aliases)| async move {
             let reachable = tokio::time::timeout(Duration::from_secs(1), async {
@@ -495,8 +518,11 @@ async fn read_process_snapshot(
             }),
         );
     }
+    timing.probe_ms = probe_started.elapsed().as_millis() as u64;
     let roots: Vec<u32> = completed.iter().filter(|r| r.3).map(|r| r.2.pid).collect();
+    let tree_started = std::time::Instant::now();
     let trees = crate::processes::registered_trees(&roots).await;
+    timing.tree_ms = tree_started.elapsed().as_millis() as u64;
     for (workspace_id, entry_path, run, reachable) in completed {
         if reachable {
             for process in trees.get(&run.pid).into_iter().flatten() {
@@ -534,7 +560,7 @@ async fn read_process_snapshot(
             });
         }
     }
-    Ok(finish(rows))
+    Ok(finish(rows, &timing))
 }
 
 pub(crate) async fn stop_registered(
