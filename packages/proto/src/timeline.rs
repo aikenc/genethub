@@ -330,6 +330,30 @@ pub struct InputOrigin {
     pub session_id: String,
 }
 
+/// The authenticated response path, kept distinct from rendered answer text.
+/// Attribution, not an additional permission boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "source", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum InteractionResponder {
+    User,
+    Agent { origin: InputOrigin },
+}
+
+/// Durable structured interaction evidence on the existing answer item.
+/// Missing in legacy history: absence must not be inferred as user acceptance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InteractionResponse {
+    pub request_id: String,
+    pub kind: crate::event::PermissionRequestKind,
+    pub outcome: crate::event::PermissionOutcome,
+    #[ts(type = "number")]
+    pub decided_at_ms: i64,
+    pub responder: InteractionResponder,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -385,6 +409,9 @@ pub enum TimelineItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         origin: Option<InputOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        interaction_response: Option<InteractionResponse>,
     },
     #[serde(rename_all = "camelCase")]
     AssistantMessage {

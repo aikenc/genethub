@@ -418,6 +418,7 @@ mod tests {
 
     fn user(id: &str, text: &str) -> TimelineItem {
         TimelineItem::UserMessage {
+            interaction_response: None,
             origin: None,
             id: id.into(),
             text: text.into(),

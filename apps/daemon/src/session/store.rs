@@ -140,6 +140,10 @@ pub struct HumanContinuation {
     pub request: PermissionRequest,
     pub outcome: genehub_proto::PermissionOutcome,
     pub decided_at_ms: i64,
+    /// Older decisions did not retain the responder. Never backfill them as
+    /// verified user decisions when replaying an interrupted continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responder: Option<genehub_proto::InteractionResponder>,
     #[serde(default)]
     pub grant_recorded: bool,
     #[serde(default)]
@@ -4434,6 +4438,7 @@ mod project_home_tests {
                 "w1",
                 "s1",
                 &[TimelineItem::UserMessage {
+                    interaction_response: None,
                     origin: None,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),

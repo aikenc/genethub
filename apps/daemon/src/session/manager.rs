@@ -14,14 +14,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use genehub_proto::{
     Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
-    HistoryCoverage, ImportContinuation, InputOrigin, ItemDelta, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability,
-    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionAgentTarget,
-    SessionArtifactBundle, SessionArtifactFile, SessionArtifactUpload, SessionContext,
-    SessionEvent, SessionImportCandidate, SessionImportListing, SessionImportSource,
-    SessionInspection, SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage,
-    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator,
-    TurnErrorCode, TurnOutcome, TurnStats, Usage,
+    HistoryCoverage, ImportContinuation, InputOrigin, InteractionResponder, InteractionResponse,
+    ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind,
+    ProbeState, RetrievalCapability, RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk,
+    SequencedEvent, SessionAgentTarget, SessionArtifactBundle, SessionArtifactFile,
+    SessionArtifactUpload, SessionContext, SessionEvent, SessionImportCandidate,
+    SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
+    SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
+    SessionSummary, TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode, TurnOutcome, TurnStats,
+    Usage,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -3442,6 +3443,7 @@ impl SessionManager {
                 text: text.clone(),
                 attachments: attachments.clone(),
                 origin: origin.clone(),
+                interaction_response: None,
             };
             {
                 let mut items = live.items.lock().await;
@@ -4571,6 +4573,26 @@ impl SessionManager {
         outcome: PermissionOutcome,
         providers: &ProviderMap,
     ) -> Result<()> {
+        self.respond_permission_from(
+            session_id,
+            request_id,
+            outcome,
+            InteractionResponder::User,
+            providers,
+        )
+        .await
+    }
+
+    /// Record the actual authenticated response source. The original entry
+    /// remains for trusted internal user paths (such as provider submission).
+    pub async fn respond_permission_from(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        outcome: PermissionOutcome,
+        responder: InteractionResponder,
+        providers: &ProviderMap,
+    ) -> Result<()> {
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         let previous = live.meta.lock().await.human_continuation.clone();
@@ -4616,6 +4638,7 @@ impl SessionManager {
                 request: request.clone(),
                 outcome: outcome.clone(),
                 decided_at_ms: now_ms(),
+                responder: Some(responder),
                 grant_recorded: false,
                 completed: false,
             };
@@ -4661,13 +4684,14 @@ impl SessionManager {
             return Ok(());
         }
 
-        let continuation = continuation_for(&request, &outcome)?;
+        let continuation = attributed_continuation(&request, &outcome, Some(&responder))?;
         self.record_human_response(
             &live,
             &HumanContinuation {
                 request: request.clone(),
                 outcome: outcome.clone(),
                 decided_at_ms: now_ms(),
+                responder: Some(responder),
                 grant_recorded: false,
                 completed: false,
             },
@@ -4739,7 +4763,20 @@ impl SessionManager {
             id: format!("u_answer_{:x}", Sha256::digest(request.id.as_bytes())),
             text: format!("回答「{}」\n{}", request.title, body),
             attachments: Vec::new(),
-            origin: None,
+            origin: match &decision.responder {
+                Some(InteractionResponder::Agent { origin }) => Some(origin.clone()),
+                _ => None,
+            },
+            interaction_response: decision
+                .responder
+                .clone()
+                .map(|responder| InteractionResponse {
+                    request_id: request.id.clone(),
+                    kind: request.kind,
+                    outcome: decision.outcome.clone(),
+                    decided_at_ms: decision.decided_at_ms,
+                    responder,
+                }),
         };
         let meta = live.meta.lock().await.clone();
         let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
@@ -4967,7 +5004,11 @@ impl SessionManager {
             self.store.save_meta(&next)?;
             *meta = next;
         }
-        if let Some(continuation) = continuation_for(&decision.request, &decision.outcome)? {
+        if let Some(continuation) = attributed_continuation(
+            &decision.request,
+            &decision.outcome,
+            decision.responder.as_ref(),
+        )? {
             Ok(Some((decision.request.id, continuation)))
         } else {
             finish_human_continuation(live, &self.store, &decision.request.id).await?;
@@ -6520,6 +6561,31 @@ const REFRESH_EXPIRED_PLAN: &str = "refreshPlan";
 struct Continuation {
     elevated: bool,
     prompt: String,
+}
+
+fn attributed_continuation(
+    request: &PermissionRequest,
+    outcome: &PermissionOutcome,
+    responder: Option<&InteractionResponder>,
+) -> Result<Option<Continuation>> {
+    let mut continuation = continuation_for(request, outcome)?;
+    if request.kind == PermissionRequestKind::Question {
+        if let Some(value) = &mut continuation {
+            let source = match responder {
+                Some(InteractionResponder::User) => return Ok(continuation),
+                Some(InteractionResponder::Agent { origin }) => format!(
+                    "Another Agent Session answered the interrupted questions:\nResponder origin: {}",
+                    serde_json::to_string(origin)?
+                ),
+                None => "A historical responder with unrecorded identity answered the interrupted questions:".into(),
+            };
+            value.prompt =
+                value
+                    .prompt
+                    .replacen("The user answered the interrupted questions:", &source, 1);
+        }
+    }
+    Ok(continuation)
 }
 
 fn continuation_for(
@@ -8537,12 +8603,14 @@ mod tests {
         ];
         let items = vec![
             TimelineItem::UserMessage {
+                interaction_response: None,
                 origin: None,
                 id: "handled".into(),
                 text: "already delivered".into(),
                 attachments: Vec::new(),
             },
             TimelineItem::UserMessage {
+                interaction_response: None,
                 origin: None,
                 id: "queued".into(),
                 text: "deliver exactly once".into(),
@@ -8952,6 +9020,7 @@ mod tests {
                 created_at_ms: 10,
                 updated_at_ms: 20,
                 items: vec![TimelineItem::UserMessage {
+                    interaction_response: None,
                     origin: None,
                     id: "import-user".into(),
                     text: "first prompt".into(),
@@ -9182,6 +9251,7 @@ mod tests {
     fn completed_turn(checkpoint: Option<&str>) -> Vec<TimelineItem> {
         vec![
             TimelineItem::UserMessage {
+                interaction_response: None,
                 origin: None,
                 id: "user-1".into(),
                 text: "Investigate the failing deploy".into(),
@@ -10179,6 +10249,7 @@ mod tests {
         let source_live = sessions.live(&source.id).await.unwrap();
         *source_live.items.lock().await = vec![
             TimelineItem::UserMessage {
+                interaction_response: None,
                 origin: None,
                 id: "user-live".into(),
                 text: "What can you help with?".into(),
@@ -10632,6 +10703,7 @@ mod tests {
                 "w1",
                 "s1",
                 &[TimelineItem::UserMessage {
+                    interaction_response: None,
                     origin: None,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),
@@ -11392,6 +11464,7 @@ mod tests {
             sessions.store.save_meta(&record).unwrap();
             let live = Arc::new(Live::new(record, sessions.store.clone()));
             live.items.lock().await.push(TimelineItem::UserMessage {
+                interaction_response: None,
                 origin: None,
                 id: "m_more".into(),
                 text: "also cover the docs".into(),
@@ -11700,6 +11773,7 @@ mod tests {
             SessionEvent::Item {
                 turn_id: "t".into(),
                 item: TimelineItem::UserMessage {
+                    interaction_response: None,
                     origin: None,
                     id: "u".into(),
                     text: "hi".into(),

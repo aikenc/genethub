@@ -1713,6 +1713,7 @@ async fn dispatch(
             session_id,
             request_id,
             outcome,
+            origin,
         } => Box::pin(async move {
             let kind = match state
                 .sessions
@@ -1753,9 +1754,20 @@ async fn dispatch(
                 );
             }
             let providers = state.providers().await;
+            let responder = match caller.session_controller_id() {
+                Some(id) => genehub_proto::InteractionResponder::Agent {
+                    origin: genehub_proto::InputOrigin {
+                        machine_id: state.machine.machine_id.clone(),
+                        machine_name: Some(crate::link::default_display_name()),
+                        session_id: id.to_owned(),
+                    },
+                },
+                None => origin.map(|origin| genehub_proto::InteractionResponder::Agent { origin })
+                    .unwrap_or(genehub_proto::InteractionResponder::User),
+            };
             match state
                 .sessions
-                .respond_permission(&session_id, &request_id, outcome, &providers)
+                .respond_permission_from(&session_id, &request_id, outcome, responder, &providers)
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),

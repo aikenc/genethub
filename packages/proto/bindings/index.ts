@@ -905,6 +905,18 @@ export type InteractionOption = { id: string, label: string, };
 export type InteractionQuestion = { id: string, prompt: string, allowMultiple: boolean, allowFreeform: boolean, options: Array<InteractionOption>, };
 
 /**
+ * The authenticated response path, kept distinct from rendered answer text.
+ * Attribution, not an additional permission boundary.
+ */
+export type InteractionResponder = { "source": "user" } | { "source": "agent", origin: InputOrigin, };
+
+/**
+ * Durable structured interaction evidence on the existing answer item.
+ * Missing in legacy history: absence must not be inferred as user acceptance.
+ */
+export type InteractionResponse = { requestId: string, kind: PermissionRequestKind, outcome: PermissionOutcome, decidedAtMs: number, responder: InteractionResponder, };
+
+/**
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
@@ -1352,7 +1364,12 @@ origin?: InputOrigin, } } | { "type": "session.artifact.begin", "payload": { ses
  * explicit target to opt into provider-agnostic reconstruction when
  * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.label", "payload": { sessionId: string, add: Array<string>, remove: Array<string>, } } | { "type": "session.describe", "payload": { sessionId: string, text: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setFast", "payload": { sessionId: string, fast: boolean, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "session.ask", "payload": { sessionId: string, requestId: string, title: string, questions: Array<InteractionQuestion>, } } | { "type": "caller.authority" } | { "type": "provider.list" } | { "type": "provider.operation", "payload": { sessionId: string, operation: ProviderOperationCommand, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.label", "payload": { sessionId: string, add: Array<string>, remove: Array<string>, } } | { "type": "session.describe", "payload": { sessionId: string, text: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setFast", "payload": { sessionId: string, fast: boolean, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, 
+/**
+ * Agent attribution carried by an authenticated remote owner, just
+ * like SessionSend; a verified local controller overrides this.
+ */
+origin?: InputOrigin, } } | { "type": "session.ask", "payload": { sessionId: string, requestId: string, title: string, questions: Array<InteractionQuestion>, } } | { "type": "caller.authority" } | { "type": "provider.list" } | { "type": "provider.operation", "payload": { sessionId: string, operation: ProviderOperationCommand, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` preserves the key only at the same endpoint/protocol; changing
  * either without a supplied key clears it. An empty string clears it.
@@ -2104,7 +2121,7 @@ export type TimelineItem = { "type": "userMessage", id: string, text: string, at
  * Present when another Agent Session wrote this message; absent means
  * the Human typed it (or an older daemon did not say).
  */
-origin?: InputOrigin, } | { "type": "assistantMessage", id: string, text: string, 
+origin?: InputOrigin, interactionResponse?: InteractionResponse, } | { "type": "assistantMessage", id: string, text: string, 
 /**
  * When the daemon first saw this item. Drives batch/trunk timing for
  * items that carry no tool timestamps of their own.

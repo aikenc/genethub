@@ -1188,6 +1188,7 @@ async fn respond(
         session_id: session_id.to_string(),
         request_id: request_id.to_string(),
         outcome,
+        origin: caller_origin(),
     })
     .await
     .map_err(query::rpc_error)?;
@@ -1614,6 +1615,7 @@ async fn pump(
                             session_id: session_id.to_string(),
                             request_id: request.id.clone(),
                             outcome: PermissionOutcome::Selected { option_id: option },
+                            origin: caller_origin(),
                         })
                         .await;
                     continue;

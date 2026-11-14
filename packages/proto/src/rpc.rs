@@ -554,6 +554,11 @@ pub enum Request {
         session_id: String,
         request_id: String,
         outcome: PermissionOutcome,
+        /// Agent attribution carried by an authenticated remote owner, just
+        /// like SessionSend; a verified local controller overrides this.
+        #[serde(default)]
+        #[ts(optional)]
+        origin: Option<crate::InputOrigin>,
     },
     /// Submit a non-secret conversation question and stop the current
     /// execution. Answers arrive through the existing Human continuation.

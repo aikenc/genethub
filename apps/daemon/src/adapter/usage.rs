@@ -563,6 +563,7 @@ mod tests {
             &mut usage,
             &[
                 TimelineItem::UserMessage {
+                    interaction_response: None,
                     origin: None,
                     id: "u".into(),
                     text: "abcd".into(),

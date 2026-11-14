@@ -172,6 +172,7 @@ impl SessionManager {
         {
             let same = |origin: Option<InputOrigin>| -> Result<bool> {
                 let expected = TimelineItem::UserMessage {
+                    interaction_response: None,
                     id: message_id.clone(),
                     text: text.clone(),
                     attachments: attachments.clone(),
@@ -239,6 +240,7 @@ impl SessionManager {
             }
         }
         let item = TimelineItem::UserMessage {
+            interaction_response: None,
             id: message_id.clone(),
             text: text.clone(),
             attachments,
