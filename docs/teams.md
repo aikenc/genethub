@@ -68,25 +68,27 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 
 设计要点（命令与细则以样板的 `team-core` 和 `team-reflect/references/rationale.md` 为准）：
 
-- **纯异步接力**：派单或投递后立即结束本轮，不轮询。结果由定时对账按三条法则回到上级——有界终态、父就绪才交棒销账、
-  组长看门狗自愈；同一批子任务合并成一条回执。
+- **纯异步接力**：派单后立即结束本轮，不轮询。结果就绪即入精确请求方的原生队列，不等父回合空闲或同批其它结果；资源归还独立核对，排队不等于读入，必需支持读入后才能成功收尾。
 - **分形**：组长 → 小组长 → 多名并发 Worker 用同一套机制，不加新协议。
 - **写者锁与工位**：一个目录同时只有一个写会话；并发组员各在自己的 git worktree 里提交，由组长预检合入。
-- **前台对用户零黑话**：用户只和前台说自然语言；后台岗位不挂起等人，要人决定的事经前台问。
-- **反思与两级记忆**：`team-reflect` 回看会话与留言，把经验提炼进岗位 `index.md` 和根 `memory.md`，并自主维护团队
-  Skill 与脚本。
+- **前台对用户零黑话**：用户只和前台说自然语言；后台不挂起等人，Owner 在原授权内决定日常取舍，重大风险合并同步后继续；明确暂停/取消和整体预算、期限仍有效。
+- **反思与两级记忆**：先提升用户满意度，再改团队工作质量，并约束自身空转；只按具体信号维护本队规则并复验效果，同一事实只处理一次，自己的提交不是新信号，无动作不写报告。复发教训留岗位 `index.md` 与根 `memory.md`，不接管业务规划。
 - **模板升级不覆盖**：团队初始化时把模板记入 `platform` 分支；模板更新后定时任务给反思会话留言，由它在 `temp/`
   里三方合并、验证后生效。`reset` 只在用户明确要求时整体恢复。
 
 ### 4.1 Task Owner 与资源
 
-Space 是身份、Skill 和配置来源，可同时承载不同任务的独立会话。前台不绑定业务目录，也不锁 Space。`task start` 从适合的岗位准备 Owner 会话；简单任务由 Owner 自行完成，复杂任务由 Owner/子负责人 `task support` 请求支持，按精确机器和 SID 回流。Team Leader 只是具备集成/领导能力的默认岗位，旧 `spawn/send` 路径仍可读写。
+Space 是身份、Skill 和配置来源，可同时承载独立会话。按完成方式分流：答复本身就是结果的需求前台直接做，不建 Task；一次交付由合适 Owner 负责，多个独立交付可由不同 Owner 并行，不建迭代；持续质量目标开局交给一个长期目标 Owner，自主规划、派发、核查并续轮。追加意图沿原目标交给该 Owner，前台按需读取进展，不逐轮审批。
+
+分不清先从小的开始，需要业务目录、构建/测试/真机或协作就转交 Owner；一次交付不足、需换方案时沿原 Task 升级为长期目标，同步前台一次后继续，只升不降、累计不清零。用户不承担分类或逐轮确认。Team Leader 是可复用的整合岗位，不是每项需求的强制入口；旧 spawn/send 只保留在途兼容。
+
+长期目标 Owner 每轮在原任务描述和结果中明确阶段目标、验收、检查点、任务依赖、并行、资源风险和方案调整，派出全部可开工项后结束回合。阶段结算未达总体目标且授权有效就继续，延续任务保留原编号与原结论；局部等待不冻结全队，整体达成、到期、取消或明确暂停才停止新轮。当前独立迭代 CLI 与新的计分模型另行交付，不从说明文字推断数据迁移已完成。
 
 Owner、协作者都以 `task finish` 记录明确结论，普通中间回复不销账。默认组内全部必需支持结算，失败不等于成功；多层支持仍使用相同记录和 timer。用户暂停保留输入、引用和工位，普通结果不解除暂停。显式 task 控制用请求编号和 revision 防止重放/旧归属操作，取消核对原生执行和子进程停止后才释放。当前自动 handover 支持同机独立会话；跨机迁移先拒绝、保留原工作，需显式完成产物/资源交接。
 
 写锁跟随实际工作目录，不跟随 Space。Owner 和协作者默认没有写目录，修改项目前为本会话 `task bind-directory`，远端认领在执行端完成；并发写任务选择独立 worktree。临时材料使用 `temp new NAME --task-id TASK`，任务/会话引用与暂停、等待、未消费回执保护材料，不能仅按 mtime 删除。
 
-共享上限默认团队64个活动会话、单任务累计32个会话、派单任务年龄7200秒，可在 open.env 调整 `TEAM_MAX_ACTIVE_SESSIONS`、`TEAM_TASK_MAX_SESSIONS`、`TEAM_TASK_MAX_AGE_SECONDS`。Owner 空闲且没有待办时复用 timer 有界提醒；真实进展才重置计数，普通空转回复不重置。达到阈值报前台并保留工作，不无限唤醒。详见样板 [task-owner.md](../apps/daemon/builtin-skills/genehub/references/team-template/skills/team-core/references/task-owner.md)。
+共享上限默认团队64个活动会话、单任务累计32个会话、派单任务年龄7200秒，可在 open.env 调整 `TEAM_MAX_ACTIVE_SESSIONS`、`TEAM_TASK_MAX_SESSIONS`、`TEAM_TASK_MAX_AGE_SECONDS`。Owner 空闲且没有待办时复用 timer 有界提醒；真实进展才重置计数，普通空转回复不重置。这些是新派单容量，不是用户总期限或阶段必须结算的时点。长期目标 Owner 在原授权内核定调度取舍，先读实际 budget revision、累计用量与阻塞原因；旧账本仍绑定原前台的控制限制按兼容合同核对，不绕过归属、不频繁叫醒前台代批，保留原任务与其它可做工作。当前容量提示不等于 R6 实际累计并行；详见 [task-owner.md](../apps/daemon/builtin-skills/genehub/references/team-template/skills/genet_builtin/team-core/references/task-owner.md)。
 
 **内置管理员**是样板的另一种用法：`<data>/spaces/admin/` 用同一份根文件加 `team-admin` Skill，只有一个 Space，
 负责替用户建团队、接入共享团队、指导定制。它是产品文件，daemon 每次启动与模板对齐（[daemon.md](./daemon.md)「内置管理员」）。
@@ -116,7 +118,7 @@ Owner、协作者都以 `task finish` 记录明确结论，普通中间回复不
 `--workspace` 只能核对同一个绑定。完整配置、旧绑定迁移与恢复见
 [远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/genet_builtin/team-core/references/remote-targets.md)。
 
-**派单账本在发起方，写锁与创建回执在执行端**。`spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
+**派单账本在发起方，写锁与创建回执在执行端**。以下 `spawn/receive` 为旧派单兼容描述；新 Task 的就绪结果入队与资源归还独立对账，不等待父回合。旧 `spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
 先验证目标 workspace 确属该团队岗位，使用目标团队/岗位配置校验 Agent、模型及媒体能力，然后原子申请本机写锁。
 写目录由目标岗位 `WORKTREE_DIR` 决定，未配置时锁岗位根目录；遇到已有锁直接报忙，不排队、不自动切远端工位。本机 work 派单也默认锁岗位目录（或 WORKTREE_DIR），沿用本机并发子工位机制；两端不能跳过同目录互斥。
 同一派单编号只能对应同一内容；创建前保存回执，创建结果 unknown 时保留锁和意图，不自动重派。

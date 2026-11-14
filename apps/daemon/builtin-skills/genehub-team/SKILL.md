@@ -1,52 +1,36 @@
 ---
 name: genehub-team
-description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力的队伍，用户只跟前台说话，后台岗位并发推进、结果自动回到发起方。用于建团队、接入共享团队、项目团队、多 Agent 并发开发与派单接力、扩建或精简岗位、团队看板与可玩版本，以及定制、改造或从零重写团队。区分平台原语与内置样板，按身份路由到对应参考。
+description: GeneHub 团队：简单需求前台直接处理，一般交付交合适 Owner，长期目标由 Owner 自主迭代；用于建队、接入、协作、岗位定制及从原语重写团队。
 ---
 
 # 团队
 
-团队不是平台内置的调度器。平台只提供原语（Space 树、身份编译、定时 hook、系统通知、会话控制、档位路由、
-跨机执行）；内置的 1+N 项目团队是用这些原语搭出来的**样板**——一棵 Space 树加 `tools/run.py` 等脚本。
-建出来的团队归用户所有，可以改，也可以整体换掉。机制正本是 GeneHub 源码仓的 `docs/teams.md`。
+平台提供 Space、身份编译、timer、会话控制、档位与跨机原语；1+N 团队是一份可改写的样板，不是内核调度器。正本见源码仓 `docs/teams.md`。
 
-## 按身份读
+| 当前需要 | 读哪里 |
+| --- | --- |
+| 建队、接入共享团队 | 机器管理员 `../genehub/references/team-admin-skill/team-admin/SKILL.md`，不手搓目录 |
+| 已在团队会话内 | 本队 `skills/genet_builtin/team-core` 与岗位 Skill，以本队版本为准 |
+| 理解样板接力 | [template.md](references/template.md) |
+| 改岗位、流程、脚本或样板 | [customize.md](references/customize.md) |
+| 从平台原语重写 | [primitives.md](references/primitives.md) |
 
-| 你现在是 | 读什么 |
-|---|---|
-| 用户要一支团队、接入别人分享的团队 | 交给机器管理员：`../genehub/references/team-admin-skill/team-admin/SKILL.md`；不要手搓目录 |
-| 团队里的会话（cwd 在某个团队下） | 团队自己的 `skills/genet_builtin/team-core` 与岗位 Skill（已随身份加载）；它们以团队当前版本为准 |
-| 想知道内置样板怎么运转：岗位、命令、接力规则、升级 | [references/template.md](references/template.md) |
-| 要改岗位、流程、Skill、脚本，或换掉样板 | [references/customize.md](references/customize.md) |
-| 不用样板，从平台能力开始自己写 | [references/primitives.md](references/primitives.md) |
+样板在 `../genehub/references/team-template/`，入口 `tools/run.py`，内置实现在 `tools/genet_builtin/`；公开扩展见模板 team-core 的 `references/extensions.md`。
 
-样板文件在 `../genehub/references/team-template/`，统一入口是 `tools/run.py`，内置实现位于 `tools/genet_builtin/`；业务扩展见模板 team-core 的 `references/extensions.md`。
+- 按怎样完成分流：答复本身就是结果的小事前台直接做；一次交付给合适 Owner，可同时指挥多个独立 Owner；持续质量目标开局由长期目标 Owner 负责迭代。
+- 长期目标 Owner 规划、并行派发、检查、总结并续下一轮，未达且授权有效就继续；前台传人的意图、按需查进展，不逐轮审批或转派。未完成条件的原任务跨轮、换人仍累计，不以新 SID 清零。
+- `task start/support/send` 都是异步，派出后立即结束本轮，不 sleep、不轮询；结果回精确原请求方，结论用 `task finish`，接收不等于完成，未知沿原编号查回执。
+- 重大风险经前台合并同步，Owner 在原授权内继续取舍；后台不挂起等人。用户明确暂停/取消、整体预算/期限和权限边界仍保留，不借自主推进越界。
+- 对用户只说真实进展与结论，不提内部类别、目录、脚本和工位；交付实际存在的文件入口，遵守 genehub-preview。
+- 改源文件，经 `run.py sync-identity` 或 `spacebuilder.py build` 重编，重开会话读新身份；不手改 AGENTS.md、.agents/skills 或 .genethub/hooks 生成物。
+- 反思先提升用户满意度，再改团队工作质量，并约束自己空转：同一事实只处理一次，自己的提交不是新信号，无动作不写报告；交付由 Owner 修。
+- 用户不满意先 `run.py note --kind unhappy`，流程改进用 `run.py reflect now`；新样板用 `feedback add/ls/verify` 在本队平台归因通道留线索，尽量绕行、不等回应。旧 docs/platform-issues.md 留历史，发布不等于团队修复。
+- 团队可改自己的身份、Skill 与业务策略；内置 Skill 和 daemon 归平台包，重装会覆盖。退役 Workflow（PM/Executor）不用来建队或派单。
 
-## 日常只需理解这些
+## 查询、计时与升级
 
-前台按岗位给目标与验收标准，用已有 `task start`；执行会话需要支持用 `task support`，提交结论用 `task finish`。脚本自动解析岗位所在机器、保存归属并把结果回到原请求方。接收不是完成，未知结果沿原编号恢复。只有维护 Agent 需要配置远程目标并运行原 build，详见管理员 Skill；普通任务不换算机器 ID、不搬文件、不填写回传配置。
+已知任务沿账本 SID 用 `session get`；当前义务用 `session list --workspace ID --active --include-archived`。历史分页保持原机器和条件，按 nextCursor 直到 complete:true，读取失败是未知，不按空目录重建。
 
-## 不能违反的三条
+timer 默认 fixed-delay：一次命令及收尾结束后再等 every，不重入、不积压。显式 interval 仅适合短命令，期限为 min(timeout,every×15%)，亚秒不向上取整。修改 hook 源并重编，不提高频率/超时绕错。
 
-- **派单后立即结束本轮**：样板里 `task start/support/send` 都是纯异步，结果由定时对账收齐后唤醒你；
-  不 sleep、不轮询。自己写的团队也不要让会话守着等。
-- **对用户零黑话**：只说进展与结论，不提脚本、内部目录或工位；后台岗位不挂起等人，要人决定的事经前台问。
-- **改源文件，不改生成物**：`AGENTS.md`、`.agents/skills/`、`.genethub/hooks/` 由 SpaceBuilder 生成；改身份或
-  Skill 后用 `run.py sync-identity`（或 `spacebuilder.py build`）重编，重开会话才生效。
-
-## 边界
-
-- 团队可以改自己的 Skill、身份与脚本；平台内置 Skill 与 daemon 行为不归团队，重装会覆盖。
-- 用户不满意先 `run.py note --kind unhappy`，流程问题用 `run.py reflect now`。已采用新样板的团队用
-  `run.py feedback add/ls/verify` 留平台线索并在实际采用后自行复验；详见模板 team-reflect 的
-  `references/platform-feedback.md`。旧 `docs/platform-issues.md` 保留历史，不把平台发布当作团队已修复。
-- Workflow（PM / Executor）是退役中的旧机制，不要用它建团队或派单。
-
-## Timer执行约定
-
-回调默认`schedule: "fixed-delay"`：本次命令及收尾结束后再等`every`，运行中不重入、不积压补跑，冷却不占执行名额。Team巡检使用此模式；耗时超过触发间隔本身不算故障，仍按声明timeout处理。显式`interval`仅供短命令，其实际执行期限为`min(timeout, every×15%)`，亚秒值不向上取整，到期整组强制结束。改模板hook源并重新build，不手改生成的`.genethub/hooks/`；新daemon默认也适用于未写schedule的已有hook，跨渠道共同执行需核对各daemon版本。
-
-## 脚本查询与升级迁移
-
-已知任务沿账本中的会话 ID 用 `session get <id>`；当前工作用 `session list --workspace <id> --active --include-archived`。需要历史时用 `--workspace <id> --limit 50`，保持机器和条件按 `nextCursor` 续页至 `complete: true`。
-
-`unboundedQueryDisabled` 是读取方式需要修改：即使已指定项目，历史也必须分页。先修团队自己的工具源，再运行同一待办；保留原 task/session ID、派单、回传配置和写锁，不原样重试，不按空目录重建任务，不用提高频率或超时绕过错误。一般读取失败仍表示未知。Timer 无待办时不查前台历史；有原请求方引用时直接使用，避免每轮重新发现全目录。
+unboundedQueryDisabled 要修读取方式，不原样重试；保留原任务、会话、派单、输入、回传和写锁。timer 无待办不查前台历史，有原请求方引用直接使用。正常升级合并定制、构建完整制品并核验实际采用，冲突保留原维护项，不替团队重写业务。

@@ -2444,12 +2444,10 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
     if not os.path.isdir(os.path.join(root, "spaces", "leader")):
         front_style = (
             "# 团队前台\n\n"
-            "我是 %s 团队的用户入口，不绑定业务工位。新目标按能力选择岗位，通过 task start 创建 Owner 会话；补充要求沿 task send 发给原 Owner。"
-            "同 Space 可以有多个独立执行会话，持续通信使用明确机器与SID，不按最近活跃岗位猜测目标。遵守 team-front 与 team-core 的 task-owner 合同。\n"
+            "我是 %s 团队的用户入口，不绑定业务工位。答复本身就是结果的需求直接完成；一次明确交付选择合适 Owner；持续目标开局交给一个长期目标 Owner 自主规划并续轮。"
+            "追加意图沿原 taskId 给精确 Owner，我按需读进展、合并重大风险，不逐轮审批；实际机器、SID、预算与暂停以原回执为准。遵守 team-front 与 team-core 的 task-owner 合同。\n"
         ) % team_name
         with open(os.path.join(root, "front", "style.md"), "w", encoding="utf-8") as handle:
-            handle.write(front_style)
-        with open(os.path.join(root, "front", "role.md"), "w", encoding="utf-8") as handle:
             handle.write(front_style)
         scaffold_role_space(
             root,
@@ -4913,6 +4911,16 @@ def heal_identity_aliases(root):
                     yield os.path.join(base, entry)
 
     healed = []
+    # The root descriptor owns front/ identity paths; older user teams may
+    # still declare front/role.md after the template consolidates on style.md.
+    declared_front = {str(item) for item in ((descriptor(root) or {}).get("identity") or [])}
+    for declared_path, alternate_path in (("front/style.md", "front/role.md"),
+                                           ("front/role.md", "front/style.md")):
+        target = os.path.join(root, declared_path)
+        alternate = os.path.join(root, alternate_path)
+        if declared_path in declared_front and not os.path.isfile(target) and os.path.isfile(alternate):
+            shutil.copyfile(alternate, target)
+            healed.append(target)
     for role_dir in spaces():
         desc = read_json(os.path.join(role_dir, ROOT_DESCRIPTOR))
         if not desc:

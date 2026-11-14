@@ -1,5 +1,7 @@
 # 团队工作质量模型修正：汇总落地清单
 
+> 历史提案/交付记录：保留当时的事实、原口径与回执，不代表当前实施状态。工作合同以 [团队机制](teams.md) 及后续已批准决定为准；其中已被取代的人工解除、重开测量窗口、前台驱动续轮等旧规则不再适用。
+
 - 状态：Human 已批准落地（2026-11-11 18:34）
 - 详细依据：`team-quality-scoring-and-parallelism-proposal-20261111.md` 第三至六节；
   `agent-facing-cli-skill-simplification-proposal-20261111.md`；`model-catalog-and-team-cost-proposal-20261111.md`

@@ -1,70 +1,72 @@
-# 内置样板：1+N 项目团队怎么运转
+# 内置样板：1+N 项目团队
 
-这里描述的是 `../../genehub/references/team-template/` 这一份样板的实现，**不是平台规则**：团队可以改掉其中任何一条。
-已建团队以它自己目录里的 `skills/genet_builtin/team-core` 和岗位 Skill 为准——团队改过的地方，本文不再适用。
+这是 `../../genehub/references/team-template/` 的默认工作合同，不是内核调度器。已建团队以本队 Skill、公开扩展与实际运行版本为准，定制不被模板覆盖。
 
-## 拓扑
+## 用户需求与责任
 
-| 岗位 | 位置 | 职责 |
-|---|---|---|
-| 前台 | 团队根，`agentCwd: front` | 面对用户：接诉求、选择 Task Owner、追进度、给看板与试玩入口 |
-| 集成岗位 | `spaces/leader` | 可担任需要协调能力的 Task Owner，维护集成基线与交付；普通任务可直接选择其他成员负责 |
-| 管线组员 | `spaces/<岗位>` | 各管一条业务线，在独立工位开发；`employee add` 扩出 |
-| QA | `spaces/qa` | 无头浏览器实操截图与数值断言验收 |
-| 研究 | `spaces/research` | 只读的推演、调研、评审，产出报告 |
-| 反思 | `spaces/team-reflect` | 回看会话与留言，维护团队规范、脚本，做模板升级 |
+| 完成方式 | 由谁处理 | 留什么记录 |
+| --- | --- | --- |
+| 答复本身是结果，不需要业务工位或独立验证 | 前台当场完成 | 正常会话，不建 Task/迭代 |
+| 一次有明确完成条件的交付 | 合适 Owner；独立交付可多个 Owner 并行 | 原 Task 与支持，不建迭代 |
+| 持续质量线，需要多轮反馈 | 一个长期目标 Owner 自主组织、验收并续轮 | 长期目标来源、阶段规划/总结与原任务引用 |
 
-Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hook）、`team-work`、`team-research`、`team-reflect`。
-身份四层：`soul.md` 宪章、`memory.md`（≤30 行）、岗位 `style.md`、岗位 `index.md`；会话记录是事实源。
+用户明确说持续打磨，直接用第三条；分不清从小的开始，发现业务实施/验证或协作就转交 Owner；一次交付不足、需换方案时沿原 Task 升级为长期目标，不换号清累计，不向用户讲类别或询问分类。
 
-## 命令（`"$GENEHUB_PYTHON" <团队根>/tools/run.py …`）
+| 岗位 | 职责 |
+| --- | --- |
+| 前台（根 Space，agentCwd=front） | 接人的意图，处理小事、选择 Owner，按需答复进展和产物；不逐轮计划或审批 |
+| 有整合能力的岗位（常用 leader） | 可担任长期目标 Owner，规划、派发、检查并续轮；不强制所有任务都经过它 |
+| 业务岗位（spaces/ROLE） | 在独立工位完成任务/支持，结果回精确请求方 |
+| QA | 针对固定制品实际核查，交独立证据，不以实施者自报代替 |
+| 研究 | 只读评审、调研与诊断，报告给原请求方 |
+| 反思 | 用户满意度优先，其次工作质量，同时避免自身空转；改工作方式，不接管业务计划 |
+
+身份由 soul.md、memory.md（≤30行）、岗位 style.md/index.md 与所选 Skill 编译。前台只保留 style.md 正本；旧描述仍引用 role.md 时沿兼容别名恢复，用户定制不批量删除。
+
+## 规划、接力与继续
+
+长期目标 Owner 每轮核对原验收、上轮差距、延续任务、新意图、告警、预算和资源；在已有任务描述/结果留阶段目标、验收、检查点、任务依赖、并行、风险与方案调整，一次派出全部可开工项后结束本轮。
+
+`task start` 建立 Owner，`task support` 请求支持，`task send` 传追加意图，`task finish` 交结论。一般任务结论回前台；长期目标的日常任务/支持回原 Owner，不逐轮推送前台。结果就绪即独立入请求方原生队列，不等父回合空闲或同批其它结果；资源归还另对账，排队不等于读入。
+
+任务结果触发核对、整合与依赖推进；检查点到达记录已完成、延续、阻塞、产物及下一轮计划。阶段完成而目标未达，整体授权仍有效就继续；未满足原条件的任务跨轮沿原编号、累计时间和原结论，不把二十分钟支持变成多个豁免短任务。
+
+警告提前在下个决策点调整，红线立即优先纠正，其它可做工作继续。相同事实指纹不重复唤醒，自己的记录/提交不是新信号，无动作不留巡查报告。平台原因只进本队平台归因通道，尽量绕行，不假设有人接手或等待回应。
+
+重大风险附事实、影响与当前方案合并同步一次，Owner 继续原授权内取舍；用户未答不阻塞工作或停表。整体达成、总预算/期限到达、明确暂停/取消时停止新轮，保留原任务、输入、资源与证据，不自动续期。
+
+所有派单后立即结束本轮，不 sleep、不轮询；没有新事件就等待。一个真实目录同一时间只有一个写会话，并发工作用独立 worktree，共享集成/发布资源只在实际操作时串行。
+
+## 命令与证据
+
+统一入口：`"$GENEHUB_PYTHON" <团队根>/tools/run.py`。
 
 | 命令 | 用途 |
-|---|---|
-| `task start --space <岗位> --desc "一句话" --request-id <稳定编号> "目标"` | 创建绑定 Owner 会话的任务；追加、支持、控制和收尾按团队 team-core Skill 的任务指引执行 |
-| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；岗位声明了 `TEAM_MACHINE` 时自动派到那台机器，`--machine` 只能与声明一致；`--team <名>` 派到本机另一支团队 |
-| `send --to <岗位\|会话\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断；`--machine` 投给远端岗位或远端会话 |
-| `employee add\|ls\|retire` | 动态扩编或待岗岗位，自动建子空间与工位 |
-| `employee sync` | 把 `.genethub/open.env` 写了 `TEAM_MACHINE` 的岗位安装到对应机器（平台决定目标目录），并生成 members 绑定 |
-| `worktree create\|bind\|ls` | 从主仓切 worktree 并写子空间 `open.env` 的 `WORKTREE_DIR` |
-| `publish release <源> --name vX.Y` / `publish report <源> --slug <名>` / `publish rollback` | 发可玩版本到 `datas/releases/`、报告到 `datas/reports/`、紧急回滚 `latest` |
-| `board start\|refresh` | 确保常驻看板服务在线并刷新 `datas/board/index.html` |
-| `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给反思岗位留言，或立即改进团队流程 |
-| `mount <目录>` / `unmount <目录>` / `path datas\|temp\|root` / `temp new\|ls\|rm\|clean` | 认领或释放业务目录、取标准路径、管 `temp/` 下的一次性产物 |
-| `notes [ls\|done <编号>]` / `tell-user "话"` | 反思岗位处理留言、经前台转告用户 |
-| `directory [--team <名>]` / `snapshot` / `drift` / `sync-identity` / `reset` | 查团队与会话、提交团队仓库、看模板差异、重编身份、用户要求时整体恢复模板 |
+| --- | --- |
+| task start/support/send/finish/status | 稳定任务、精确请求方、支持与结论；完整回执合同见本队 task-owner.md |
+| task pause/resume/cancel/handover | 原控制归属、稳定编号和 revision；不重复副作用或解除独立暂停 |
+| task bind-directory、task budget | 原执行端写工位、实际容量视图；长期目标 Owner 核定原授权内调度取舍，旧控制绑定按兼容合同处理 |
+| task job register/status/finish | 登记有界原生后台执行，预览服务不计工时；登记不启动或停止进程 |
+| employee add/ls/retire/sync | 扩岗位与按实际机器绑定安装完整运行制品 |
+| publish release/report/rollback | 发布实际可打开的阶段产物，保留旧交付 |
+| board start/refresh | 团队看板；测试团队关闭常驻服务，不能留资源泄漏 |
+| note、notes、reflect now、feedback | 具体信号、平台线索与本队改进；无动作不写报告 |
+| directory、snapshot、drift、sync-identity、temp | 查询、仅自己的受控快照、版本差异、身份编译与独立临时材料 |
 
-`--expert` 是 `--team` 的旧名，仍然可用。失败时命令会说明出了什么、现在状态、下一步。
+旧 spawn/send/receive 沿原编号继续收尾，仅作没有 taskId 的旧派单兼容，不用于新任务重做；旧 expert 名仍可读。详细语法以本队工具 help 和实际回执为准。
 
-## 接力规则
+## 跨机与身份
 
-- **纯异步**：`spawn` 或 `send` 之后**立即结束本轮**，不 sleep、不轮询、不阻塞等待。
-- 定时对账按三法则收齐结果再唤醒上级：**有界终态**、**父就绪才交棒销账**、**根节点组长看门狗自愈**。
-- 分形多级：`Leader -> 小组长 -> 多名并发 Worker + Research` 用同一套机制，不需要新协议。
-- 同一批子任务全部结束后合并为一条 `result` 回执；中途异常由看门狗拉起，不必人工催促。
-- 一个目录同一时间只有一个写会话；并发组员在各自 worktree 提交，由组长 `git merge-tree` 预检后合入。
-- 档位是平台路由标签，不是模型 id；团队只写标签，不钉 `modelId`。
-- **跨机器**：一个岗位只属于一台机器。在岗位 `.genethub/open.env` 写 `TEAM_MACHINE=<机器 ID>`，定义源运行
-  `employee sync`；之后按岗位派单即自动到那台机器，不手写安装脚本、目标路径或 members。细节见团队自己的
-  `skills/genet_builtin/team-core/references/remote-targets.md`。执行端校验模型并持有写锁、创建回执；派单方保留待办和结果回传。
-  丢失回复用同一 `--request-id` 查回执，unknown 不重派。`send` 只投递已有会话且不解除暂停。
-  配置了 team 的完整 portable 团队制品包含运行工具与团队配置；旧制品或单独子岗位仍须补齐。自定义资源策略在目标团队的新 task 入口执行，旧 receive 不承接它。
-- 自动身份刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`：有 Space pre/post 或 Provider post
-  时返回 `SB018` 并保留旧生成身份。发布 hook 应在源 Space 显式构建中执行，不能借一次身份刷新触发部署。
+岗位自己的 `.genethub/open.env` 中 TEAM_MACHINE 是机器归属来源，定义源 `employee sync` 构建并安装完整制品、登记真实 members；按岗位派单，不手写目标路径、安装脚本或 members，不 clone 团队源到执行端。
 
-## 对用户
+原接单机器/Space/回传保存在派单回执中，改安装默认不改在途归属。执行端核模型并持有写锁，源端保留权威账本；unknown 沿原 request-id 查回执，不新建重复工作。目录互斥、模型预算与用户控制不被跨机绕过。详见本队 remote-targets.md。
 
-- 只说进展与结论，不提 `team.py`、`.pm/`、工位等内部结构；链接一律写相对团队根的 `datas/...` 或 `temp/...`。
-- 后台岗位不挂起等人；要用户决定的事回到前台，由前台问。
-- 常驻看板可用进程环境或团队根 `open.env` 的 `TEAM_BOARD_PORT=0` 关闭；跑测试的团队必须关掉，
-  否则常驻进程会被判为资源泄漏。
+身份刷新使用 require-no-post-commands；遇到发布 hook 时保留原身份，显式源端构建负责部署，不通过提高 timer 超时或重复重试偷偷执行 post。
 
-## 升级与恢复
+## 对用户与升级
 
-- 初始化时模板记进团队仓库的 `platform` 分支；`drift` 看团队与模板的差异。
-- 模板更新后，定时任务给 `team-reflect` 留 `upgrade` 留言，由它按
-  `../../genehub/references/team-template/skills/genet_builtin/team-reflect/references/upgrade.md` 在唯一定义源合入、构建完整制品、校验后安装；验证副本不登记为运行团队。
-- 改名前的团队（Skill 叫 `expert-*`）合并后，`sync-identity` 会把描述文件里的旧名改指 `team-*`。
-- `reset` 覆盖平台文件与 `soul.md`，只在用户明确要求时用，先看预演。
+只说真实进展、差距和结果，链接现有普通入口文件，遵守 genehub-preview；不暴露内部类别、脚本、目录和工位。后台不挂起等人，重大风险合并同步后继续，明确暂停/取消和授权边界仍有效。
 
-设计取舍的完整理由在 `../../genehub/references/team-template/skills/genet_builtin/team-reflect/references/rationale.md`。
+正常升级在唯一定义源按自动检查合并定制、构建完整工具/岗位/身份制品、校验并部署；反思只处理冲突或测试失败。保留原维护项、历史和副作用，采用以自然卡 versions.teamTemplate 和实际行为验收，安装成功不够。
+
+reset 只在用户明确要求时预览并执行，不用它清旧任务。模板自己的设计背景见 `../../genehub/references/team-template/skills/genet_builtin/team-reflect/references/rationale.md`。

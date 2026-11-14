@@ -12,4 +12,4 @@ description: 团队的研究会话：对项目没有副作用的事——评审�
 - **多路统筹与跨团队协作**：接手需拆成多路并行或需请本机其他团队协同的任务时，有 taskId 时用 `task support`，按 team-core 的 Task Owner 合同派单；旧派单才沿原 `spawn/send` 发起后**直接结束本轮**，系统收齐同批结果后会自动异步唤醒。被截断的回复按头部 `ref` 取全文，核实去重、汇总成完整结论与报告后再作最终回复。
 - 有 taskId 时，交付前用 `task finish <taskId> --outcome success|failed|blocked "结论与证据"`；中间回复不代表任务完成，临时目录加 `--task-id <taskId>`。
 - 察觉用户不满意、有长期偏好，或遇到自己解决不了的外部问题（缺环境、缺授权、疑似平台缺陷）：`run.py note`，写清证据。
-- **后台不挂起等人**：需要用户决定的事，把选项和你的推荐写进最终回复交回请求方，由前台去问；不要调用 `session ask`、`AskQuestion` 或 `request_user_input`。
+- **后台不挂起等人**：日常取舍由原 Owner 在授权内决定；重大风险把事实、影响、推荐与当前处理方案交回请求方合并同步，同步后继续可做工作，不等用户答复。明确暂停/取消、权限与预算边界仍保留；不要用 `session ask`、`AskQuestion` 或 `request_user_input` 挂起后台。
