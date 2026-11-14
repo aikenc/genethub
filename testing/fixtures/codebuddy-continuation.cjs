@@ -24,7 +24,13 @@ input.on('line', line => {
       response: { models: [{ id: 'hy4std', name: 'HY' }], account: { tokenSource: 'oauth' } } } });
     if (subtype === 'interrupt') {
       clearTimeout(timer);
-      out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Interrupted'] });
+      // Real vendor trace: an interrupted CLI can return a successful result
+      // envelope. The native Stop remains authoritative over that envelope.
+      if (config.interruptSuccess) {
+        out({ type: 'assistant', message: { role: 'assistant', model: 'hy4std',
+          content: [{ type: 'text', text: 'Interrupted by user' }] } });
+        out({ type: 'result', subtype: 'success', is_error: false });
+      } else out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Interrupted'] });
       setTimeout(() => process.exit(0), 20);
     }
     return;
