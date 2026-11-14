@@ -789,7 +789,7 @@ sys.exit(r.returncode)
     await cliJson(["session", "send", remoteOwner, JSON.stringify({ argv:[python,heldOperation], cwd:targetRoot }), "--message-id", "u_remote_held_owner_operation", "--no-wait"], true);
     await t.tools.waitUntil(async()=>existsSync(heldStarted)&&(await inspectSession(remoteOwner,true)).summary.status==="running",10000);
     try {
-    const finishReply = await callTask(support, sourceRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE"]);
+    const finishReply = await callTask(support, sourceRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE" + " evidence".repeat(5500)]);
     t.assertions.assert(finishReply.code === 0, "source support could not settle: " + finishReply.err);
     const beforeReadyTick=Date.now(); const readyTick=await script(["hook"]);
     t.assertions.assert(readyTick.code===0,"ready remote result tick failed: "+readyTick.stderr);
@@ -801,6 +801,50 @@ sys.exit(r.returncode)
     t.assertions.assert((await inspectSession(remoteOwner,true)).items.filter((i:any)=>i.type==="userMessage"&&i.text.startsWith("用途: result\n")&&i.text.includes("REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE")).length===1,"busy remote Owner received duplicate result");
     } finally { writeFileSync(heldRelease,"release the real fixture operation"); }
     await idleSession(remoteOwner, true);
+    // The native message cap remains intact. Two normal contributions make
+    // one large historical ledger; no oversized command or state injection.
+    const extraReply = await callTask(remoteOwner, targetRoot, ["task", "support", remoteTask.taskId,
+      "--space", "research", "--desc", "second evidence", "--request-id", "remote.owner.extra-evidence", "Produce independent evidence"], true);
+    t.assertions.assert(extraReply.code === 0, "second source support unavailable: " + extraReply.err);
+    const extraSupport = JSON.parse(JSON.parse(extraReply.out).result).collaborator;
+    await idleSession(extraSupport);
+    const extraFinish = await callTask(extraSupport, sourceRoot, ["task", "finish", remoteTask.taskId,
+      "--outcome", "success", "SECOND_INDEPENDENT_EVIDENCE" + " detail".repeat(6500)]);
+    t.assertions.assert(extraFinish.code === 0, "second source support did not conclude: " + extraFinish.err);
+    const extraTick = await script(["hook"]);
+    t.assertions.assert(extraTick.code === 0, "second support result did not reconcile");
+    await idleSession(remoteOwner, true);
+    const aliasEntry = (await cliJson(["machine", "show", machine]));
+    // Direct pairing has no opaque Hub row. The native compatibility locator
+    // is a second real selector, resolved by the same public directory first.
+    const handle = aliasEntry.deviceHandle ?? aliasEntry.machineId;
+    const alternateSelector = `m-${handle.slice(2,10)}`;
+    const alternateEntry = await cliJson(["machine", "show", alternateSelector]);
+    t.assertions.assert((alternateEntry.deviceHandle ?? alternateEntry.machineId) === handle
+      && alternateSelector !== machine, "native directory did not resolve the alternative executor selector");
+    const mismatchedWorkspace = await callTask(callerSid, sourceRoot, ["send", "--to", remoteOwner,
+      "--kind", "human", "--resume", "--machine", alternateSelector, "--workspace", otherQa.id,
+      "--message-id", "remote.owner.alias-resume", "Continue the original task"]);
+    t.assertions.assert(mismatchedWorkspace.code !== 0 && mismatchedWorkspace.err.includes("--workspace"),
+      "machine alias silently changed the original dispatch workstation");
+    const idleContinuation = await callTask(callerSid, sourceRoot, ["send", "--to", remoteOwner,
+      "--kind", "human", "--resume", "--machine", alternateSelector, "--workspace", qa.id,
+      "--message-id", "remote.owner.alias-resume", "Continue the original task"]);
+    t.assertions.assert(idleContinuation.code !== 0 && idleContinuation.err.includes("目标当前没有暂停"),
+      "native-equivalent machine selector was mistaken for released work or bypassed the pause guard: " + idleContinuation.code + " " + idleContinuation.err.slice(-1200));
+    const oversizedStatus = await callTask(remoteOwner, targetRoot, ["task", "status", remoteTask.taskId], true);
+    t.assertions.assert(oversizedStatus.code !== 0 && oversizedStatus.err.includes("截断"),
+      "remote status silently accepted a truncated JSON result as authoritative");
+    const boundedStatus = await callTask(remoteOwner, targetRoot, ["task", "status", remoteTask.taskId, "--summary"], true);
+    t.assertions.assert(boundedStatus.code === 0, "bounded remote Task status unavailable: " + boundedStatus.err);
+    const bounded = JSON.parse(JSON.parse(boundedStatus.out.trim()).result);
+    t.assertions.assert(bounded.taskId === remoteTask.taskId && bounded.ownWork.sessionId === remoteOwner
+      && bounded.ownWork.finished === null && bounded.ownWork.mustFinish === true
+      && bounded.supports.finished === 2 && bounded.supports.pending === 0,
+      "a completed support was mistaken for the caller's own conclusion");
+    const sourceEvidence = JSON.parse(readFileSync(sourceTaskFile, "utf8")).collaborators.find((x:any) => x.sessionId === support).finished.evidence;
+    t.assertions.assert(sourceEvidence.endsWith(" evidence".repeat(5500)) && Buffer.byteLength(boundedStatus.out) < 16000,
+      "bounded status rewrote original evidence or copied the whole large ledger");
     t.note("TaskOwner remote: evidence returned to remote Owner; finishing");
     const ownerFinish = await callTask(remoteOwner, targetRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_COMPLETE_WITH_SOURCE_SUPPORT"], true);
     t.assertions.assert(ownerFinish.code === 0, "remote Owner could not finish through source ledger: " + ownerFinish.err);
