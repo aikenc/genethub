@@ -325,21 +325,59 @@ impl SessionManager {
                 let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| {
                     request.kind == PermissionRequestKind::ProviderConfiguration
                 });
-                if !(has_input || has_decision || provider_pending) {
+                // Older recovery trusted a vendor's completed turn summary,
+                // even after native Stop canceled that execution. Such an
+                // input can already say handled; only a still-paused Session
+                // with no formal interaction is eligible for bounded repair.
+                let inspect_canceled_pause = meta.inbox.paused
+                    && meta.pending_permission.is_none()
+                    && meta.human_continuation.is_none()
+                    && meta.inbox.entries.iter().any(|entry| entry.state == "handled");
+                if !(has_input || has_decision || provider_pending || inspect_canceled_pause) {
                     return Ok(());
                 }
                 let live = self.live(&meta.id).await?;
                 let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
                 let mut current = live.meta.lock().await;
                 let mut next = current.clone();
+                let canceled = chat.rounds.last().filter(|round| {
+                    next.inbox.paused
+                        && next.pending_permission.is_none()
+                        && next.human_continuation.is_none()
+                        && !round.synthesized
+                        && round.outcome == Some(RoundOutcome::Canceled)
+                        && !next.inbox.entries.iter().any(|entry| {
+                            conversational(&entry.source)
+                                && entry.received_at_ms > round.started_at_ms
+                                && !entry.turn_id.as_ref().is_some_and(|turn_id| {
+                                    round.adapter_turn_ids.contains(turn_id)
+                                })
+                        })
+                });
                 for entry in &mut next.inbox.entries {
+                    if entry.state == "handled"
+                        && entry.source != "workflow"
+                        && entry.turn_id.as_ref().is_some_and(|turn_id| {
+                            canceled.is_some_and(|round| round.adapter_turn_ids.contains(turn_id))
+                        })
+                    {
+                        // Restore the delivery obligation, never the execution:
+                        // pause, original input, turn id and receipt stay intact.
+                        entry.state = "sent".into();
+                    }
                     if entry.state == "receiving"
                         && chat.items.iter().any(|item| item.id() == entry.message_id)
                     {
                         entry.state = "queued".into();
                     }
-                    if entry.state == "sent" && entry.turn_id.as_ref().is_some_and(|turn_id| chat.items.iter().any(|item|
-                        matches!(item, TimelineItem::TurnSummary { stats, .. } if &stats.turn_id == turn_id && stats.outcome == TurnOutcome::Completed))) {
+                    if entry.state == "sent" && entry.turn_id.as_ref().is_some_and(|turn_id| {
+                        let native = chat.rounds.iter().rev().find(|round| round.adapter_turn_ids.contains(turn_id));
+                        // A real native round overrides adapter statistics.
+                        // Round-less legacy history retains its old behavior.
+                        native.is_none_or(|round| round.outcome == Some(RoundOutcome::Completed))
+                            && chat.items.iter().any(|item|
+                                matches!(item, TimelineItem::TurnSummary { stats, .. } if &stats.turn_id == turn_id && stats.outcome == TurnOutcome::Completed))
+                    }) {
                         entry.state = "handled".into();
                     }
                 }
