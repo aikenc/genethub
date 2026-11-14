@@ -62,6 +62,13 @@ defineSpecialty(
 
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) t.assertions.assert(read(file).includes("我叫小满"), `${file} lacks the soul`);
 
+    for (const member of ["front", "spaces/leader", "spaces/qa", "spaces/research", "spaces/team-reflect"]) {
+      for (const file of ["AGENTS.md", "CLAUDE.md"]) {
+        const compiled = join(expert, member, file);
+        t.assertions.assert(readFileSync(compiled).length <= CODEX_LIMIT, `${member}/${file} exceeds the compiled instruction budget`);
+      }
+    }
+
     const stamp = readFileSync(join(expert, "front/AGENTS.md")).length;
     const second = sync();
     t.assertions.assert(second.status === 0 && second.stdout.trim() === "unchanged", `second sync must not rebuild: ${second.stdout}`);

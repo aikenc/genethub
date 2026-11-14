@@ -3,7 +3,7 @@
 // ordinary scan. These cases start the shipped daemon on an empty data directory and look at what is there.
 // No model is involved.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, localGenetCli, type CaseContext } from "../../framework/public.ts";
@@ -58,7 +58,7 @@ function adminCase(
 adminCase(
   "is-built-and-registered-on-first-start",
   "a fresh machine has an administrator named after it, built, registered as one Space, with the timer hook in place",
-  "after the first start workspace.list holds <机器名>管理员 with no child Spaces under it (the administrator is one Space plus team-admin), the root has no rules while front/ does, the hook list shows team-front.timer valid and owned by SpaceBuilder, and every Skill is under 40 lines",
+  "after the first start workspace.list holds <机器名>管理员 with no child Spaces under it (the administrator is one Space plus team-admin), the root has no rules while front/ does, the hook list shows team-front.timer valid and owned by SpaceBuilder, and shipped daily Skills/references stay within their explicit Unicode character budgets",
   [
     "no administrator on a new machine",
     "the administrator carrying child Spaces it never uses",
@@ -81,10 +81,22 @@ adminCase(
       t.assertions.assert(!existsSync(path.join(admin, "spaces")), "the administrator was given the team's child Spaces");
       const frontRules = readFileSync(path.join(admin, "front", "AGENTS.md"), "utf8");
       t.assertions.assert(frontRules.includes("我做的一切只有一个目的：让用户满意"), "the administrator's rules do not carry the soul");
+      const skillRoot = path.join(admin, "skills", "genet_builtin");
       for (const skill of ["team-core", "team-front", "team-research", "team-reflect", "team-work", "team-admin"]) {
-        const file = path.join(admin, "skills", "genet_builtin", skill, "SKILL.md");
-        const lines = readFileSync(file, "utf8").trimEnd().split("\n").length;
-        t.assertions.assert(lines <= 40, `${skill}/SKILL.md has ${lines} lines`);
+        const text = readFileSync(path.join(skillRoot, skill, "SKILL.md"), "utf8");
+        const characters = [...text].length;
+        const limit = skill === "team-core" ? 2200 : skill === "team-admin" ? 6000 : 1500;
+        t.assertions.assert(characters <= limit, `${skill}/SKILL.md has ${characters} characters, limit ${limit}`);
+        if (skill !== "team-admin") {
+          t.assertions.assert(!/--(?:request-id|expected-revision|expected-budget-revision|creation-id|prepare-only|unit-of|unit-stage|follows|uses)\b/.test(text), `${skill} eagerly loads on-demand parameters`);
+        }
+        const references = path.join(skillRoot, skill, "references");
+        if (existsSync(references)) for (const entry of readdirSync(references, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+          const size = [...readFileSync(path.join(references, entry.name), "utf8")].length;
+          const cap = entry.name === "task-owner.md" ? 4000 : entry.name === "quality.md" ? 3000 : 6000;
+          t.assertions.assert(size <= cap, `${skill}/${entry.name} has ${size} characters, limit ${cap}`);
+        }
       }
       const hooks = localGenetCli(t.openRoot, t.env)(["hook", "list", "--workspace", root!.id]);
       const rows = (hooks.envelope?.data as { hooks: Array<{ id: string; valid: boolean; owner?: string; everySeconds?: number }> }).hooks;
