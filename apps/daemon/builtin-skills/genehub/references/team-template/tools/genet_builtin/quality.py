@@ -51,6 +51,18 @@ def read_issue(kind, error, budget, **identity):
         issue['errorCode'] = code
     if error.__cause__ is not None:
         issue['cause'] = type(error.__cause__).__name__
+    # Only our fixed guard identifiers: never expose arbitrary exception text.
+    guards = {
+        'native rounds changed during bounded capture': 'roundSourceChanged',
+        'native history changed during bounded capture': 'narrativeSourceChanged',
+        'native rounds pagination exceeded capture budget': 'roundPageLimit',
+        'native narrative pagination exceeded capture budget': 'narrativePageLimit',
+        'native rounds have no completed pagination anchor': 'roundAnchorUnavailable',
+    }
+    if type(error) is ValueError and len(error.args) == 1:
+        code = guards.get(error.args[0]) if isinstance(error.args[0], str) else None
+        if code:
+            issue['collectionCode'] = code
     return issue
 
 
@@ -237,11 +249,30 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     if stable and covered and compatible and notification_ready and old.get('integrationReferenceBasis')=='native-owner-use-reference/1' and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
         return old
     inspection = call('session', 'inspect', sid)['inspection']
+    first = call('session', 'rounds', sid, '--limit', '100')['page']
+    # A running Round changes the public source digest as its narrative grows,
+    # even while all older Round rows remain stable. Page completed history
+    # through a fixed completed boundary, retaining the first fresh live rows.
+    # Re-read its first page too: unbounded and pinned digests describe different
+    # views and must never be combined as one pagination proof.
+    fresh = sorted(first['rounds'], key=lambda x: (x['startedAtMs'], x['roundId']))
+    closed = [x for x in fresh if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
+    round_anchor = None
+    current = []
+    if first.get('nextCursor') and not any(
+            x.get('endedAtMs', since+1) < since and x.get('outcome') != 'running'
+            for x in fresh):
+        if not closed:
+            raise ValueError('native rounds have no completed pagination anchor')
+        boundary = closed[-1]
+        round_anchor = boundary['roundId']
+        current = fresh[fresh.index(boundary)+1:]
     rounds, cursor, round_digest = [], None, None
     for _ in range(100):
         args = ['session', 'rounds', sid, '--limit', '100']
+        if round_anchor: args += ['--through-round', round_anchor]
         if cursor: args += ['--cursor', cursor]
-        page = call(*args)['page']
+        page = first if not round_anchor and cursor is None else call(*args)['page']
         digest = page['source']['digest']
         if round_digest is not None and digest != round_digest:
             raise ValueError('native rounds changed during bounded capture')
@@ -253,6 +284,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     else:
         raise ValueError('native rounds pagination exceeded capture budget')
     rounds_complete = cursor is None
+    rounds.extend(current)
     rounds.sort(key=lambda x: (x['startedAtMs'], x['roundId']))
     completed = [x for x in rounds if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
     anchor = completed[-1]['roundId'] if completed else None
