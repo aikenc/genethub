@@ -1,23 +1,23 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { defineSpecialty, openTeam } from "../../framework/public.ts";
+import { defineSpecialty, openTeam, registerControlledAgent, writeScriptAgentControl } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-failed-support-settlement",
-  title: "Native failed support reports its failure once and non-success conclusions retain unresolved work",
-  oracle: "A genuinely failed SDK support remains paused with its original input, but its requester receives one truthful failure result without declaring business success. After the first anomaly is handled, a second real failed Round in that same Session creates one fresh urgent anomaly and native reflection, with no tick replay. A separate unfinished, paused writer blocks success yet permits explicit blocked/failed settlement, retaining its real lease and accepting its eventual result.",
-  catches: ["unfinished Task suppresses native failure forever", "handled anomaly suppresses later failure in the same Session", "new native failure never wakes reflection", "same-Round retry repeats the urgent anomaly", "failure notification resumes failed work", "blocked conclusion waits forever for running support", "non-success settlement releases a paused writer", "late support result is discarded"],
+  title: "Execution failure status and a recovered support result retain their distinct native meanings",
+  oracle: "A genuinely failed SDK support retains its paused input and reports one execution status per failed Round, never a task conclusion. Original-requester recovery after the external SDK fault is resolved delivers one real task result in the same Session without a duplicate R3; legacy failure wire notices remain distinguishable from quoted text and true duplicate results. Handled anomalies, original leases and non-success settlement retain their existing guarantees.",
+  catches: ["unfinished Task suppresses native failure forever", "handled anomaly suppresses later failure in the same Session", "new native failure never wakes reflection", "same-Round retry repeats the urgent anomaly", "failure notification resumes failed work", "blocked conclusion waits forever for running support", "non-success settlement releases a paused writer", "late support result is discarded", "failure status contaminates final-result timing or duplicate scoring", "quoted failure text exempts a genuine result duplicate"],
   tags: ["core", "team-result"], llm: { default: "none" },
-  productInterfaces: ["tools/run.py task", "tools/run.py tick", "session.get", "session.inspect"],
+  productInterfaces: ["tools/run.py task", "tools/run.py tick", "tools/run.py quality facts", "tools/run.py quality card", "session.get", "session.inspect", "session.close", "session.send", "agent.reload"],
   surfaces: ["daemon", "team-template", "filesystem"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },
   expectedDurationMs: 35000, timeoutMs: 180000,
 }, async t => {
+  const failedAgent = registerControlledAgent(t.env, { id: "ctl-failed-support", profile: "coded-failure", failureCode: "upstream" });
   const r = await openTeam(t, "failed-support-settlement", [
     { id: "ctl-cli-command", profile: "cli-command" },
-    { id: "ctl-failed-support", profile: "coded-failure", failureCode: "upstream" },
   ]);
   try {
     const config = join(r.root, ".genethub/open.env");
@@ -89,6 +89,9 @@ defineSpecialty({
       "native failed unfinished support never produced a truthful result receipt");
     const matches = async () => (await r.snapshot(owner)).items.filter(x => x.type === "userMessage" && x.id === first.resultDelivery.messageId);
     t.assertions.assert((await matches()).length === 1, "native failure result was not delivered exactly once");
+    const firstMessage = (await matches())[0];
+    t.assertions.assert(first.resultDelivery.purpose === "status" && firstMessage.type === "userMessage"
+      && firstMessage.text.startsWith("用途: status\n"), "unfinished execution failure was published as a task result");
     r.ok(["tick"]); await idle(owner);
     const after = (await r.snapshot(child)).summary.inputSummary;
     t.assertions.assert((await matches()).length === 1 && after?.paused
@@ -150,7 +153,58 @@ defineSpecialty({
       && inputs.filter(x => x.type === "userMessage" && x.id === newResult).length === 1
       && existsSync(first.lock) && (await r.snapshot(child)).summary.inputSummary?.paused,
       "new failure duplicated an earlier result, cleared its pause or released unfinished work");
-    await cli(owner, ["task", "finish", task.taskId, "--outcome", "blocked", "Failed external check; business not accepted"]);
+    const secondMessage = inputs.find(x => x.type === "userMessage" && x.id === newResult);
+    t.assertions.assert(second.resultDelivery.purpose === "status" && secondMessage?.type === "userMessage"
+      && secondMessage.text.startsWith("用途: status\n"), "later failed Round was mistaken for a task result");
+    // Resolve the real external SDK fault, not the product. The original
+    // requester still has to recover the paused Session through the public CLI.
+    writeScriptAgentControl(failedAgent, { profile: "cli-command" });
+    await r.client.call({ type: "session.close", payload: { sessionId: child } });
+    // The fixture SDK loads control at serve startup; reload the external
+    // service through the public API before the requester resumes its Session.
+    await r.client.call({ type: "agent.reload", payload: { agentId: failedAgent.agentId } });
+    await cli(owner, ["send", "--to", child, "--kind", "human", "--resume", "--message-id", "failure.recovered", "Continue the original unfinished support after its external service recovered"]);
+    await idle(child);
+    await cli(child, ["task", "finish", task.taskId, "--outcome", "success", "Recovered support candidate; business acceptance remains with requester"]);
+    r.ok(["tick"]); await idle(owner);
+    const completed = record();
+    const finalInput = (await r.snapshot(owner)).items.find(x => x.type === "userMessage" && x.id === completed.resultDelivery.messageId);
+    t.assertions.assert(finalInput?.type === "userMessage" && finalInput.text.startsWith("用途: result\n")
+      && completed.resultDelivery.messageId !== originalResult && completed.resultDelivery.messageId !== newResult,
+      "same-Session recovered support did not deliver its actual final result");
+    const file = join(t.env.root, "external-failure-notification-facts.json");
+    const card = (facts: any) => { writeFileSync(file, JSON.stringify(facts)); return JSON.parse(r.ok(["quality", "card", "--snapshot", file])); };
+    const facts = JSON.parse(r.ok(["quality", "facts"]));
+    const item = facts.workItems.find((x: any) => x.id === first.operationId);
+    t.assertions.assert(facts.resultAudienceBasis === "source-result-generation/2"
+      && item.deliveryEvents.length === 1 && item.deliveryEvents[0].messageId === completed.resultDelivery.messageId
+      && item.deliveredAtMs >= item.conclusionAtMs && card(facts).redLines.R3.triggered === false,
+      "execution statuses contaminated the actual final-result timing or duplicate scoring");
+    const failureNotice = "执行回合已失败，业务任务尚未结论；原输入、未完成支持及资源义务保留。";
+    // Public compatibility wire input, explicitly representing an older
+    // producer's status-in-result envelope; no daemon internals are patched.
+    const legacyHeader = `用途: result\n发送方: ${child}\nref: ghref:session:${child}\n\n`;
+    await r.send(owner, legacyHeader + "[并行决策信息] Legacy wire compatibility fixture\n" + failureNotice + "\n原生错误：historical SDK failure fixture"); await idle(owner);
+    const migrated = JSON.parse(r.ok(["quality", "facts"]));
+    const migratedItem = migrated.workItems.find((x: any) => x.id === first.operationId);
+    t.assertions.assert(migratedItem.deliveryEvents.length === 1 && card(migrated).redLines.R3.triggered === false
+      && migrated.executionStatusNotifications.filter((x: any) => x.sourceSessionId === child).length >= 3,
+      "legacy execution status became another task result or disappeared from evidence");
+    const legacy = structuredClone(migrated); legacy.fixture = "labelled legacy scoring projection of actual native notifications";
+    legacy.resultAudienceBasis = "source-result-generation/1";
+    const oldItem = legacy.workItems.find((x: any) => x.id === first.operationId);
+    for (const notice of migrated.executionStatusNotifications.filter((x: any) => x.sourceSessionId === child)) {
+      oldItem.deliveryEvents.push({ recipient: owner, messageId: notice.messageId, acceptedAtMs: notice.receivedAtMs, ref: notice.ref });
+    }
+    const old = card(legacy);
+    t.assertions.assert(old.redLines.R3.triggered === true && JSON.stringify(card(legacy)) === JSON.stringify(old)
+      && old.streakCompatibilityKey !== card(migrated).streakCompatibilityKey, "old failure/result projection was silently reinterpreted or mixed into a new streak");
+    const finalHeader = `用途: result\n发送方: ${child}\nref: ${completed.done.ref}\n\n`;
+    await r.send(owner, finalHeader + "Quoted example, not an execution status:\n```\n" + failureNotice + "\n```"); await idle(owner);
+    const duplicated = JSON.parse(r.ok(["quality", "facts"]));
+    t.assertions.assert(card(duplicated).redLines.R3.instances.some((x: any) => x.reason === "duplicate-result"),
+      "ordinary result quoting the failure marker evaded genuine duplicate-result detection");
+    await cli(owner, ["task", "finish", task.taskId, "--outcome", "blocked", "Recovered support delivered; overall business goal not accepted"]);
 
     for (const outcome of ["blocked", "failed"]) {
       select("ctl-cli-command");
