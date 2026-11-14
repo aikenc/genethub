@@ -27,7 +27,8 @@ R4 未完成目标无因停摆15分钟；R5 结论后资源10分钟未归还；R
 
 新采集事实另带 `scoringIntegrityBasis=native-embedded-team-scoring/1`。R7 在采集前后比对实际本机内核
 通过 `genet context` 返回的内嵌评分包摘要，覆盖 `quality.py`、`quality_score.py`、`task_hours.py`、
-`quality_attribution.py` 及同包全部 Python 依赖；不使用团队可覆写的 `TEAM_TEMPLATE` 作为基准。
+`quality_attribution.py`、其余 `quality_*.py`、验收单元、原生/后台工时及版本等计算依赖；
+与计分无关的派单协调定制不在检查内。不使用团队可覆写的 `TEAM_TEMPLATE` 作为基准。
 缺失、别名或内容不同使卡 `cardValidity=invalid`、正式分为空；读不到内核依据时为未知，不能宣称通过。
 旧平台内核或评分包版本不匹配须沿正常升级处理，不能删校验或用旧健康缓存代替。原有任务、锁和业务不变。
 旧事实没有此 basis 时继续原判；新 basis 进入连续达标兼容键，不与旧卡拼接，也不回写历史。

@@ -31,13 +31,28 @@ pub fn builtin_files_under(
     })
 }
 
-/// Operational scoring integrity, not an OS-account security boundary. Include
-/// the whole Python package so newly introduced dependencies cannot be omitted.
+/// Operational scoring integrity, not an OS-account security boundary. Cover
+/// scoring and its calculation dependencies, leaving ordinary Team dispatch
+/// customization outside this check. New scoring dependencies belong here.
 pub fn team_scoring_manifest() -> serde_json::Value {
     use sha2::{Digest, Sha256};
     let files: std::collections::BTreeMap<_, _> =
         builtin_files_under("genehub/references/team-template/tools/genet_builtin/")
-            .filter(|(name, _)| name.ends_with(".py") && !name.contains('/'))
+            .filter(|(name, _)| {
+                name.ends_with(".py")
+                    && !name.contains('/')
+                    && (*name == "quality.py"
+                        || name.starts_with("quality_")
+                        || matches!(
+                            *name,
+                            "task_hours.py"
+                                | "execution_facts.py"
+                                | "acceptance_units.py"
+                                | "background_jobs.py"
+                                | "template_version.py"
+                                | "scoring_integrity.py"
+                        ))
+            })
             .map(|(name, bytes)| (name, format!("{:x}", Sha256::digest(bytes))))
             .collect();
     serde_json::json!({"basis":"native-embedded-team-scoring/1", "files":files})
