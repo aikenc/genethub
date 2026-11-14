@@ -79,29 +79,43 @@ defineSpecialty({
     await page.goto(`${hub.origin}/d/${a.client.identity!.machineId}/w/${a.workspaceId}/s/${first}`);
     await page.getByRole("heading", { name: "Hosted A session", exact: true }).waitFor();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
-    const group=list.getByRole("region",{name:"项目 Hosted A project",exact:true});
-    await group.getByRole("button",{name:/Hosted A session/}).waitFor();
-    t.assertions.assert(await group.getByRole("button",{name:/Hosted B session/}).count()===0,"remote internal session expanded by default");
-    await group.getByRole("button",{name:/团队内部.*3 个 Space/}).click();
-    const spaceFilter=group.getByRole("button",{name:"Hosted A project Space 筛选",exact:true});
-    await spaceFilter.click();
-    const chooser=page.getByRole("listbox",{name:"Hosted A project Space 筛选",exact:true});
-    await chooser.getByRole("option",{name:/共享验证.*Hosted A/}).waitFor();
-    await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).waitFor();
-    await chooser.getByRole("option",{name:/离线岗位.*状态未知/}).waitFor();
-    t.assertions.assert(await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).count()===0,"Space chooser unexpectedly opened search");
-    t.assertions.assert(await chooser.getByRole("option").count()===4,"source-labelled options are not directly available");
-    await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).click();
-    await group.getByRole("button",{name:/Hosted B session/}).waitFor();
-    t.assertions.assert(await group.getByRole("button",{name:/Local same-name Space/}).count()===0,"selected remote Space leaked a local sibling");
-    t.assertions.assert(await group.getByRole("button",{name:/Hosted A session/}).isEnabled(),"Space loading disabled the front conversation");
-    await list.getByRole("button", { name: "机器筛选", exact: true }).click();
-    await list.getByRole("menuitemradio", { name: /全部机器.*2\/2 在线/ }).waitFor();
+    await list.getByRole("button",{name:/Hosted A session/}).waitFor();
+    await list.getByRole("button",{name:/Hosted B session/}).waitFor();
+    t.assertions.assert(await list.getByRole("button",{name:/Local same-name Space/}).count()===0,
+      "internal child history leaked into the flat root list");
+    const navigation=page.getByRole("navigation",{name:"工作台导航",exact:true});
+    await navigation.getByRole("button",{name:"项目",exact:true}).click();
+    const projects=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    const group=projects.getByRole("region",{name:"项目 Hosted A project",exact:true});
+    await group.getByRole("button",{name:"展开成员 Hosted A project",exact:true}).click();
+    const members=group.getByRole("list",{name:"Hosted A project 成员",exact:true});
+    const localMember=members.getByRole("button",{name:"打开成员 共享验证",exact:true}).filter({hasText:"Hosted A"});
+    const remoteMember=members.getByRole("button",{name:"打开成员 共享验证",exact:true}).filter({hasText:"Hosted B"});
+    await localMember.waitFor(); await remoteMember.waitFor();
+    t.assertions.assert(await members.getByRole("button").count()===3 &&
+      await members.getByRole("button",{name:"打开成员 离线岗位",exact:true}).isDisabled(),
+      "machine-qualified members or the unavailable member state disappeared");
+    const beforeMember=connects;
+    await remoteMember.click();
+    const project=page.getByRole("region",{name:"项目页面",exact:true});
+    await project.getByRole("heading",{name:"共享验证",exact:true}).waitFor();
+    await project.getByRole("button",{name:/Hosted B session/}).waitFor();
+    t.assertions.assert(await project.getByRole("button",{name:/Local same-name Space/}).count()===0,
+      "remote member opened its same-name local sibling");
+    t.assertions.assert(connects===beforeMember,"opening the member rebuilt an already pooled source");
+    await navigation.getByRole("button",{name:"会话",exact:true}).click();
+    await list.getByRole("button",{name:/Hosted A session/}).click();
+    await page.getByRole("heading",{name:"Hosted A session",exact:true}).waitFor();
+    await list.getByRole("button",{name:"机器筛选",exact:true}).click();
+    await list.getByRole("menuitemradio",{name:/全部机器.*2\/2 在线/}).waitFor();
     await page.keyboard.press("Escape");
     await list.getByRole("button",{name:"机器筛选",exact:true}).click();
     await list.getByRole("menuitemradio",{name:/Hosted B.*在线/}).click();
-    await group.getByRole("button",{name:/Hosted B session/}).waitFor();
-    t.assertions.assert(await group.getByRole("button",{name:/Hosted A session/}).count()===0,"machine filter retained a front on the other machine");
+    await list.getByRole("button",{name:/Hosted B session/}).waitFor();
+    t.assertions.assert(await list.getByRole("button",{name:/Hosted A session/}).count()===0,
+      "machine filter retained a front on the other machine");
+    t.assertions.assert(await page.getByRole("heading",{name:"Hosted A session",exact:true}).isVisible(),
+      "filter changed the active source conversation");
     await list.getByRole("button",{name:"机器筛选",exact:true}).click();
     await list.getByRole("menuitemradio",{name:/全部机器/}).click();
     const beforeJump = connects;

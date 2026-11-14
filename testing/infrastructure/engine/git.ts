@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type { ArtifactIdentity, RepoIdentity } from "../types.ts";
-import { GENET, locateRuntimeArtifact } from "./artifacts.ts";
+import { GENET, locateRuntimeArtifact, preparedTestArtifacts } from "./artifacts.ts";
 
 function git(cwd: string, args: string[]): string {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -77,6 +77,7 @@ export function runsIgnored(spaceRoot: string): boolean {
 /** Exact bytes of native artifacts and built JS inputs, including explicit overrides. */
 export function artifactBundleIdentity(openRoot: string, cloudRoot?: string, hashFile = snapshotHasher()) {
   const roots = [
+    ...preparedTestArtifacts(openRoot),
     ...["iterate", "debug", "release"].flatMap(profile => [
       ...["genet-local", "genet-dev", "genet-beta", "genet", "genehub-host-local"].map(name => path.join(openRoot, "target", profile, name)),
       path.join(openRoot, "target", "wasm32-wasip2", profile, "genehub_guest.wasm"),

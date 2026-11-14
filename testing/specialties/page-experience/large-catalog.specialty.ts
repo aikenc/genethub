@@ -6,7 +6,7 @@ declare global { interface Window { catalogEvidence: Observed[] } }
 defineSpecialty({
   id: "specialty.page-experience.large-catalog-refresh",
   title: "Actual Workbench with 802 sessions bounds catalog refreshes and releases background body subscriptions",
-  oracle: "The real page lists 802 public-created sessions, seven tab visits leave one body consumer, concurrent task completions never overlap same-page workspace lists, and a real physical cut restores the page without a catalog storm or repeated source tasks",
+  oracle: "The real page lists 802 public-created sessions, seven tab visits leave one body consumer, concurrent task completions never overlap same-page catalog synchronizations, and a real physical cut restores the page without a catalog storm or repeated source tasks",
   catches: ["802-session incident replaced with a tiny fixture", "session coalescing invalidated by physical recovery", "warm background tabs keep loading lists", "only bare Client traffic was measured"],
   tags: ["page-experience", "large-catalog", "team-scale"], runner: "playwright", llm: { default: "none" },
   expectedDurationMs: 120000, timeoutMs: 300000,
@@ -51,7 +51,14 @@ defineSpecialty({
     await page.getByRole("heading", { name: "目录会话 000", exact: true }).waitFor();
     await page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
-    await t.tools.waitUntil(async () => await list.locator(".conversation-row").count() === 802, 45000);
+    // The directory intentionally starts with bounded history. Exercise its
+    // real paging control rather than requiring an unbounded initial read.
+    while (await list.locator(".conversation-row").count() < 802) {
+      const before = await list.locator(".conversation-row").count();
+      await list.getByRole("button", { name: /加载 .+ 的更早会话/ }).click();
+      await t.tools.waitUntil(async () => await list.locator(".conversation-row").count() > before, 45000);
+    }
+    t.assertions.assert(await list.locator(".conversation-row").count() === 802, "paged public history lost or duplicated rows");
     for (let i = 1; i < 7; i++) {
       const title = `目录会话 ${String(i).padStart(3, "0")}`;
       await list.locator(".conversation-row").filter({ hasText: title }).getByRole("button").first().click();
@@ -61,11 +68,14 @@ defineSpecialty({
     await Promise.all(ids.slice(0, 7).map(id => t.flows.main.sendPrompt(opened.client, id, "Emit deterministic output.")));
     await t.tools.waitUntil(() => readControlledAgentJournal(agent).filter(e => e.event === "answered").length === 7, 15000);
     const answeredAt = Date.now();
-    // Allow a complete normal summary-poll interval to observe the burst.
+    // Refresh through the real directory control, then cut its in-flight
+    // incremental synchronization; the current UI does not poll session.list.
     await page.waitForTimeout(6500);
+    await list.getByRole("button", { name: "列表选项", exact: true }).click();
+    await list.getByRole("menuitem", { name: "刷新列表", exact: true }).click();
     await t.tools.waitUntil(() => page.evaluate(() => {
       const active = new Set<string>();
-      for (const e of window.catalogEvidence) if ((e.operation === "session.list" || e.operation === "workspace.list") && e.requestId) {
+      for (const e of window.catalogEvidence) if ((e.operation === "catalog.sync" || e.operation === "session.list" || e.operation === "workspace.list") && e.requestId) {
         if (e.phase === "start") active.add(e.requestId);
         else if (e.phase === "finish") active.delete(e.requestId);
       }
@@ -101,7 +111,7 @@ defineSpecialty({
     const body = await opened.client.call({ type: "session.get", payload: { sessionId: ids[6]!, recentRounds: 1 } });
     t.assertions.assert(body?.type === "snapshot", "last selected session disappeared");
     t.note(JSON.stringify({ catalog: 802, visited: 7, activeBody, burstWorkspacePeak: peak(beforeCut.filter(e => e.at >= mark), "workspace.list"),
-      workspacePeak: peak(events, "workspace.list"), sessionPeak: peak(events, "session.list"),
+      workspacePeak: peak(events, "workspace.list"), sessionPeak: peak(events, "session.list"), catalogSyncPeak: peak(events, "catalog.sync"),
       recoveryWorkspaceReads: afterCut.filter(e => e.operation === "workspace.list" && e.phase === "start").length,
       sourcePrompts: readControlledAgentJournal(agent).filter(e => e.event === "prompt").length, answered: 7 }));
     t.note(JSON.stringify({ catalogSequence: events.filter(e => e.at >= mark && (e.state || e.operation === "workspace.list" || e.operation === "session.list"))
@@ -112,24 +122,23 @@ defineSpecialty({
     // retain the first cut to test an RPC that survives physical recovery.
     await t.tools.waitUntil(() => page.evaluate(answeredAt => {
       const events = window.catalogEvidence;
-      const catalog = events.filter(e => e.operation === "session.list" || e.operation === "workspace.list");
+      const catalog = events.filter(e => e.operation === "catalog.sync" || e.operation === "session.list" || e.operation === "workspace.list");
       const active = new Set<string>();
       for (const e of catalog) if (e.requestId) {
         if (e.phase === "start") active.add(e.requestId);
         else if (e.phase === "finish") active.delete(e.requestId);
       }
-      const fresh = catalog.some(e => e.operation === "session.list" && e.phase === "start" && e.at >= answeredAt &&
-        catalog.some(end => end.requestId === e.requestId && end.phase === "finish"));
+      const fresh = events.some(e => e.operation === "catalog.receive" && e.phase === "finish" && e.at >= answeredAt);
       return fresh && active.size === 0 && Date.now() - (catalog.at(-1)?.at ?? 0) >= 500;
     }, answeredAt), 90000);
     const quietOffset = await page.evaluate(() => window.catalogEvidence.length);
     await cutAndRecover(quietOffset);
     await page.waitForTimeout(6500);
     const finalEvents = await page.evaluate(() => window.catalogEvidence);
-    const quietWorkspaceReads = finalEvents.slice(quietOffset).filter(e => e.operation === "workspace.list" && e.phase === "start").length;
-    t.note(JSON.stringify({ phase: "quiescent-recovery", quietWorkspaceReads, workspacePeak: peak(finalEvents, "workspace.list"), sessionPeak: peak(finalEvents, "session.list") }));
+    const quietWorkspaceReads = finalEvents.slice(quietOffset).filter(e => (e.operation === "catalog.sync" || e.operation === "workspace.list") && e.phase === "start").length;
+    t.note(JSON.stringify({ phase: "quiescent-recovery", quietWorkspaceReads, workspacePeak: peak(finalEvents, "workspace.list"), sessionPeak: peak(finalEvents, "session.list"), catalogSyncPeak: peak(finalEvents, "catalog.sync") }));
     t.assertions.assert(activeBody === 1, "background tabs retained body consumers after seven real page visits");
-    t.assertions.assert(peak(finalEvents, "workspace.list") <= 1 && peak(finalEvents, "session.list") <= 1, "same-page catalog requests overlapped");
+    t.assertions.assert(peak(finalEvents, "workspace.list") <= 1 && peak(finalEvents, "session.list") <= 1 && peak(finalEvents, "catalog.sync") <= 1, "same-page catalog requests overlapped");
     t.assertions.assert(quietWorkspaceReads <= 1, "quiescent physical recovery triggered repeated workspace hydration");
     t.assertions.assert(await list.locator(".conversation-row").count() === 802 && readControlledAgentJournal(agent).filter(e => e.event === "prompt").length === 7, "recovery lost directory rows or repeated source tasks");
   } finally {

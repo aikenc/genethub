@@ -58,7 +58,7 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.cold-session-read-boundaries",
   title: "Cold lookup retains project identity, future-format refusal and deletion fences",
-  oracle: "After a real restart, public reads select the newest copied native ID, retain another project's own conversation, and refuse a future layout, deleted leftover and path traversal.",
+  oracle: "After persistent copies are written while stopped, a real restart selects the newest correctly owned native ID, ignores a newer foreign-project-key copy, retains the destination's own conversation, and refuses a future layout, deleted leftover and path traversal.",
   catches: ["point lookup chooses a different project than the catalog", "a deleted directory resurrects", "an unsupported layout opens", "a session ID becomes a filesystem path"],
   tags: ["core", "session-read", "recovery-depth"], llm: { default: "none" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -69,6 +69,7 @@ defineSpecialty({
   try {
     await t.flows.main.configureMockProvider(o.client, o.mock);
     const target = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
+    const foreign = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
     const future = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
     const deleted = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
     const metaPath = (root: string, id: string) => join(root, ".genethub", "sessions", id, "meta.json");
@@ -79,7 +80,8 @@ defineSpecialty({
     if (opened?.type !== "workspace") throw new Error("second project missing");
     const other = await t.flows.main.createBuiltinSession(o.client, opened.data.id);
     o.client.close(); o.daemon.stop(); await o.mock.stop();
-    o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    // Prepare external persistent state while stopped so startup, rather than
+    // a background reconciliation race, owns this cold-lookup scenario.
     // Exercise externally written persistent state through the same disk format
     // used by real project copies and later compatible installations.
     const copy = JSON.parse(readFileSync(metaPath(t.env.workspace, target), "utf8"));
@@ -87,14 +89,26 @@ defineSpecialty({
     // project, just as native writes do; foreign project keys are not aliases.
     copy.projectKey = JSON.parse(readFileSync(metaPath(otherRoot, other), "utf8")).projectKey;
     copy.title = "newer project copy"; copy.updatedAtMs += 10_000;
+    const destination = JSON.parse(readFileSync(metaPath(otherRoot, other), "utf8"));
+    copy.projectKey = destination.projectKey; // valid destination ownership
+    const wrongOwner = JSON.parse(readFileSync(metaPath(t.env.workspace, foreign), "utf8"));
+    wrongOwner.title = "foreign-key copy must not move the original"; wrongOwner.updatedAtMs += 20_000;
+    // Plain folders legitimately share the "folder" view key across physical
+    // homes. Use an actually unclaimed view key for the ownership refusal.
+    wrongOwner.projectKey = "unregistered-project-view";
+    mkdirSync(join(otherRoot, ".genethub", "sessions", foreign), { recursive: true });
+    writeFileSync(metaPath(otherRoot, foreign), JSON.stringify(wrongOwner));
     mkdirSync(join(otherRoot, ".genethub", "sessions", target), { recursive: true });
     writeFileSync(metaPath(otherRoot, target), JSON.stringify(copy));
     const newer = JSON.parse(readFileSync(metaPath(t.env.workspace, future), "utf8"));
     newer.format += 100; writeFileSync(metaPath(t.env.workspace, future), JSON.stringify(newer));
     mkdirSync(join(t.env.workspace, ".genethub", "sessions", deleted), { recursive: true });
     writeFileSync(metaPath(t.env.workspace, deleted), removed);
+    o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const selected = await o.client.call({ type: "session.get", payload: { sessionId: target } });
     t.assertions.assert(selected?.type === "snapshot" && selected.data.summary.workspaceId === opened.data.id && selected.data.summary.title === copy.title, "cold lookup changed the newest copied conversation's project");
+    const retained = await o.client.call({ type: "session.get", payload: { sessionId: foreign } });
+    t.assertions.assert(retained?.type === "snapshot" && retained.data.summary.workspaceId === o.workspaceId && retained.data.summary.title !== wrongOwner.title, `foreign project key moved the original conversation: ${JSON.stringify({type:retained?.type, source:o.workspaceId, destination:opened.data.id, actual:retained?.type === "snapshot" ? retained.data.summary.workspaceId : null, foreignTitle:retained?.type === "snapshot" && retained.data.summary.title === wrongOwner.title, distinctKeys:wrongOwner.projectKey !== destination.projectKey, sourceKeyPresent:typeof wrongOwner.projectKey === "string"})}`);
     const second = await o.client.call({ type: "session.get", payload: { sessionId: other } });
     t.assertions.assert(second?.type === "snapshot" && second.data.summary.workspaceId === opened.data.id, "second project's own conversation was lost");
     for (const id of [future, deleted, "../outside", "..", "\\outside"]) {
@@ -113,5 +127,7 @@ defineSpecialty({
       t.assertions.assert(catalog?.type==="sessions" && !catalog.data.some(s=>s.id===deleted),"native deletion fence was lost during catalog convergence");
       return catalog?.type==="sessions" && catalog.data.some(s=>s.id===future && Boolean(s.unsupported));
     },15000);
+    const catalog = await o.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
+    t.assertions.assert(catalog?.type === "sessions" && catalog.data.find(row => row.id === target)?.workspaceId === opened.data.id && catalog.data.find(row => row.id === target)?.title === copy.title, "cold point lookup and catalog disagreed on copied conversation ownership");
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

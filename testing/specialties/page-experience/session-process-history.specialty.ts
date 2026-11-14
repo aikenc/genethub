@@ -58,9 +58,16 @@ defineSpecialty({
     await t.tools.waitUntil(async () => {
       const header = trunk.getByRole("button").first();
       if (await header.getAttribute("aria-expanded") === "false") await header.click();
-      for (const batch of await trunk.getByTestId("round-batch").all()) {
-        const button = batch.getByRole("button").first();
-        if (await button.getAttribute("aria-expanded") === "false") await button.click();
+      if (await trunk.getByTestId("blob-row").count() === 2) return true;
+      const collapsed=trunk.locator('[data-testid="round-batch"] > button[aria-expanded="false"]');
+      if (await collapsed.count()) {
+        try { await collapsed.first().click({timeout:500}); }
+        catch(error) {
+          // The completed card can replace this header while Playwright waits
+          // for layout stability. Re-observe the current public controls within
+          // the same 15s interaction window; only two actual rows can pass.
+          if (!/element was detached from the DOM/.test(String(error))) throw error;
+        }
       }
       return await trunk.getByTestId("blob-row").count() === 2;
     }, 15_000);

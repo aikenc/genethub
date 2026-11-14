@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-overview",
-  title: "A 35-role Team separates current work from bounded scoped progress history",
-  oracle: "One active snapshot retains all 35 native roles without expanding the two completed Agent conversations; progress uses explicitly bounded Team Space pages, counts one business round and excludes reflection; malformed responses preserve the prior status.",
+  title: "A 35-role Team preserves current work without no-signal history patrol",
+  oracle: "One active snapshot retains all 35 native roles and excludes settled conversations; a no-signal hook performs no historical patrol or automatic reflection, keeps native history readable and any current-work query bounded to the Team; malformed responses preserve prior status.",
   catches: ["board refresh queries every role", "progress uses unbounded machine-wide history", "reflection counts as business progress", "malformed overview erases last good status"],
   tags: ["core", "expert", "performance"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -23,6 +23,7 @@ defineSpecialty({
   };
   try {
     mkdirSync(join(root, "tools"), { recursive: true });
+    writeFileSync(join(root, "tools/run.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/run.py")));
     writeFileSync(join(root, "tools/team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
       writeFileSync(join(root, "tools", "team_tasks.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team_tasks.py")));
       cpSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin"), join(root, "tools/genet_builtin"), { recursive: true });
@@ -84,25 +85,33 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     let queries = listQueries();
     t.assertions.assert(queries.length === 1 && queries[0]!.includes("--lean") && queries[0]!.includes("--active"), `Board query amplification: ${JSON.stringify(queries)}`);
     const modelRequestsBeforeHook = o.mock.requests.length;
+    const reflectionState=join(root,".genethub/team/reflect.json");
+    const reflectionBefore=existsSync(reflectionState)?readFileSync(reflectionState,"utf8"):null;
     const hook = command("hook"); t.assertions.assert(hook.status === 0, hook.stderr);
-    const progress = JSON.parse(readFileSync(join(root, ".genethub/team/reflect.json"), "utf8"));
-    t.assertions.assert(progress.seen.rounds === 1, `Reflection counted as business progress: ${JSON.stringify(progress.seen)}`);
+    t.assertions.assert((existsSync(reflectionState)?readFileSync(reflectionState,"utf8"):null)===reflectionBefore,"a no-signal hook mutated reflection state");
     queries = listQueries();
     const scopes = new Set(spaces.filter((w: any) => w.root === root || w.root.startsWith(join(root, "spaces") + "/")).map((w: any) => w.id));
     const incremental = queries.filter(a => a.includes("--since"));
     const history = queries.filter(a => !a.includes("--active") && !a.includes("--since"));
-    const requestedScopes = (a: string[]) => a.flatMap((flag,index) => flag==="--workspace" ? [a[index+1]] : []);
-    t.assertions.assert(incremental.length<=1 && incremental.every(a => requestedScopes(a).length>0
-      && requestedScopes(a).every(id => scopes.has(id)) && requestedScopes(a).length<=scopes.size),
-      `Incremental snapshot escaped Team scope: ${JSON.stringify(incremental)}`);
-    t.assertions.assert(queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 2
-      && history.every(a => requestedScopes(a).length===1 && scopes.has(a[a.indexOf("--workspace") + 1]) && a.includes("--limit")
-        && Number(a[a.indexOf("--limit") + 1]) > 0 && Number(a[a.indexOf("--limit") + 1]) <= 500),
-      `Hook used unbounded or unrelated history: ${JSON.stringify(queries)}`);
+    const withinTeam = (args: string[]) => {
+      const requested = args.flatMap((arg, i) => arg === "--workspace" ? [args[i + 1]!] : []);
+      return requested.length > 0 && requested.length <= scopes.size && requested.every(id => scopes.has(id)) && !args.includes("--machine");
+    };
+    t.assertions.assert(incremental.length===1 && incremental.every(withinTeam) && history.length===0
+      && queries.length<=2 && queries.every(a=>(a.includes("--active")||a.includes("--since"))&&withinTeam(a)),
+      `No-signal hook performed historical patrol or escaped Team scope: ${JSON.stringify(queries)}`);
+    const again = command("hook"); t.assertions.assert(again.status === 0, again.stderr);
+    const repeatedQueries=listQueries();
+    t.assertions.assert(repeatedQueries.length<=2&&repeatedQueries.every(a=>(a.includes("--active")||a.includes("--since"))&&withinTeam(a))&&repeatedQueries.filter(a=>a.includes("--since")).every(a=>a[a.indexOf("--since")+1]!=="start"),"repeated no-signal hook started history patrol");
+    t.assertions.assert((existsSync(reflectionState)?readFileSync(reflectionState,"utf8"):null)===reflectionBefore,"repeated hook mutated reflection state");
+    for(const sid of [business,reflection]){
+      const native=(await cli(["session","get",sid,"--summary"])).summary;
+      t.assertions.assert(native.status==="idle"&&Boolean(native.latestReply),"current-only overview deleted settled native history");
+    }
     t.assertions.assert(o.mock.requests.length === modelRequestsBeforeHook, "Hook unexpectedly started automatic model work");
     writeFileSync(mode, "missing-sessions");
     command("board", "refresh");
     t.assertions.assert(readFileSync(status, "utf8") === before, "Malformed snapshot replaced last good status with partial or empty data");
-    t.note(JSON.stringify({ roles: scopes.size, activeBoardQueries: 1, hookQueries: queries.length, incrementalSnapshots:incremental.length, boundedHistoryPages: history.length, businessRounds: progress.seen.rounds, additionalModelWork: 0, malformedPreservedLastGood: true }));
+    t.note(JSON.stringify({ roles: scopes.size, activeBoardQueries: 1, hookQueries: queries.length, incrementalSnapshots:incremental.length, boundedHistoryPages: history.length, historyPatrols: history.length, additionalModelWork: 0, malformedPreservedLastGood: true }));
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

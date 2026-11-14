@@ -68,7 +68,7 @@ defineSpecialty({
     await page.getByRole("button", { name: "预览信息", exact: true }).click();
     await page.getByText("这个文件没有登记本地服务。", { exact: true }).waitFor();
     t.assertions.assert(await page.getByText("这个文件没有登记本地服务。", { exact: true }).isVisible(), "absent service hides its reason");
-    t.assertions.assert(await page.getByRole("button", { name: "重新检查服务", exact: true }).isVisible(), "preview info omitted recheck");
+    t.assertions.assert(await page.getByRole("button", { name: "重新连接", exact: true }).isVisible(), "preview info omitted recheck");
     t.assertions.assert(await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").count() === 0, "service failure still occupies a content row");
     await page.keyboard.press("Escape");
     t.assertions.assert(await page.getByRole("dialog", { name: "预览信息", exact: true }).count() === 0, "Escape left preview info open");

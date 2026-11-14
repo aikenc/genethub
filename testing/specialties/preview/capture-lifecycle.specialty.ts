@@ -144,9 +144,10 @@ defineSpecialty({
   expectedDurationMs: 60000, timeoutMs: 400000,
   resources: { environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0 },
   surfaces: ["capture", "os-process"],
+  requiredArtifacts: ["genehub-capture-native-tests"],
 }, async t => {
   try {
-    const { stdout } = await promisify(execFile)("cargo", ["test", "--manifest-path", join(t.openRoot, "apps/capture/Cargo.toml")], {
+    const { stdout } = await promisify(execFile)("cargo", ["test", "--locked", "--manifest-path", join(t.openRoot, "apps/capture/Cargo.toml"), "--target-dir", join(t.openRoot, "target", "capture-native-tests")], {
       cwd: t.openRoot, env: process.env, timeout: 380000, maxBuffer: 4 * 1024 * 1024,
     });
     const result = stdout.match(/test result: ok\. ([1-9]\d*) passed; 0 failed/);

@@ -14,6 +14,7 @@ defineSpecialty({
   tags: ["contract", "daemon-baseline", "durable-interaction"], llm: { default: "none" },
   expectedDurationMs: 60_000, timeoutMs: 300_000,
   resources: { environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0, pool: "exclusive" },
+  requiredArtifacts: ["genet-daemon-lib-tests"],
   surfaces: ["daemon-owning-package", "native-intrinsic"],
 }, async t => {
   try {

@@ -65,8 +65,9 @@ for (const width of [390, 1280]) defineSpecialty({
     t.assertions.assert(Boolean(popupBox&&listBox&&popupBox.x>=listBox.x&&popupBox.x+popupBox.width<=listBox.x+listBox.width),"machine menu escaped the list width");
     await page.keyboard.press("Escape");
     t.assertions.assert(await machines.evaluate(e=>e===document.activeElement),"Escape did not return focus to the machine filter");
-    await list.getByRole("button", { name: /甲机器项目/ }).waitFor();
-    await list.getByRole("button", { name: /乙机器项目/ }).waitFor();
+    await list.getByRole("button", { name: /甲机器专属会话/ }).waitFor();
+    await list.getByRole("button", { name: /乙机器专属会话/ }).waitFor();
+    for (const label of ["甲", "乙"]) await list.locator(".conversation-row").filter({hasText:`${label}机器专属会话`}).getByText(`${label}机器项目`,{exact:true}).waitFor();
     if(width>=700){
       await page.evaluate(()=>{
         const failures:string[]=[];
@@ -89,7 +90,7 @@ for (const width of [390, 1280]) defineSpecialty({
     t.assertions.assert(await machines.innerText()===entries[1]!.label,"keyboard selection did not select the long machine name");
     const selectedGeometry=await machines.evaluate(e=>({width:e.clientWidth,scroll:e.scrollWidth}));
     t.assertions.assert(selectedGeometry.scroll<=selectedGeometry.width,"selected long name overflowed the compact filter");
-    t.assertions.assert(await list.getByRole("button", { name: /甲机器项目/ }).count() === 0, "machine filter left another source visible");
+    t.assertions.assert(await list.getByRole("button", { name: /甲机器专属会话/ }).count() === 0 && await list.getByText("甲机器项目",{exact:true}).count() === 0, "machine filter left another source visible");
     t.assertions.assert(await page.getByRole("heading", { name: "甲机器专属会话", exact: true, includeHidden: true }).count() === 1, "filter changed the active conversation");
     await list.getByRole("button", { name: /乙机器专属会话/ }).click();
     await page.getByRole("heading", { name: "乙机器专属会话", exact: true }).waitFor();

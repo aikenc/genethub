@@ -5,9 +5,9 @@ import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framew
 
 for (const width of [390, 1280]) defineSpecialty({
   id: `specialty.page-experience.conversation-groups.${width}`,
-  title: `Ordinary flat conversations and automatic project observation at ${width}px`,
-  oracle: "A real browser lists ordinary conversations flat and nested Space projects grouped by default, ignores retired grouping preferences, preserves actual structural ownership across reload, opens child history and actionable archived work, and opens a team-delivered page through Asset Preview",
-  catches: ["team projects stay flat until manually configured", "role names silently change layout", "child conversations or archived failures disappear", "grouping loses entry conversations or nested ownership", "phone controls require hover", "progress depends on platform-hardcoded paths"],
+  title: `Flat conversations and source-owned project members at ${width}px`,
+  oracle: "A real browser keeps all root conversations flat, lists nested Spaces as project members independently of retired grouping preferences, preserves actual ownership across reload, opens child history and actionable archived work through their Space pages, and opens a delivered page through Asset Preview",
+  catches: ["actual project members disappear", "role names silently change layout", "child conversations or archived failures disappear", "flat lists lose entry conversations or member navigation loses nested ownership", "phone controls require hover", "progress depends on platform-hardcoded paths"],
   tags: ["page-experience", "conversation-groups"], runner: "playwright", llm: { default: "mock" },
   expectedDurationMs: 45_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
@@ -94,64 +94,93 @@ for (const width of [390, 1280]) defineSpecialty({
     }
     await page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
     await showList();
-    const group = list.getByRole("region", { name: "项目 观察项目", exact: true });
-    await group.waitFor();
     await row("入口沟通一").waitFor(); await row("入口沟通二").waitFor();
     await row("另一项目普通会话").waitFor();
-    t.assertions.assert(await list.locator(".project-session-group").count()===1,"ordinary project was not flat beside a grouped Space project");
-    const internal=group.getByRole("button",{name:/团队内部/});
-    t.assertions.assert(await internal.getAttribute("aria-expanded")==="false"&&await row("验证会话一").count()===0,"internal conversations were expanded by default");
+    t.assertions.assert(await list.locator(".project-session-group").count()===0,
+      "root conversations reverted to project grouping");
+    t.assertions.assert(await row("验证会话一").count()===0 && await row("深层工作会话").count()===0,
+      "internal conversations leaked into the flat root list");
+    const navigation=page.getByRole("navigation",{name:"工作台导航",exact:true});
+    const projects=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    const showProjects=async()=>{
+      for(let depth=0;depth<4 && !await navigation.isVisible();depth++)
+        await page.getByRole("button",{name:/^(会话列表|返回)$/}).first().click();
+      await navigation.getByRole("button",{name:"项目",exact:true}).click(); await projects.waitFor();
+    };
+    const openMember=async(rootName:string,memberName:string)=>{
+      await showProjects();
+      const owner=projects.getByRole("region",{name:`项目 ${rootName}`,exact:true});
+      const expand=owner.getByRole("button",{name:`展开成员 ${rootName}`,exact:true});
+      if(await expand.count()) await expand.click();
+      await owner.getByRole("list",{name:`${rootName} 成员`,exact:true})
+        .getByRole("button",{name:`打开成员 ${memberName}`,exact:true}).click();
+      const current=page.getByRole("region",{name:"项目页面",exact:true});
+      await current.getByRole("heading",{name:memberName,exact:true}).waitFor(); return current;
+    };
+    await showProjects();
+    const group=projects.getByRole("region",{name:"项目 观察项目",exact:true});
     await group.getByRole("img",{name:"1 待你处理",exact:true}).first().waitFor();
     await group.getByRole("img",{name:"1 运行异常",exact:true}).first().waitFor();
-    await list.getByRole("button",{name:"进行中",exact:true}).click();
-    await row("归档问题会话").waitFor(); await row("归档失败会话").waitFor();
-    await row("归档问题会话").getByRole("img",{name:/待你处理/}).waitFor();
-    await row("归档失败会话").getByRole("img",{name:/运行异常/}).waitFor();
-    t.assertions.assert(await row("已完成历史").count()===0&&await row("另一项目普通会话").count()===0,"combined active filter included idle conversations");
-    await list.getByRole("button",{name:"全部",exact:true}).click();
-    await internal.click();
-    await row("验证会话一").waitFor(); await row("验证会话二").waitFor();
-    const spaces=group.getByRole("button",{name:"观察项目 Space 筛选",exact:true});
-    await spaces.click();
-    await page.getByRole("listbox",{name:"观察项目 Space 筛选",exact:true}).getByRole("option",{name:/verification/}).click();
-    await row("验证会话二").waitFor();
-    t.assertions.assert(await row("深层工作会话").count()===0,"Space filter mixed sibling/deeper conversations");
-    await group.getByRole("button",{name:"清除Space筛选",exact:true}).click();
-    await row("深层工作会话").getByRole("button").first().click();
+    t.assertions.assert(await group.getByRole("button",{name:"展开成员 观察项目",exact:true}).getAttribute("aria-expanded")==="false",
+      "member rows were expanded without user action");
+    const verification=await openMember("观察项目","verification");
+    await verification.getByRole("button",{name:/验证会话一/}).waitFor();
+    await verification.getByRole("button",{name:/验证会话二/}).waitFor();
+    t.assertions.assert(await verification.getByRole("button",{name:/深层工作会话/}).count()===0,
+      "selected member mixed another nested Space's history");
+    await verification.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"进行中",exact:true}).click();
+    await verification.getByRole("button",{name:/归档问题会话/}).waitFor();
+    t.assertions.assert(await verification.getByRole("button",{name:/已完成历史|另一项目普通会话/}).count()===0,
+      "current-work filter included unrelated or completed history");
+    await verification.getByRole("button",{name:/归档问题会话/}).click();
+    await page.getByRole("group",{name:"请选择验收范围",exact:true}).waitFor();
+    t.assertions.assert((await snapshot(pending)).summary.interactionSummary?.count===1,
+      "opening the archived question consumed it");
+    const delivery=await openMember("观察项目","delivery");
+    await delivery.getByRole("button",{name:/深层工作会话/}).waitFor();
+    await delivery.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"进行中",exact:true}).click();
+    await delivery.getByRole("button",{name:/归档失败会话/}).waitFor();
+    await delivery.getByRole("img",{name:/运行异常/}).waitFor();
+    t.assertions.assert(await delivery.getByRole("button",{name:/归档问题会话|已完成历史/}).count()===0,
+      "member activity included another Space or completed history");
+    await delivery.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"全部",exact:true}).click();
+    await delivery.getByRole("button",{name:/深层工作会话/}).click();
     await page.getByRole("heading",{name:"深层工作会话",exact:true}).waitFor();
     await page.getByRole("button",{name:"当前项目",exact:true}).getByText("观察项目 / verification / delivery").waitFor();
     await opened.client.call({type:"workspace.rename",payload:{workspaceId:project.id,name:"改名项目"}});
     await opened.client.call({type:"workspace.rename",payload:{workspaceId:qa.id,name:"验证空间"}});
-    // A copied compact bookmark has no in-memory summary or history-state ID.
     await page.evaluate(() => window.history.replaceState(null,"",location.href));
     await page.reload();
     await page.getByRole("heading",{name:"深层工作会话",exact:true}).waitFor();
     await page.getByRole("button",{name:"当前项目",exact:true}).getByText("改名项目 / 验证空间 / delivery").waitFor();
-    await showList();
-    const renamedGroup=list.getByRole("region",{name:"项目 改名项目",exact:true});
-    await renamedGroup.waitFor(); await row("另一项目普通会话").waitFor();
-    await renamedGroup.getByRole("button",{name:/团队内部/}).click();
-    await row("深层工作会话").waitFor();
-    await row("归档问题会话").getByRole("button").first().click();
+    const renamedVerification=await openMember("改名项目","验证空间");
+    await renamedVerification.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"进行中",exact:true}).click();
+    await renamedVerification.getByRole("button",{name:/归档问题会话/}).click();
     await page.getByRole("group",{name:"请选择验收范围",exact:true}).waitFor();
-    t.assertions.assert((await snapshot(pending)).summary.interactionSummary?.count===1,"opening a question consumed it");
-    await showList();
-    await row("归档失败会话").getByRole("button").first().click();
+    t.assertions.assert((await snapshot(pending)).summary.interactionSummary?.count===1,"reopened question lost its saved request");
+    const renamedDelivery=await openMember("改名项目","delivery");
+    await renamedDelivery.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"进行中",exact:true}).click();
+    await renamedDelivery.getByRole("button",{name:/归档失败会话/}).click();
     await page.getByRole("heading",{name:"归档失败会话",exact:true}).waitFor();
-    await showList();
-    await list.getByRole("button",{name:"列表选项",exact:true}).click();
-    await list.getByRole("menuitem",{name:"查看已归档",exact:true}).click();
-    await row("已完成历史").waitFor();
-    await row("已完成历史").getByRole("button").first().click();
+    t.assertions.assert((await snapshot(failed)).summary.archived,"opening failed work silently unarchived it");
+    await page.getByRole("button",{name:"当前项目",exact:true}).click();
+    const historyPage=page.getByRole("region",{name:"项目页面",exact:true});
+    await historyPage.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"全部",exact:true}).click();
+    await historyPage.getByRole("button",{name:"项目菜单",exact:true}).click();
+    await page.getByRole("menuitem",{name:"查看全部会话",exact:true}).click();
+    await historyPage.getByRole("button",{name:"已归档",exact:true}).click();
+    await historyPage.getByRole("button",{name:/已完成历史/}).click();
     await page.getByRole("heading",{name:"已完成历史",exact:true}).waitFor();
-    await showList();
-    await list.getByRole("button",{name:"已归档会话 · 返回当前",exact:true}).click();
+    for(let depth=0;depth<4 && !await navigation.isVisible();depth++)
+      await page.getByRole("button",{name:/^(会话列表|返回)$/}).first().click();
+    await navigation.getByRole("button",{name:"会话",exact:true}).click();
+    await row("另一项目普通会话").waitFor();
     await row("入口沟通一").getByRole("button").first().click();
     t.assertions.assert(await page.getByRole("button",{name:/团队看板|试玩入口|打开.*团队看板/}).count()===0,"business page shortcuts remained in platform chrome");
     await page.getByRole("link",{name:"团队进展",exact:true}).first().click();
     await page.frameLocator('iframe[title="HTML 文件预览"]').getByRole("heading",{name:"TEAM_PROGRESS_FROM_MESSAGE",exact:true}).waitFor();
     const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);
     t.assertions.assert(!overflow,"conversation UI overflows the viewport");
-    t.note(`${width}px: real parent defaults, retired grouping preference migration, source-owned flat/root/internal navigation, all entry/child sessions, archived work/history and message-delivered Asset Preview verified; nested session ${nested}`);
+    t.note(`${width}px: real parent membership, retired grouping preference migration, source-owned flat root list and nested member page navigation, all entry/child sessions, archived work/history and message-delivered Asset Preview verified; nested session ${nested}`);
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

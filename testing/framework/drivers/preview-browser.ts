@@ -54,7 +54,12 @@ if(input.surface==='client-debug'){
  document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
  openClientDebug();
 }else if(input.surface==='processes'){
- const host={...browserHost(),endpoint:async()=>({...((await window.previewInput()).endpoint),via:'loopback'})};
+ const endpoint=async()=>({...((await window.previewInput()).endpoint),via:'loopback',label:input.workspaceLabel??'Process preview machine'});
+ const target=async()=>{const e=await endpoint();if(!e.localServerProof?.machineId)throw new Error('process fixture requires a native machine admission');return {id:e.localServerProof.machineId,deviceHandle:e.localServerProof.machineId,label:e.label,kind:'local',online:true};};
+ // The default browser registry is empty in this isolated embed. Describe the
+ // actual fixture through the full public Host contract rather than inheriting
+ // unrelated paired-browser discovery while overriding only endpoint().
+ const host={...browserHost(),cacheScope:async()=>null,endpoint,targets:async()=>[await target()],openTarget:async id=>{const current=await target();if(id!==current.id)throw new Error('unknown process fixture machine');return endpoint();}};
  createRoot(document.getElementById('root')).render(<App host={host}/>);
  while(useWorkbench.getState().connection!=='ready'){
   const state=useWorkbench.getState();
@@ -142,7 +147,7 @@ if(input.surface==='client-debug'){
     const projectNavigation = input.page.getByRole("navigation", { name: "工作台导航", exact: true });
     if (!(await projectNavigation.isVisible())) await input.page.getByRole("button", { name: /^(会话列表|返回)$/ }).first().click();
     await projectNavigation.getByRole("button", { name: "项目", exact: true }).click();
-    await input.page.getByRole("button", { name: input.workspaceLabel, exact: true }).click();
+    await input.page.getByRole("button", { name: `打开项目 ${input.workspaceLabel}`, exact: true }).click();
     await input.page.getByRole("region", { name: "项目页面", exact: true }).getByRole("heading", { name: input.workspaceLabel, exact: true }).waitFor({ timeout: 30000 });
     const menu = input.page.getByRole("button", { name: "此电脑的后台进程", exact: true });
     if (!(await menu.isVisible())) {

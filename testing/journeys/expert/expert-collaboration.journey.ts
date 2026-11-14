@@ -13,7 +13,7 @@
 //     back the same asynchronous way;
 //   - writer lock prevents two concurrent `work` sessions on the same `--dir` while allowing `research`;
 //   - `send --to <expert>:work` starts/routes cross-expert collaboration and delivers the reply back to the caller;
-//   - `note` is only a file (including `--team bob`), `directory` lists sessions, and `mount`/`unmount`
+//   - `note` is only a file (including `--team bob`), `directory` lists current obligations and Team headers, and `mount`/`unmount`
 //     enforces single-expert ownership and warns on a dirty worktree.
 
 import { spawnSync } from "node:child_process";
@@ -77,7 +77,15 @@ defineJourney(
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
     t.assertions.assert(built.status === 0, `SpaceBuilder build alice: ${built.stdout.slice(-500)}`);
 
+    // Restored freshly checked template state keeps unrelated automatic
+    // platform-upgrade reflection out of this collaboration-only journey.
+    mkdirSync(path.join(alice,".genethub/team"),{recursive:true});
+    writeFileSync(path.join(alice,".genethub/team/platform-check.json"),JSON.stringify({atMs:Date.now()}));
+    // A prior reflection cooldown is restored fixture state; no completed
+    // business result or native input is fabricated.
+    writeFileSync(path.join(alice,".genethub/team/reflect.json"),JSON.stringify({atMs:Date.now()}));
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    let phase = "team initialization";
     try {
       const spaces = async (): Promise<Info[]> => {
         const reply = await opened.client.call({ type: "workspace.list" });
@@ -127,7 +135,13 @@ defineJourney(
       const inited = expert(alice, "init", "bob", "--desc", "QA与协作专家", "--soul", "负责跨专家验收与回合制回归验证");
       t.assertions.assert(inited.code === 0 && inited.out.includes("已创建并初始化团队 bob") && inited.out.includes("已打开空间"), `init bob: ${inited.out} ${inited.err}`);
       const bob = path.join(t.env.data, "spaces", "bob");
+      mkdirSync(path.join(bob,".genethub/team"),{recursive:true});
+      writeFileSync(path.join(bob,".genethub/team/platform-check.json"),JSON.stringify({atMs:Date.now()}));
+      writeFileSync(path.join(bob,".genethub/team/reflect.json"),JSON.stringify({atMs:Date.now()}));
+      // A freshly initialized team need not have written runtime config yet.
+      mkdirSync(path.join(bob, ".genethub"), { recursive: true });
       writeFileSync(path.join(bob, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
+      phase = "initialized peer identity";
       const bobSoul = readFileSync(path.join(bob, "soul.md"), "utf8");
       t.assertions.assert(
         bobSoul.includes("我做的一切只有一个目的：让用户满意") && bobSoul.includes("## 我是谁（bob）") && bobSoul.includes("负责跨专家验收与回合制回归验证") && bobSoul.includes("（以下由反思会话按证据维护"),
@@ -145,6 +159,7 @@ defineJourney(
       }
 
       // 1. Asynchronous `spawn` → result reaches the front via timer hook, once.
+      phase = "first asynchronous result";
       const spawned = expert(alice, "spawn", "--kind", "work", "--desc", "write the quarterly report", "Write the quarterly report.");
       t.assertions.assert(spawned.code === 0, `spawn: ${spawned.err || spawned.out}`);
       const work = listed.find((space) => space.name === "leader" && space.agentSpace?.parentWorkspaceId === root!.id);
@@ -165,7 +180,7 @@ defineJourney(
       t.assertions.assert((await resultsIn()).length === 1, `the result was delivered ${(await resultsIn()).length} times`);
       const pending = path.join(alice, ".genethub/team/pending");
       const done = path.join(alice, ".genethub/team/done");
-      t.assertions.assert(readdirSync(pending).length === 0 && readdirSync(done).length === 1, `pending ${readdirSync(pending)} done ${readdirSync(done)}`);
+      t.assertions.assert(readdirSync(pending).length === 0 && readdirSync(done).length === 1, `pending ${readdirSync(pending)} done ${JSON.stringify(readdirSync(done).map(file => { const row=JSON.parse(readFileSync(path.join(done,file),"utf8"));return {file,sessionId:row.sessionId,purpose:row.purpose,role:row.role,kind:row.kind,origin:row.origin,requester:row.requester}; }))}`);
       t.assertions.assert(existsSync(path.join(alice, ".genethub/team/alive")), "the timer never reported itself alive");
 
       // 2. Two jobs from one turn: each result reaches the front exactly once and `pending/` ends empty.
@@ -173,6 +188,7 @@ defineJourney(
         (await itemsOf(front)).filter(
           (item) => isSystem(item) && (item.text ?? "").includes("用途: result") && (item.text ?? "").includes(sid) && (item.text ?? "").includes("chunk-0 chunk-1"),
         );
+      phase = "two concurrent results";
       const spawnedA = expert(alice, "spawn", "--kind", "work", "--desc", "first async job", "Run job A.");
       const sidA = dispatchedSid(spawnedA.out);
       const spawnedB = expert(alice, "spawn", "--kind", "research", "--desc", "second async job", "Run job B.");
@@ -195,6 +211,7 @@ defineJourney(
       t.assertions.assert(readdirSync(pending).length === 0, `pending not cleared: ${readdirSync(pending)}`);
 
       // 3. Cross-expert collaboration (J8): `send --to bob:work` starts a session in bob and routes the reply back to alice's front.
+      phase = "cross-team result";
       const crossSent = expert(alice, "send", "--to", "bob:work", "--kind", "task", "请对裂谷防线执行QA验收");
       const bobSid = [...crossSent.out.matchAll(/^已为 bob:work 启动会话并投递 → (s_[0-9a-f]+)/gm)].at(-1)?.[1];
       t.assertions.assert(crossSent.code === 0 && bobSid !== undefined && crossSent.out.includes("已为 bob:work 启动会话并投递"), `send to bob:work: ${crossSent.out} ${crossSent.err}`);
@@ -215,7 +232,8 @@ defineJourney(
       // 4. Writer lock (J5).
       const project = path.join(t.env.root, "project");
       mkdirSync(project, { recursive: true });
-      spawnSync("git", ["init", "-q", project]);
+      const initialized = spawnSync("git", ["init", "-q", project], { encoding: "utf8", env });
+      t.assertions.assert(initialized.status === 0, `isolated business repository initialization failed: ${initialized.stderr}`);
       writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-silent\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const holderSpawn = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "long writer", "Hold the writer lock.");
       const holderSid = dispatchedSid(holderSpawn.out)!;
@@ -231,9 +249,14 @@ defineJourney(
       // The daemon, original execution and reservation run unchanged; the
       // independent client and files prove that uncertainty creates no writer.
       const queryProxy = path.join(t.env.root, "uncertain-cli"), queryMarker = path.join(t.env.root, "query-observed.json");
-      const lockFile = path.join(project, ".git/genet-writer.json");
+      const gitDirectory = spawnSync("git", ["-C", project, "rev-parse", "--absolute-git-dir"], { encoding: "utf8", env });
+      t.assertions.assert(gitDirectory.status === 0, "isolated writer repository is not inspectable");
+      const lockFile = path.join(gitDirectory.stdout.trim(), "genet-writer.json");
+      phase = "original writer reservation file";
       const originalLock = readFileSync(lockFile, "utf8");
-      const originalPending = JSON.parse(readFileSync(path.join(pending, holderSid + ".json"), "utf8"));
+      phase = "original writer pending record";
+      const pendingFile = path.join(pending, holderSid + ".json");
+      const originalPending = JSON.parse(readFileSync(pendingFile, "utf8"));
       const holderReply = await opened.client.call({ type: "session.get", payload: { sessionId: holderSid } });
       if (holderReply?.type !== "snapshot") throw new Error("original writer is not inspectable");
       const holderWorkspace = (holderReply.data as unknown as { summary: { workspaceId: string } }).summary.workspaceId;
@@ -249,7 +272,7 @@ if sys.argv[1:4] == ['session','get',${JSON.stringify(holderSid)}]:
  if mode == 'internal': print(json.dumps({'type':'error','error':{'code':'internal','message':'injected read failure'}}));sys.exit(4)
  if mode == 'empty': sys.exit(0)
  if mode == 'malformed': print('{broken');sys.exit(0)
- if mode == 'missing-data': print(json.dumps({'type':'session.inspect'}));sys.exit(0)
+ if mode == 'missing-data': print(json.dumps({'type':'session.get'}));sys.exit(0)
  if mode == 'missing-summary': data['data']={}
  if mode == 'wrong-id': s['id']='s_wrong_holder'
  print(json.dumps(data));sys.exit(0)
@@ -257,6 +280,7 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
 `);
       chmodSync(queryProxy, 0o755);
       for (const mode of ["internal", "empty", "malformed", "missing-data", "missing-summary", "wrong-id"]) {
+        phase = `uncertain holder query ${mode}`;
         const failedQuery = spawnSync("python3", [path.join(alice, "tools/team.py"), "spawn", "--kind", "work", "--dir", project, "--desc", "uncertain competitor", "Must preserve the original writer."], {
           cwd: path.join(alice, "front"), env: { ...env, GENEHUB_SESSION_ID: front, GENEHUB_CLI: queryProxy, QUERY_FAULT: mode }, encoding: "utf8",
         });
@@ -277,6 +301,7 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
       await opened.client.call({ type: "session.interrupt", payload: { sessionId: holderSid } });
 
       // 5. `note` is a file. It records the session, creates no session, and a note for another expert lands there.
+      phase = "local and peer notes";
       const noted = expert(alice, "note", "--session", front, "--kind", "preference", "--quote", "that is not what I meant", "--context", "opened a read-only review as work");
       t.assertions.assert(noted.code === 0 && noted.out.includes("已留言"), `note: ${noted.err || noted.out}`);
       const ownNotes = readdirSync(path.join(alice, ".genethub/team/notes"));
@@ -295,10 +320,14 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
       const reflectSpace = listed.find((entry) => entry.name === "team-reflect" && entry.agentSpace?.parentWorkspaceId === root!.id)!;
       t.assertions.assert((await sessionsOf(reflectSpace.id)).length === 0, "a note created a reflect session");
 
-      // 6. `directory` shows current activity; completed sessions stay in history.
+      // 6. Current-work directory retains Team headers and paused obligations,
+      // while completed history remains available through scoped history queries.
+      phase = "team directory";
       const directory = expert(alice, "directory");
       t.assertions.assert(
-        directory.code === 0 && directory.out.includes("long writer") && directory.out.includes("alice/leader") && directory.out.includes("alice/root") && directory.out.includes("== bob:"),
+        directory.code === 0 && directory.out.includes("== alice:") && directory.out.includes("== bob:")
+          && directory.out.includes("alice/leader") && directory.out.includes(holderSid) && directory.out.includes("long writer")
+          && !directory.out.includes(started[0]!.id) && !directory.out.includes(bobSid!),
         `directory: ${directory.out}`,
       );
       t.assertions.assert(!directory.out.includes("write the quarterly report"), "directory expanded settled history into current activity");
@@ -315,6 +344,8 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
       t.assertions.assert(contested.code !== 0 && contested.err.includes("alice") && contested.err.includes("下一步"), `bob mounted alice's directory: ${contested.out} ${contested.err}`);
       t.assertions.assert(expert(alice, "unmount", project).code === 0, "unmount");
       t.assertions.assert(expert(bob, "mount", project).code === 0, "bob could not take the directory alice released");
+    } catch (error) {
+      throw new Error(`${phase}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       opened.client.close();
       opened.daemon.stop();

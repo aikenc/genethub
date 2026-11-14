@@ -157,55 +157,79 @@ defineSpecialty({ ...shared,
 
 defineSpecialty({ ...shared,
   id: "specialty.page-experience.session-pages",
-  title: "Real sidebar loads ten root rows, lazy child rows and finds an older child through global search",
-  oracle: "The actual workbench initially renders ten root conversations without child rows, more history adds ten, opening the child loads ten, and a global search finds the oldest child conversation beyond that page",
-  catches: ["collapsed child history eagerly displayed", "load more button does nothing", "global search only filters recent ten", "switching out of search leaves full history on default page"],
-  tags: ["page-experience", "session-pages"], runner: "playwright", expectedDurationMs: 25_000, timeoutMs: 120_000,
+  title: "Flat root paging and an older child conversation through its member page",
+  oracle: "The real sidebar initially shows100 root conversations, paging retains120 across a real periodic refresh; internal history stays in its member page, whose ten-row default can find an older child through complete history and returns to ten without creating or resuming work",
+  catches: ["internal history leaks into the root list", "paging does nothing", "refresh discards loaded history", "member search only checks recent ten", "history search creates work or inflates default previews"],
+  tags: ["page-experience", "session-pages"], runner: "playwright", expectedDurationMs: 60000, timeoutMs: 120000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 1, pool: "browser" },
 }, async t => {
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
   try {
     await t.flows.main.configureMockProvider(o.client, o.mock);
-    await o.client.call({ type: "workspace.rename", payload: { workspaceId: o.workspaceId, name: "分页验收" } });
-    const rootIds: string[] = [];
-    for (let i = 0; i < 25; i++) rootIds.push(await t.flows.main.createBuiltinSession(o.client, o.workspaceId));
-    await o.client.call({ type: "agentSpace.configure", payload: { workspaceId: o.workspaceId, expectedRevision: 0, operation: { kind: "setLifecycle", lifecycle: "persistent" } } });
-    const childRoot = join(t.env.root, "child-space"); mkdirSync(childRoot);
-    const child = await o.client.call({ type: "workspace.open", payload: { root: childRoot } });
-    if (child?.type !== "workspace") throw Error("child missing");
-    await o.client.call({ type: "workspace.rename", payload: { workspaceId: child.data.id, name: "子岗位" } });
-    await o.client.call({ type: "agentSpace.configure", payload: { workspaceId: child.data.id, expectedRevision: 0, operation: { kind: "setParent", parentWorkspaceId: o.workspaceId } } });
-    let old = "";
-    for (let i = 0; i < 15; i++) {
-      const id = await t.flows.main.createBuiltinSession(o.client, child.data.id);
-      if (i === 0) { old = id; await o.client.call({ type: "session.rename", payload: { sessionId: id, title: "隐藏旧会话" } }); }
+    await o.client.call({type:"workspace.rename",payload:{workspaceId:o.workspaceId,name:"分页验收"}});
+    await o.client.call({type:"agentSpace.configure",payload:{workspaceId:o.workspaceId,expectedRevision:0,operation:{kind:"setLifecycle",lifecycle:"persistent"}}});
+    const childRoot=join(t.env.root,"child-space");mkdirSync(childRoot);
+    const child=await o.client.call({type:"workspace.open",payload:{root:childRoot}});
+    if(child?.type!=="workspace") throw Error("child missing");
+    await o.client.call({type:"workspace.rename",payload:{workspaceId:child.data.id,name:"子岗位"}});
+    await o.client.call({type:"agentSpace.configure",payload:{workspaceId:child.data.id,expectedRevision:0,operation:{kind:"setParent",parentWorkspaceId:o.workspaceId}}});
+    let old="";
+    for(let i=0;i<15;i++){
+      const id=await t.flows.main.createBuiltinSession(o.client,child.data.id);
+      if(i===0){old=id;await o.client.call({type:"session.rename",payload:{sessionId:id,title:"隐藏旧会话"}});}
     }
-    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(o.daemon), o.workspaceId, rootIds.at(-1)!, { viewport: { width: 1280, height: 900 } });
-    const page = browser.page;
-    await page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
-    const pane = page.getByRole("complementary", { name: "会话列表", exact: true });
-    const group = pane.getByRole("listitem", { name: "项目分组 分页验收", exact: true });
-    const waitRows = async (count: number, phase: string) => {
-      try { await t.tools.waitUntil(async () => await group.locator(".conversation-row").count() === count, 10_000); }
-      catch { throw Error(`${phase}: expected ${count} rows, got ${await group.locator(".conversation-row").count()}; ${String(await pane.innerText()).slice(0,1800)}`); }
-    };
-    await t.tools.waitUntil(async () => await group.locator(".conversation-row").count() === 10, 15_000);
-    t.assertions.assert(await group.getByText("隐藏旧会话", { exact: true }).count() === 0, "collapsed child row leaked into default list");
-    await group.getByRole("button", { name: "加载 分页验收 的更早会话", exact: true }).click();
-    await waitRows(20, "load-more");
-    await page.waitForTimeout(12_000); // Two real shared refresh cycles.
-    t.assertions.assert(await group.locator(".conversation-row").count() === 20, "periodic refresh discarded explicitly loaded older history");
-    await group.locator("summary").filter({ hasText: "子 Space" }).click();
-    await group.locator("summary").filter({ hasText: "分页验收 / 子岗位" }).click();
-    await waitRows(30, "child-expansion");
-    await pane.getByRole("button", { name: "会话列表选项", exact: true }).click();
-    await page.getByRole("menuitem", { name: "搜索会话", exact: true }).click();
-    await pane.getByRole("searchbox", { name: "搜索会话", exact: true }).fill("隐藏旧会话");
-    await pane.locator(".conversation-row").filter({ hasText: "隐藏旧会话" }).waitFor({ timeout: 20_000 });
-    t.assertions.assert(Boolean(old), "old child record not created");
-    await pane.getByRole("button", { name: "关闭搜索", exact: true }).click();
-    await waitRows(30, "search-exit");
-    t.note("actual browser: ten root rows; twenty after more; ten child rows on expansion; global search found oldest child beyond its first page");
+    const rootIds:string[]=[];
+    // More than the actual100-row machine head is required to exercise paging.
+    // Child history is older and independently bounded by its own page UI.
+    for(let i=0;i<120;i++){
+      const id=await t.flows.main.createBuiltinSession(o.client,o.workspaceId);rootIds.push(id);
+      await o.client.call({type:"session.rename",payload:{sessionId:id,title:`分页根会话${i}`}});
+    }
+    const before=await o.client.call({type:"session.get",payload:{sessionId:old}});
+    if(before?.type!=="snapshot") throw Error("old child snapshot missing");
+    let directoryReads=0;
+    browser=await openWorkbenchPage(t.openRoot,()=>{directoryReads++;return daemonEndpoint(o.daemon);},o.workspaceId,rootIds.at(-1)!,{viewport:{width:1280,height:900}});
+    const page=browser.page,nav=page.getByRole("navigation",{name:"工作台导航",exact:true});
+    await nav.getByRole("button",{name:"会话",exact:true}).click();
+    const pane=page.getByRole("complementary",{name:"会话列表",exact:true});
+    const roots=pane.locator(".conversation-row").filter({hasText:/分页根会话/});
+    await t.tools.waitUntil(async()=>await roots.count()===100,15000);
+    t.assertions.assert(await pane.getByText("隐藏旧会话",{exact:true}).count()===0,"child history leaked into the root list");
+    await pane.getByRole("button",{name:/加载 .+ 的更早会话/}).click();
+    await t.tools.waitUntil(async()=>await roots.count()===120,10000);
+    const observed=directoryReads;
+    await t.tools.waitUntil(()=>directoryReads>observed,35000);
+    t.assertions.assert(await roots.count()===120,"actual periodic refresh discarded explicitly loaded root history");
+    await nav.getByRole("button",{name:"项目",exact:true}).click();
+    const projects=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    const group=projects.getByRole("region",{name:"项目 分页验收",exact:true});
+    await group.getByRole("button",{name:"展开成员 分页验收",exact:true}).click();
+    await group.getByRole("button",{name:"打开成员 子岗位",exact:true}).click();
+    const project=page.getByRole("region",{name:"项目页面",exact:true});
+    await project.getByRole("heading",{name:"子岗位",exact:true}).waitFor();
+    await t.tools.waitUntil(async()=>await project.locator(".conversation-row").count()===10,10000);
+    t.assertions.assert(await project.getByText("隐藏旧会话",{exact:true}).count()===0,"old child was not beyond the default ten");
+    await project.getByRole("button",{name:"项目菜单",exact:true}).click();
+    await page.getByRole("menuitem",{name:"查看全部会话",exact:true}).click();
+    await project.getByRole("textbox",{name:"搜索当前项目会话",exact:true}).fill("隐藏旧会话");
+    await project.getByText("隐藏旧会话",{exact:true}).waitFor({timeout:20000});
+    await project.getByText("隐藏旧会话",{exact:true}).click();
+    await page.getByRole("heading",{name:"隐藏旧会话",exact:true}).waitFor();
+    t.assertions.assert(page.url().includes(old.slice(2,10)),"member search opened another conversation");
+    const after=await o.client.call({type:"session.get",payload:{sessionId:old}});
+    t.assertions.assert(after?.type==="snapshot" && after.data.summary.status==="idle" &&
+      after.data.summary.updatedAtMs===before.data.summary.updatedAtMs,"history lookup resumed or changed the saved conversation");
+    await page.getByRole("button",{name:"当前项目",exact:true}).click();
+    const search=project.getByRole("textbox",{name:"搜索当前项目会话",exact:true});
+    if(await search.count()){
+      await search.fill("");await project.getByRole("button",{name:"项目菜单",exact:true}).click();
+      await page.getByRole("menuitem",{name:"最近会话",exact:true}).click();
+    }
+    await t.tools.waitUntil(async()=>await project.locator(".conversation-row").count()===10,10000);
+    await nav.getByRole("button",{name:"会话",exact:true}).click();
+    t.assertions.assert(await roots.count()===120 && await pane.getByText("隐藏旧会话",{exact:true}).count()===0,
+      "leaving child search lost root paging or leaked internal history");
+    t.note(JSON.stringify({rootHead:100,rootHistory:120,childDefault:10,childHistory:15,oldChildFound:true,sourceUnchanged:true,directoryReads}));
   } finally { await browser?.close(); o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

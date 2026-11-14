@@ -62,7 +62,15 @@ defineSpecialty({
     const reportFile = path.join(opened.workspaceRoot, "delivery-audit.json");
     t.assertions.assert(!events.some(e => e.type === "turnFailed") && existsSync(reportFile), "real Agent did not produce the requested audit; " + observerState.items.filter(item => item.type === "assistantMessage").map(item => item.text).join("\n").slice(-2500));
     const report = JSON.parse(readFileSync(reportFile, "utf8"));
-    t.assertions.assert(report.title === title && report.running === false && report.acceptanceCode === acceptanceCode, "real Agent confused current state, missing history or delivered result");
+    const reportProof={model:model!.id,expected:{title,running:false,acceptanceCode},
+      actual:{title:typeof report.title === "string" ? report.title.slice(0,160):typeof report.title,
+        running:typeof report.running === "boolean" ? report.running:typeof report.running,
+        acceptanceCode:typeof report.acceptanceCode === "string" ? report.acceptanceCode.slice(0,128):typeof report.acceptanceCode},
+      matches:{title:report.title === title,running:report.running === false,acceptanceCode:report.acceptanceCode === acceptanceCode}};
+    // These are only synthetic fixture fields. Preserve a bounded mismatch
+    // diagnosis before fixture cleanup, without recording auth/config or prompts.
+    t.note(JSON.stringify({realQueryAudit:reportProof}));
+    t.assertions.assert(Object.values(reportProof.matches).every(Boolean), "real Agent confused current state, missing history or delivered result; "+JSON.stringify(reportProof));
     // Visible tool headers deliberately clip long commands. Resolve the existing
     // public process-detail blobs instead of drawing conclusions from that clip.
     const rounds = await opened.client.call({ type: "session.rounds", payload: { sessionId: observer, cursor: null, throughRoundId: null, limit: 20 } });
