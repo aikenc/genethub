@@ -123,6 +123,71 @@ def installed_members(receipt):
     return receipt.get('members') or ([receipt['member']] if receipt.get('member') else [])
 
 
+
+def local_preferences(config, roles, team):
+    """Use native current role bindings, retaining only local preferences."""
+    stable = Path(config['settingsSource'])
+    prior = config.get('priorRoleWorkspaces') or {}
+    native = {w['id']: w for w in team.workspaces()} if prior else {}
+    machine = (team.genet('context').get('daemon') or {}).get('machineId')
+    roots = {}
+    for role in roles:
+        workspace = prior.get(role)
+        root = stable
+        if workspace:
+            bound = native.get(workspace)
+            if not bound:
+                raise RuntimeError('previous role workspace is missing; original binding retained')
+            role_root = Path(team.workspace_root(bound))
+            root = role_root.parent.parent
+            if (role_root != root/'spaces'/role or root.resolve() != root
+                    or not (root == stable or root.parent == stable.parent/(stable.name+'.versions'))):
+                raise RuntimeError('previous role workspace is outside this managed installation family')
+        if root.exists():
+            if root.is_symlink() or root.resolve() != root:
+                raise RuntimeError('target-local settings source must be a real runtime directory')
+            receipt = read(root/'.genethub/install-receipt.json') or {}
+            route = read(root/'.genethub/task-source.json') or {}
+            if receipt or workspace:
+                members = installed_members(receipt)
+                if (receipt.get('source') != config['source'] or route.get('source') != config['source']
+                        or any(route.get(k) != config['returnTo'].get(k) for k in ('machineId','workspaceId'))
+                        or not machine or not members or any(m.get('machineId') != machine for m in members)
+                        or workspace and not any(m.get('name') == role and m.get('workspaceId') == workspace for m in members)):
+                    raise RuntimeError('target-local settings lack matching native installation ownership')
+            else:
+                # The existing first-install preparation contract permits only
+                # hand-written local open.env files before any runtime exists.
+                for index, child in enumerate(root.rglob('*')):
+                    if (index > 512 or child.is_symlink() or not child.is_dir()
+                            and not (child.is_file() and child.relative_to(root).as_posix().endswith('.genethub/open.env'))):
+                        raise RuntimeError('unowned target-local settings retained; source maintenance required')
+        roots[role] = root
+    def bounded(root, relative):
+        path = root/relative
+        if any(part.is_symlink() for part in [path, *path.parents] if part != root and root in part.parents):
+            raise RuntimeError('target-local preference alias retained; no new runtime installed')
+        if not path.exists():
+            return None
+        if not path.is_file() or path.stat().st_size > 131072:
+            raise RuntimeError('target-local preferences must be bounded regular files')
+        return path.read_bytes(), stat.S_IMODE(path.stat().st_mode)
+    preferences = {}
+    for name in ('open.env', 'gpu-host.json'):
+        common = Path('.genethub')/name
+        versions = [bounded(root, common) for root in roots.values()]
+        if versions and any(value != versions[0] for value in versions):
+            raise RuntimeError('current role root preferences disagree; original bindings retained')
+        if versions and versions[0] is not None:
+            preferences[common] = versions[0]
+        for role, root in roots.items():
+            relative = Path('spaces')/role/'.genethub'/name
+            value = bounded(root, relative)
+            if value is not None:
+                preferences[relative] = value
+    return preferences
+
+
 def accept(config):
     stage = Path(__file__).resolve().parents[1]
     requested_target = Path(config['target'])
@@ -158,40 +223,13 @@ def accept(config):
             # above; any other existing content is uncertainty, not replaceable.
             if target.exists():
                 raise RuntimeError('parallel version directory lacks an exact installation receipt; original bindings retained')
-            prior_root = Path(config['settingsSource'])
-            if prior_root.exists():
-                if prior_root.is_symlink() or prior_root.resolve()!=prior_root:
-                    raise RuntimeError('target-local settings source must be a real runtime directory')
-                source_route = read(prior_root/'.genethub/task-source.json')
-                prior_install = read(prior_root/'.genethub/install-receipt.json') or {}
-                configured_only = all(p.is_file() and p.relative_to(prior_root).as_posix().endswith('.genethub/open.env')
-                                      or p.is_dir() for p in prior_root.rglob('*'))
-                if not configured_only and (prior_install.get('source')!=config['source'] or not source_route
-                        or source_route.get('source')!=config['source']
-                        or any(source_route.get(k)!=config['returnTo'].get(k) for k in ('machineId','workspaceId'))):
-                    raise RuntimeError('target-local settings have no matching source ownership receipt')
-                # Preserve only bounded local preferences and original GPU registration.
-                # Historical probe bytes are not a fresh rendering/performance claim.
-                # Never clone Sessions, dispatches, business data or old results.
-                local_paths = [Path('.genethub')/name for name in ('open.env', 'gpu-host.json')]
-                local_paths += [Path('spaces')/role/'.genethub'/name for role in roles
-                                for name in ('open.env', 'gpu-host.json')]
-                target_machine = None
-                for relative in local_paths:
-                    preference=prior_root/relative
-                    if any(part.is_symlink() for part in [preference, *preference.parents] if part != prior_root and prior_root in part.parents):
-                        raise RuntimeError('target-local preference alias retained; no new runtime installed')
-                    if preference.exists() and relative.name == 'gpu-host.json':
-                        target_machine = target_machine or (team.genet('context').get('daemon') or {}).get('machineId')
-                        members = installed_members(prior_install)
-                        if not target_machine or not members or any(m.get('machineId') != target_machine for m in members):
-                            raise RuntimeError('target-local GPU registration has no matching native machine ownership')
-                    if preference.exists():
-                        if not preference.is_file() or preference.stat().st_size>131072:
-                            raise RuntimeError('target-local preferences must be bounded regular files')
-                        destination=stage/relative
-                        if destination.exists():raise RuntimeError('artifact unexpectedly owns target-local preferences')
-                        destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(preference,destination)
+            for relative, (contents, mode) in local_preferences(config, roles, team).items():
+                destination = stage/relative
+                if destination.exists():
+                    raise RuntimeError('artifact unexpectedly owns target-local preferences')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(contents)
+                destination.chmod(mode)
         configured_only = target.exists() and all(p.is_file() and p.relative_to(target).as_posix().endswith('.genethub/open.env') or p.is_dir() for p in target.rglob('*'))
         if target.exists() and not configured_only and (not previous or previous.get('source') != config['source'] or any(previous.get(k) != config['returnTo'].get(k) for k in ('machineId','workspaceId'))):
             raise RuntimeError('target is already owned or has no install receipt; use a separate runtime directory')
@@ -338,6 +376,11 @@ def install(output, source, machine, roles, destination=None, parallel=False):
         if destination is not None:raise RuntimeError('parallel installation does not replace explicit legacy targets')
         config['parallel']=True
         config['contentKey']=runtime_content_key(output)
+        members = (read(source/'agent-space.genet.json') or {}).get('members') or []
+        config['priorRoleWorkspaces'] = {member['name']: member['workspaceId'] for member in members
+            if member.get('name') in roles and member.get('workspaceId') and member.get('machineId')
+            and team.canonical_machine(member['machineId']) == machine}
+
     if destination is None: config['roles'] = roles
     else: config['role'] = roles[0]
     workspaces = team.remote_workspaces(machine)
