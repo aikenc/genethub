@@ -245,6 +245,7 @@ defineSpecialty(
             (await frame.locator("#output").innerText()) === "服务连接成功",
           5000,
         );
+        await uiPage.getByRole("checkbox", {name:"仅直连",exact:true}).check();
         await uiPage
           .getByRole("button", { name: "连接音视频", exact: true })
           .click();

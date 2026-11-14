@@ -64,6 +64,7 @@ with av.open(sys.argv[1],'w') as out:
       const closeInfo = page.getByRole("button", { name: "关闭信息", exact: true });
       if (await closeInfo.isVisible()) await closeInfo.click();
     };
+    await page.getByRole('checkbox',{name:'仅直连',exact:true}).check();
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000}).catch(async error => {
       const media = await page.evaluate(() => ({ secure: window.isSecureContext,

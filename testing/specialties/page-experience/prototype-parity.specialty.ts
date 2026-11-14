@@ -5,10 +5,10 @@ import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framew
 
 for (const width of [390,744,768,820,1280]) defineSpecialty({
   id: `specialty.page-experience.prototype-parity.${width}`,
-  title: `Accepted prototype navigation, compact rows and actions at ${width}px`,
-  oracle: "The actual browser lists ordinary conversations flat, exposes five root conversations even behind 110 newer internal conversations, opens a single Space-filtered internal list, preserves header menus and real bulk archive/recovery, pins projects and creates source-labeled drafts without writing sessions",
-  catches: ["every project is collapsed", "child history displaces root previews", "missing full session actions", "status and avatars are too small", "bulk selection cannot select visible rows", "draft navigation secretly creates a session", "opening a small Space chooser summons a search keyboard"],
-  tags: ["page-experience","prototype-parity","machine-connections"], runner: "playwright", llm: {default: "mock"},
+  title: `Current flat navigation, compact rows and actions at ${width}px`,
+  oracle: "The actual browser lists ordinary conversations flat, exposes five root conversations even behind 110 newer internal conversations, opens source-labelled member pages and their complete history, preserves header menus and real bulk archive/recovery, pins projects and creates source-labeled drafts without writing sessions",
+  catches: ["flat root conversations become collapsed groups", "child history displaces root previews", "missing full session actions", "status and avatars are too small", "bulk selection cannot select visible rows", "draft navigation secretly creates a session", "expanding member navigation summons an editable search"],
+  tags: ["page-experience","prototype-parity","machine-connections"], runner: "playwright", llm: {default: "mock"}, retention: width===744,
   expectedDurationMs: 60_000, timeoutMs: 240_000,
   resources: {environments: 1,cpu: 3,memoryMb: 3072,io: 1,browser: 1,pool: "browser"},
   surfaces: ["workbench-ui","daemon"], productInterfaces: ["@genehub/workbench","workspace.list","workspace.open","agentSpace.configure","session.create","session.page","session.archive","session.get"],
@@ -36,7 +36,8 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
       const attached=await o.client.call({type:"agentSpace.configure",payload:{workspaceId:opened.data.id,expectedRevision:opened.data.agentSpace?.revision??0,operation:{kind:"setParent",parentWorkspaceId:o.workspaceId}}});
       if(attached?.type!=="workspace") throw new Error("child attachment failed"); spaces.push(attached.data);
     }
-    for(let i=0;i<110;i++) await create(spaces[i%2]!.id,`内部会话${i}`);
+    const internalIds:string[]=[];
+    for(let i=0;i<110;i++) internalIds.push(await create(spaces[i%2]!.id,`内部会话${i}`));
     const pending=await create(spaces[1]!.id,"验证待确认");
     o.mock.script({tool:{name:"request_user_input",arguments:{questions:[{id:"review",header:"验收",question:"选择验收范围",options:[{label:"桌面",description:"桌面"},{label:"手机",description:"手机"}]}]}}});
     await t.flows.main.sendPrompt(o.client,pending,"请确认验收范围");
@@ -55,7 +56,10 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
       {targets:()=>[{id:machineId,deviceHandle:machineId,label:"原型验收机器",kind:"remote",online:true}],endpoint:()=>daemonEndpoint(o.daemon)});
     const page=browser.page;
     const list=page.getByRole("complementary",{name:"会话列表",exact:true});
-    const showList=async()=>{if(width<700) await page.getByRole("button",{name:"会话列表",exact:true}).click();};
+    const showList=async()=>{
+      for(let depth=0;depth<4 && !await nav.isVisible();depth++) await page.getByRole("button",{name:/^(会话列表|返回)$/}).first().click();
+      await nav.getByRole("button",{name:"会话",exact:true}).click(); await list.waitFor();
+    };
     const nav=page.getByRole("navigation",{name:"工作台导航",exact:true});
     await page.getByRole("heading",{name:"普通会话直接可见",exact:true}).waitFor();
     await showList();
@@ -63,8 +67,8 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
     await list.getByRole("menuitemradio",{name:/全部机器.*1\/1 在线/}).waitFor();
     await page.keyboard.press("Escape");
     phase="root previews";
-    const group=list.getByRole("region",{name:"项目 原型团队",exact:true});
-    await group.getByRole("button",{name:/前台会话8/}).waitFor();
+    const roots=list.locator(".conversation-row").filter({hasText:/前台会话/});
+    await list.getByRole("button",{name:/前台会话8/}).waitFor();
     const headerRows=await list.locator("header").evaluate(e=>({
       top:[...e.children[0]!.querySelectorAll("button")].map(b=>b.getAttribute("aria-label")??b.textContent),
       filters:[...e.children[1]!.querySelectorAll("button")].map(b=>b.getAttribute("aria-label")??b.textContent),
@@ -86,63 +90,76 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
         t.note(JSON.stringify({tabletScreenshot:screenshot,nav:navBox,list:listBox,main:mainBox,font,machineFont}));
       }
     }
-    t.assertions.assert(await group.getByRole("img",{name:"项目状态尚未完整读取",exact:true}).count()===0,"historical pagination displayed an unknown project warning");
-    await group.getByRole("img",{name:"1 待你处理",exact:true}).first().waitFor();
-    t.assertions.assert(await group.locator(".conversation-row").count()===5,"front preview is not exactly five rows");
+    t.assertions.assert(await roots.count()===5 && await list.locator(".project-session-group").count()===0,
+      "root previews were displaced by internal history or grouped instead of flat");
+    t.assertions.assert(await list.getByText("内部会话109",{exact:true}).count()===0,"internal history leaked into the root list");
+    const rowAvatar=await roots.first().getByRole("img",{name:"原型团队的头像",exact:true}).boundingBox();
+    t.assertions.assert((rowAvatar?.width??0)>=22,"conversation source avatar shrank below22px");
     await list.getByRole("button",{name:"进行中",exact:true}).click();
-    await group.getByRole("button",{name:/验证待确认/}).waitFor();
-    await group.getByRole("button",{name:/执行受阻/}).waitFor();
-    t.assertions.assert(await list.getByRole("button",{name:/普通会话直接可见/}).count()===0,"combined active filter included idle conversations");
+    t.assertions.assert(await list.getByRole("button",{name:/普通会话直接可见|前台会话/}).count()===0,
+      "current-work filter included idle roots");
+    t.assertions.assert(await list.getByRole("button",{name:/验证待确认|执行受阻/}).count()===0,
+      "internal current work leaked out of its member page");
     await list.getByRole("button",{name:"全部",exact:true}).click();
-    await list.getByRole("button",{name:/普通会话直接可见/}).waitFor();
-    t.assertions.assert(await list.locator(".project-session-group").count()===1,"ordinary conversations were forced into project groups");
-    t.assertions.assert(await group.getByText("内部会话109",{exact:true}).count()===0,"internal conversations were expanded by default");
-    const avatar=await group.getByRole("img",{name:"原型团队的头像",exact:true}).first().boundingBox();
-    t.assertions.assert((avatar?.width??0)>=36,"project avatar shrank below36px");
-    await group.getByRole("button",{name:"更早前台会话",exact:true}).click();
-    await group.getByRole("button",{name:/前台会话1/}).waitFor();
-    t.assertions.assert(await group.locator(".conversation-row").count()===8,"root history did not load");
-    phase="internal Space filter";
-    await group.getByRole("button",{name:/团队内部/}).click();
-    const spaceFilter=group.getByRole("button",{name:"原型团队 Space 筛选",exact:true});
-    await spaceFilter.click();
-    const chooser=page.getByRole("listbox",{name:"原型团队 Space 筛选",exact:true});
-    await chooser.getByRole("option",{name:/验证Space.*原型验收机器/}).waitFor();
-    const chooserBox=await chooser.boundingBox();
-    t.assertions.assert(Boolean(chooserBox&&chooserBox.x>=0&&chooserBox.x+chooserBox.width<=width&&chooserBox.y>=0&&chooserBox.y+chooserBox.height<=1133),"Space menu escaped the viewport");
-    t.assertions.assert(await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).count()===0,"small Space chooser opened a search field");
-    t.assertions.assert(await chooser.evaluate(e=>e===document.activeElement),"Space chooser did not focus the non-editable list");
-    t.assertions.assert(await page.locator("input:focus,textarea:focus,[contenteditable=true]:focus").count()===0,"opening Space chooser focused an editable control");
-    t.assertions.assert(await chooser.getByRole("option").count()===spaces.length+1,"Space options require a search before they appear");
-    const optionTexts=await chooser.getByRole("option").allTextContents();
-    const verificationIndex=optionTexts.findIndex(text=>text.includes("验证Space"));
-    t.assertions.assert(verificationIndex>0,"verification Space is not directly listed");
-    for(let n=0;n<verificationIndex;n++) await chooser.press("ArrowDown");
-    await chooser.press("Enter");
-    await group.getByRole("button",{name:/验证待确认/}).waitFor();
-    t.assertions.assert(await chooser.count()===0,"selection did not close the Space menu");
-    await spaceFilter.click();
-    await chooser.getByRole("option",{selected:true}).filter({hasText:"验证Space"}).waitFor();
-    await chooser.press("Escape");
-    t.assertions.assert(await spaceFilter.evaluate(e=>e===document.activeElement),"Escape did not restore focus");
-    await spaceFilter.click();
-    await page.getByRole("button",{name:"关闭Space筛选",exact:true}).focus();
-    await page.keyboard.press("Enter");
-    await group.getByRole("button",{name:"清除Space筛选",exact:true}).waitFor();
-    t.assertions.assert(await chooser.count()===0,"close button Enter selected an option instead of closing");
-    const status=group.getByRole("img",{name:/待你处理/}).last();
-    const statusBox=await status.locator("svg").boundingBox();
-    t.assertions.assert((statusBox?.width??0)>=16,"state icon shrank below16px");
-    const spaceAvatar=await group.getByRole("button",{name:/验证待确认/}).getByRole("img",{name:"验证Space的头像"}).boundingBox();
-    t.assertions.assert((spaceAvatar?.width??0)>=22,"Space avatar shrank below22px");
+    await list.getByRole("button",{name:/加载 .+ 的更早会话/}).click();
+    await list.getByRole("button",{name:/前台会话1/}).waitFor();
+    t.assertions.assert(await roots.count()===8,"root history did not load through the current machine paging control");
     phase="compact search";
     const headerHeight=await list.locator("header").boundingBox();
     await list.getByRole("button",{name:"搜索列表",exact:true}).click();
     const searchHeight=await list.locator("header").boundingBox();
     t.assertions.assert((searchHeight?.height??0)<=(headerHeight?.height??0)+1,"search added another header row");
-    await list.getByRole("textbox",{name:"搜索会话",exact:true}).fill("内部会话109");
-    await group.getByRole("button",{name:/内部会话109/}).waitFor();
+    await list.getByRole("textbox",{name:"搜索会话",exact:true}).fill("前台会话8");
+    await list.getByRole("button",{name:/前台会话8/}).waitFor();
+    t.assertions.assert(await roots.count()===1,"root search retained unrelated rows");
     await list.getByRole("button",{name:"关闭搜索",exact:true}).click();
+    phase="member Space navigation";
+    await nav.getByRole("button",{name:"项目",exact:true}).click();
+    const projectList=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    const group=projectList.getByRole("region",{name:"项目 原型团队",exact:true});
+    await group.getByRole("img",{name:"1 待你处理",exact:true}).first().waitFor();
+    await group.getByRole("img",{name:"1 运行异常",exact:true}).first().waitFor();
+    const avatar=await group.getByRole("img",{name:"原型团队的头像",exact:true}).boundingBox();
+    t.assertions.assert((avatar?.width??0)>=36,"project avatar shrank below36px");
+    await group.getByRole("button",{name:"展开成员 原型团队",exact:true}).click();
+    const members=group.getByRole("list",{name:"原型团队 成员",exact:true});
+    t.assertions.assert(await members.getByRole("button").count()===spaces.length,"direct member navigation lost a Space");
+    const member=members.getByRole("button",{name:"打开成员 验证Space",exact:true});
+    await member.waitFor();
+    t.assertions.assert((await member.innerText()).includes("原型验收机器"),"member omitted its actual machine source");
+    const memberBox=await member.boundingBox();
+    t.assertions.assert(Boolean(memberBox&&memberBox.x>=0&&memberBox.x+memberBox.width<=width&&memberBox.height>=40),"member navigation escaped its viewport or lost its touch target");
+    await member.focus();
+    t.assertions.assert(await member.evaluate(e=>e===document.activeElement) && await page.locator("input:focus,textarea:focus,[contenteditable=true]:focus").count()===0,
+      "opening member navigation focused an editable search");
+    await member.press("Enter");
+    const memberPage=page.getByRole("region",{name:"项目页面",exact:true});
+    await memberPage.getByRole("heading",{name:"验证Space",exact:true}).waitFor();
+    t.assertions.assert(page.url().includes(spaces[1]!.id.slice(2,10)),"member navigation opened a different Space");
+    await memberPage.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"进行中",exact:true}).click();
+    await memberPage.getByRole("button",{name:/验证待确认/}).waitFor();
+    await memberPage.getByRole("button",{name:/执行受阻/}).waitFor();
+    t.assertions.assert(await memberPage.getByRole("button",{name:/内部会话/}).count()===0,"member current-work view included idle history");
+    const statusBox=await memberPage.getByRole("img",{name:/待你处理/}).last().locator("svg").boundingBox();
+    t.assertions.assert((statusBox?.width??0)>=16,"state icon shrank below16px");
+    const spaceAvatar=await memberPage.getByRole("button",{name:/验证待确认/}).getByRole("img",{name:"验证Space的头像",exact:true}).boundingBox();
+    // The flat sidebar source uses22px; the existing Space-page metadata uses16px.
+    t.assertions.assert((spaceAvatar?.width??0)>=16,"member conversation metadata avatar shrank below16px");
+    phase="older member history search";
+    await memberPage.getByLabel("当前项目会话状态",{exact:true}).getByRole("button",{name:"全部",exact:true}).click();
+    t.assertions.assert(await memberPage.getByText("内部会话1",{exact:true}).count()===0,"old search witness was already in the bounded default history");
+    await memberPage.getByRole("button",{name:"项目菜单",exact:true}).click();
+    await page.getByRole("menuitem",{name:"查看全部会话",exact:true}).click();
+    await memberPage.getByRole("textbox",{name:"搜索当前项目会话",exact:true}).fill("内部会话1");
+    await memberPage.getByText("内部会话1",{exact:true}).click();
+    await page.getByRole("heading",{name:"内部会话1",exact:true}).waitFor();
+    t.assertions.assert(page.url().includes(internalIds[1]!.slice(2,10)),"history search opened another stored conversation");
+    await page.getByRole("button",{name:"当前项目",exact:true}).click();
+    await memberPage.getByRole("textbox",{name:"搜索当前项目会话",exact:true}).fill("");
+    await memberPage.getByRole("button",{name:"项目菜单",exact:true}).click();
+    await page.getByRole("menuitem",{name:"最近会话",exact:true}).click();
+    t.assertions.assert(await memberPage.getByText("内部会话1",{exact:true}).count()===0,"leaving complete history inflated the ordinary preview");
+    await showList();
     phase="batch archive and restore";
     await list.getByRole("button",{name:"批量",exact:true}).click();
     await list.getByRole("button",{name:"全选当前可见",exact:true}).click();
@@ -190,7 +207,7 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
     await projects.getByRole("region",{name:"项目 原型团队",exact:true}).waitFor();
     t.assertions.assert(await projects.locator("section").count()===1,"team filter included an ordinary or builtin project");
     await types.getByRole("button",{name:"所有",exact:true}).click();
-    const pinned=projects.getByRole("button",{name:/置顶 ·/});
+    const pinned=projects.getByRole("button",{name:/^置顶/});
     await pinned.waitFor(); await pinned.click();
     t.assertions.assert(await projects.getByRole("region",{name:"项目 普通项目",exact:true}).count()===0,"collapsed pinned project remained visible");
     await pinned.click(); await projects.getByRole("region",{name:"项目 普通项目",exact:true}).waitFor();
@@ -208,7 +225,7 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
     const pageReply=await o.client.call({type:"session.page",payload:{requests:[{workspaceId:ordinary.data.id,limit:100,cursor:null}],includeArchived:true}});
     t.assertions.assert(pageReply?.type==="sessionPages"&&pageReply.data[0]?.sessions.length===1,"draft creation wrote a stored conversation");
     t.assertions.assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"responsive page overflowed horizontally");
-    t.note(JSON.stringify({width,ordinaryFlat:true,rootPreview:5,rootHistory:8,internalHistory:111,spaceSource:true,headerMenu:true,bulkArchiveRecover:true,pinnedCollapse:true,draftWithoutWrite:true}));
+    t.note(JSON.stringify({width,ordinaryFlat:true,rootPreview:5,rootHistory:8,internalHistory:internalIds.length+2,memberSource:true,headerMenu:true,bulkArchiveRecover:true,pinnedCollapse:true,draftWithoutWrite:true}));
   } catch(error) {
     if(browser) t.note(`Parity ${phase} failure: ${await browser.page.locator("body").innerText().then(s=>s.slice(-6000)).catch(()=>"unavailable")}`);
     throw error;

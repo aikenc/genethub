@@ -25,15 +25,19 @@ defineSpecialty({
     await nav.getByRole("button", { name: "会话", exact: true }).click();
     const checkFilters = async (label: string) => {
       const bar = page.getByLabel(label, { exact: true });
-      for (const text of ["全部", "进行中", "待你处理", "异常／受阻", "未读"]) {
+      for (const text of ["全部", "进行中", "未读"]) {
         const button = bar.getByRole("button", { name: text, exact: true });
         // Browser scrolls the real overflow strip to reach each option.
         await button.click();
         t.assertions.assert(await button.getAttribute("aria-pressed") === "true", `filter ${text} was not selected`);
         const fits = await button.evaluate(node => {
-          const style = getComputedStyle(node);
           const range = document.createRange(); range.selectNodeContents(node);
-          return style.whiteSpace === "nowrap" && range.getBoundingClientRect().width <= node.getBoundingClientRect().width;
+          const box=node.getBoundingClientRect(), text=range.getBoundingClientRect();
+          const lines=[...range.getClientRects()];
+          const hit=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
+          return new Set(lines.map(r=>Math.round(r.top))).size === 1 &&
+            text.left>=box.left-1 && text.right<=box.right+1 && text.top>=box.top-1 && text.bottom<=box.bottom+1 &&
+            Boolean(hit && node.contains(hit));
         });
         t.assertions.assert(fits, `filter ${text} wraps or clips`);
       }
@@ -55,22 +59,25 @@ defineSpecialty({
     await checkFilters("会话状态工具栏");
     const scaled = await page.evaluate(() => ({ bottom: document.querySelector(".genehub-ui")!.getBoundingClientRect().bottom, height: innerHeight }));
     t.assertions.assert(Math.abs(scaled.bottom - scaled.height) < 2, `scaled shell geometry: ${JSON.stringify(scaled)}`);
-    await page.getByRole("button", { name: "会话筛选", exact: true }).click();
-    const dialog = page.getByRole("dialog");
-    await dialog.waitFor();
-    const bounds = await dialog.boundingBox();
-    t.assertions.assert(!!bounds && bounds.y >= 0 && bounds.y + bounds.height <= 844, "scaled dialog leaves visible viewport");
+    const machineFilter=page.getByRole("complementary",{name:"会话列表",exact:true}).getByRole("button",{name:"机器筛选",exact:true});
+    await machineFilter.click();
+    const menu=page.getByRole("menu",{name:"机器筛选",exact:true});
+    await menu.waitFor();
+    const bounds=await menu.boundingBox();
+    t.assertions.assert(!!bounds && bounds.x>=0 && bounds.x+bounds.width<=320 && bounds.y>=0 && bounds.y+bounds.height<=844,
+      "scaled machine chooser leaves the visible viewport");
     await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "hidden" });
+    await menu.waitFor({state:"hidden"});
+    t.assertions.assert(await machineFilter.evaluate(e=>e===document.activeElement),"Escape did not restore machine-filter focus");
     await nav.getByRole("button", { name: "项目", exact: true }).click();
-    await page.getByRole("button", { name: "很长的项目名称用于检查列表布局", exact: true }).click();
+    await page.getByRole("button", { name: "打开项目 很长的项目名称用于检查列表布局", exact: true }).click();
     await page.setViewportSize({ width: 320, height: 844 });
     await checkFilters("当前项目会话状态");
     const destinations = page.getByRole("navigation", { name: "项目页签" });
     for (const text of ["会话", "组件", "目录", "小队"]) {
       const button = destinations.getByRole("button", { name: text, exact: true });
       await button.scrollIntoViewIfNeeded();
-      t.assertions.assert(await button.evaluate(node => getComputedStyle(node).whiteSpace === "nowrap"), `expert destination ${text} wraps`);
+      t.assertions.assert(await button.evaluate(node => {const range=document.createRange();range.selectNodeContents(node);const text=range.getBoundingClientRect(),box=node.getBoundingClientRect();return new Set([...range.getClientRects()].map(r=>Math.round(r.top))).size===1 && text.left>=box.left-1 && text.right<=box.right+1;}), `expert destination ${text} wraps`);
     }
     await destinations.getByRole("button", { name: "会话", exact: true }).click();
     await page.screenshot({ path: path.join(process.env.TESTCTL_BROWSER_ARTIFACTS!, "expert-320-xlarge.png") });

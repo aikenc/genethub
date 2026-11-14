@@ -49,14 +49,21 @@ defineSpecialty({
   for (const key of keys) process.env[key] = JSON.stringify([fast.url, late.url]);
   let stack: Awaited<ReturnType<typeof openMultichannelBrowser>> | undefined;
   try {
-    stack = await openMultichannelBrowser(t, "hosted");
-    await stack.page.evaluate(() => (window as any).mc.client.setRtcEnabled(true));
+    stack = await openMultichannelBrowser(t, "hosted", t.browser, 2);
+    await stack.page.evaluate(async () => {
+      const client=(window as any).mc.client;
+      // A foreground body consumer enables the actual separate business channel;
+      // background directory consumers intentionally keep just control warm.
+      client.setDataChannelEnabled(true);
+      await client.prepareDataChannel();
+      client.setRtcEnabled(true);
+    });
     const during = await stack.page.evaluate(async () => {
       const m = (window as any).mc, started = performance.now();
       const reply = await m.client.call({ type: "workspace.list" });
       return { type: reply?.type, ms: performance.now() - started, rtc: m.client.rtcState };
     });
-    await stack.page.waitForFunction(() => (window as any).mc.client.rtcState === "connected", null, { timeout: 40000 });
+    await stack.page.waitForFunction(() => {const m=(window as any).mc;return m.client.rtcState === "connected" && m.diagnostics.filter((e:any)=>e.kind === "rtc" && e.detail.milestone === "transportReady").length >= 2;}, null, { timeout: 40000 });
     const result = await stack.page.evaluate(async () => {
       const m = (window as any).mc;
       const reply = await m.client.call({ type: "workspace.list" });

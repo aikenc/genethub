@@ -127,9 +127,10 @@ defineSpecialty({
     const browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(r.daemon), ownerSummary.workspaceId, owner);
     try {
       await browser.page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
-      await browser.page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
-      const row = browser.page.getByRole("complementary", { name: "会话列表", exact: true }).locator(".conversation-row").filter({ hasText: "first independent goal" });
-      await browser.page.getByRole("button", { name: /团队内部/ }).click();
+      // Internal Owner conversations belong to their Space page; the global
+      // conversation list now deliberately contains ordinary root conversations.
+      await browser.page.getByRole("button", {name:"当前项目",exact:true}).click();
+      const row = browser.page.getByRole("region",{name:"项目页面",exact:true}).locator(".conversation-row").filter({ hasText: "first independent goal" });
       t.assertions.assert(await row.count()===1,"Owner was duplicated in the conversation list");
       await row.getByRole("img",{name:"等待协作 2 项",exact:true}).first().waitFor();
       t.assertions.assert((await r.snapshot(owner)).summary.status === "idle", "UI waiting changed native runnable state");
@@ -137,7 +138,7 @@ defineSpecialty({
     const board = await cli(front, ["board", "refresh"]);
     t.assertions.assert(board.code === 0, "real bound Agent could not generate Team board: " + board.err);
     const boardBrowser = await openBrowser({}, { trace: false });
-    const boardPreview = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page: boardBrowser.page, endpoint: daemonEndpoint(r.daemon), workspaceId: r.project.id, entryPath: join(r.root, "datas/board/index.html") });
+    const boardPreview = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page: boardBrowser.page, endpoint: daemonEndpoint(r.daemon), refreshEndpoint:()=>daemonEndpoint(r.daemon), workspaceId: r.project.id, entryPath: join(r.root, "datas/board/index.html") });
     try {
       const frame = boardBrowser.page.frameLocator('iframe[title="HTML 文件预览"]');
       const leaderRow = frame.locator("#members-tbody tr").filter({ hasText: "研发组长" });
