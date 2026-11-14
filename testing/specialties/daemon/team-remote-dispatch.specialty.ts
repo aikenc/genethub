@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, connectProductClient, registerControlledAgent, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
 
@@ -1064,6 +1064,39 @@ sys.exit(r.returncode)
     const repeatedBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
     t.assertions.assert(repeatParallel.code===0&&JSON.stringify(repeatedBinding)===JSON.stringify(afterParallelBinding)
       &&readFileSync(preparedFile,"utf8")===preparedBytes,"same version parallel retry changed bindings or old obligations: "+JSON.stringify({code:repeatParallel.code,bindingChanged:JSON.stringify(repeatedBinding)!==JSON.stringify(afterParallelBinding),firstVersion:path.basename(parallelRoot),repeatVersion:path.basename(path.dirname(path.dirname(repeatedBinding.command[1]))),oldReceiptChanged:readFileSync(preparedFile,"utf8")!==preparedBytes}));
+    // Target preferences change in the currently bound version, after its
+    // installation. The next two versions must not roll back to stable defaults.
+    let currentRoot=parallelRoot;
+    for(let version=2;version<=3;version++){
+      const preferences=new Map([
+        [".genethub/open.env",Buffer.from("TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_MODEL_RESEARCH=local-research-"+version+"\n")],
+        ["spaces/qa/.genethub/open.env",Buffer.from("TEAM_AGENT=ctl-cli-command\nTEAM_MODEL_WORK=local-qa-"+version+"\nTEAM_MACHINE="+machine+"\nWORKTREE_DIR="+path.join(t.env.root,"kept-target-worktree")+"\n")],
+        ...localGpuPaths.map(rel=>[rel,Buffer.from(JSON.stringify({schema:"fixture-gpu-registration/1",renderer:"current native device",revision:version})+"\n")] as [string,Buffer]),
+      ]);
+      for(const [rel,bytes]of preferences){const f=path.join(currentRoot,rel);mkdirSync(path.dirname(f),{recursive:true});writeFileSync(f,bytes);chmodSync(f,0o600);}
+      const oldSettings=readFileSync(path.join(declaredRuntime,".genethub/open.env"));
+      writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'successive local preferences "+version+"'\n");
+      if(version===2){
+        const currentReceiptPath=path.join(currentRoot,".genethub/install-receipt.json"),savedReceipt=readFileSync(currentReceiptPath);
+        const currentBinding=JSON.stringify(JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa"));
+        writeFileSync(currentReceiptPath,JSON.stringify({...JSON.parse(savedReceipt.toString()),source:"foreign-current-runtime"}));
+        const refusedCurrent=await script(["employee","sync","--parallel"],builder);
+        t.assertions.assert(refusedCurrent.code!==0&&JSON.stringify(JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa"))===currentBinding
+          &&readFileSync(preparedFile,"utf8")===preparedBytes,"foreign current preference source was ignored or changed original bindings");
+        writeFileSync(currentReceiptPath,savedReceipt);
+      }
+      const nextInstall=await script(["employee","sync","--parallel"],builder);
+      t.assertions.assert(nextInstall.code===0,"successive runtime install failed: "+nextInstall.stdout+nextInstall.stderr);
+      const nextBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
+      const nextRoot=path.dirname(path.dirname(nextBinding.command[1]));
+      t.assertions.assert(nextRoot!==currentRoot&&nextRoot!==declaredRuntime,"new version did not get an independent runtime");
+      for(const [rel,bytes]of preferences)t.assertions.assert(existsSync(path.join(nextRoot,rel))&&readFileSync(path.join(nextRoot,rel)).equals(bytes)
+        &&readFileSync(path.join(currentRoot,rel)).equals(bytes)&&(lstatSync(path.join(nextRoot,rel)).mode&0o777)===0o600,"next version lost current target-local preference or its permissions: "+rel);
+      t.assertions.assert(readFileSync(path.join(declaredRuntime,".genethub/open.env")).equals(oldSettings)
+        &&readFileSync(preparedFile,"utf8")===preparedBytes&&!(await inspectSession(preparedSid,true)).items.some((i:any)=>i.type==="assistantMessage")
+        &&!existsSync(path.join(nextRoot,"datas/parallel-old-obligation.txt")),"preferences migration changed/copied original execution obligations");
+      currentRoot=nextRoot;
+    }
     const newReleased=parallelReceive({id:newRequest.id,workspaceId:newRequest.workspaceId,role:"qa",operation:"release",sessionId:newSid});
     t.assertions.assert(newReleased.status===0,"independent new preparation could not release its own receipt");
     const releasedPrepared=installedReceive({id:preparedForUpgrade.id,workspaceId:declaredBinding.workspaceId,role:"qa",operation:"release",sessionId:preparedSid});
