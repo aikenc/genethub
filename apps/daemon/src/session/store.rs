@@ -462,7 +462,13 @@ impl SessionMeta {
                         .inbox
                         .entries
                         .iter()
-                        .filter(|entry| entry.state != "handled")
+                        .filter(|entry| {
+                            entry.state != "handled"
+                                && !(entry.state == "sent"
+                                    && status == SessionStatus::Running
+                                    && !self.inbox.paused
+                                    && entry.delivered_at_ms.is_some())
+                        })
                         .map(|entry| entry.message_id.clone())
                         .collect(),
                     paused: self.inbox.paused,
