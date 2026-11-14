@@ -1,15 +1,14 @@
 ---
 name: team-research
-description: 团队的研究会话：对项目没有副作用的事——评审、调研、复盘、方案、数值推演、诊断。在团队 research 空间里开的会话用它。
+description: 后台只读研究：评审、调研、复盘、方案、数值推演与诊断，向原请求方交付证据。
 ---
 
 # 研究
 
-你在团队的后台，用户通常看不到你。你负责想清楚、看明白；不改持久的东西，所以不占写者锁。
+只读业务目录（含 datas/），不占业务写者锁。临时实验与草稿放独立临时区；正式报告按原发布合同归档持久位置（按需查维护参考），收尾不引用 temp/，不新增 Owner 审批。
 
-- **只读业务目录**（包括 `datas/`）：实验副本、单次报告或 H5 看板一律用 `run.py temp new <slug> --purpose "…"` 放在 `temp/` 下（不污染 `datas/` 项目列表）；要长期留存的报告用 `run.py publish report`。值得沉淀的经验用 `run.py note --kind observation` 交反思会话。
-- **交付格式**：回复面向请求方，结论在前、依据在后，带引用；写了报告或页面时，正文先给核心结论摘要，再附**相对团队根（不带 `../` 前缀）**的 Markdown 链接 `[报告](temp/YYMMDD/.../report.md)` 或 `[看板](temp/YYMMDD/.../index.html)`（勿用反引号包裹路径，不要只给目录，也不要写进 `spaces/research/`）。
-- **多路统筹与跨团队协作**：接手需拆成多路并行或需请本机其他团队协同的任务时，有 taskId 时用 `task support`，按 team-core 的 Task Owner 合同派单；旧派单才沿原 `spawn/send` 发起后**直接结束本轮**，系统收齐同批结果后会自动异步唤醒。被截断的回复按头部 `ref` 取全文，核实去重、汇总成完整结论与报告后再作最终回复。
-- 有 taskId 时，交付前用 `task finish <taskId> --outcome success|failed|blocked "结论与证据"`；中间回复不代表任务完成，临时目录加 `--task-id <taskId>`。
-- 察觉用户不满意、有长期偏好，或遇到自己解决不了的外部问题（缺环境、缺授权、疑似平台缺陷）：`run.py note`，写清证据。
-- **后台不挂起等人**：日常取舍由原 Owner 在授权内决定；重大风险把事实、影响、推荐与当前处理方案交回请求方合并同步，同步后继续可做工作，不等用户答复。明确暂停/取消、权限与预算边界仍保留；不要用 `session ask`、`AskQuestion` 或 `request_user_input` 挂起后台。
+结论在前、依据在后，给引用与核心摘要，再附相对团队根、无 ../ 的真实文件链接；页面链接入口文件，不写 spaces/research/ 或只给目录。预览遵守 genehub-preview。
+
+多路支持用 `task support`，一次派出后结束本轮，不轮询。截断回复沿原 ref 取全文，核实去重、汇总完整证据后用 `task finish` 提交真实结论；中间回复不算完成。原 taskId、输入与路由保留，未知先 `task status`，不换号重派。仅无 taskId 的旧派单按原回执兼容。
+
+不满、偏好、复发经验和平台问题走原内部反馈通道，参数按需读 team-core references/team-maintenance.md。日常取舍由原 Owner 在授权内决定；重大风险附事实、影响和方案回请求方合并同步，继续其它工作，不挂起等人。明确暂停/取消、权限与预算边界保留。

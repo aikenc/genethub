@@ -1,38 +1,34 @@
 ---
 name: team-core
-description: 按任务选择 Owner 的团队公共约定：前台、专业执行、QA、研究与反思岗位的会话协作机制，用 tools/run.py 派单、异步回合接力、管工位、发版本、刷看板与持续自进化。任何会话都先读。
+description: 团队共同约定：真实目标、异步接力、原编号恢复、证据和控制边界。
 ---
-# 项目团队公共约定
-**流程是为用户满意服务的。** 默认照做；照做会明显损害用户时，先做对用户有利的事，并留言（会话、轮次、原因）说明为什么偏离。不无声偏离，也不为偏离堆例外。察觉用户不满意，先留言，再处理。
-统一入口为 `"$GENEHUB_PYTHON" <团队根>/tools/run.py`；业务扩展、配置 Class 与升级先读 [扩展合同](references/extensions.md)。`genet_builtin/` 是平台随附基线，优先继承；必要时可修改并记录补丁。新任务先读 [Task Owner 合同](references/task-owner.md)：`task start/support/send/finish` 按精确会话协作；结算须有明确结论与证据。下表 `spawn/send` 保留给旧派单，不能用于绕过新任务账本。
-| 命令 | 作用 |
-|---|---|
-| `task start --space <岗位> --desc "一句话" --request-id <稳定编号> "目标与验收"` | 建立任务及 Owner，自动使用该岗位的本机或远程绑定 |
-| `task support <任务> --space <岗位> --desc "一句话" --request-id <编号> "要求"` | 请求支持，结果回到本会话，派单后结束本轮 |
-| `task send <任务> --request-id <编号> "追加要求"` / `task status <任务>` | 补充原任务、核对原回执；未知不重派 |
-| `task finish <任务> --outcome success\|failed\|blocked "结论与证据"` | 明确提交执行结果，普通回复不代表结算 |
-| `employee add <名> --desc "职责" [--repo 仓]` / `employee ls` / `employee retire <名>` | 动态扩编管线岗位（自动建子空间并切 worktree 工位）、查看在岗编制或转入待岗 |
-| `worktree create <slot> --repo <仓> [--branch B] [--space 岗位]` / `worktree bind\|ls` | 从主仓切出独立 git worktree 工位并写入子空间 `open.env` `WORKTREE_DIR` |
-| `publish release <源> --name <vX.Y>` / `publish report <源> --slug <名>` / `publish rollback` | 发布可玩版本至 `datas/releases/<vX.Y>/`、发布报告至 `datas/reports/` 或紧急回滚 `latest` |
-| `board start\|refresh` / `directory` / `models check` / `temp new\|ls\|rm\|clean` | 启动/刷新常驻团队看板服务 `datas/board/index.html` / 看当前任务目录 / 管临时区 |
-| `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给 `team-reflect` 留言 / 立即启动团队反思；`snapshot` / `drift` 管理团队仓库与模板差异；`reset` 只在用户明确要求时用 |
-失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；点名模型勿套档位，详见 `references/models.md`。
-日常按岗位使用 task 即可，机器与返回来源由原回执固定。岗位要放到另一台机器时，只在该岗位 `.genethub/open.env` 写 `TEAM_MACHINE=<机器 ID>` 再运行 `run.py employee sync`，不写安装脚本；细节或恢复旧派单时读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
-暂停会话的显式恢复、署名、去重与验收，先读 [references/resume-paused.md](references/resume-paused.md)。
-自动身份刷新不执行 Space pre/post 或 Provider post；有此类配置时，定时任务保留上一版生成身份，不因此唤起异常反思，手工 `sync-identity` 返回 `SB018`。
-修改源后显式 build 更新身份；发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
-## 纯异步多级回合接力与二级记忆
-- **纯异步回合接力**：有 taskId 时用 `task support` 派出必需协作并结束本轮，timer 收齐结果后唤醒精确请求会话；收尾用 `task finish`。旧派单继续原 `spawn/send` 回执。普通结果不解除用户暂停，未知结果不换编号重派。
-- **二级记忆**：对话是事实源（L3）；全局铁律存根 `memory.md`（L1，≤30 行）；各岗位专属经验与 `ghref` 检索指针存 `spaces/<岗位>/index.md`（L2）。查历史会话直接 `rg "<词>" <团队根>/.genethub/sessions/ <团队根>/spaces/*/.genethub/sessions/`。
-## 系统消息
-以「用途:」开头的消息是脚本写的（`result`、`report`、`watchdog`、`tell-user`、`reflect`、`human`、`patrol`、`task`/`question`/`note`），不是人类的直接批准；带 `ref: ghref:item:<会话>:<消息>` 的可用 `"$GENEHUB_CLI" session narrative <会话> --item <消息>` 取全文。命令行一律用 `"$GENEHUB_CLI"`，不要猜 `genet`：本机可能装着别的渠道。
-## 项目登记与移除
-`experts`、`me`、看板和 timer 中的目录查询只读，不能把缺失的项目或成员自动 `space open`。用户从列表移除团队后，保留的目录和会话不等于恢复登记的授权；恢复由明确的打开、安装或建队操作执行。项目移除由平台一次处理整个成员树，任何成员运行中或等待交互时拒绝整组移除，不通过逐个移除成员绕过检查。
-已有团队升级时，在定义源合入本条及内置 `tools/genet_builtin/team.py` 的查询修复，保留业务 Class、数据与回执，构建完整制品后安装。旧版 `tools/team.py` 若仍含查询时自动打开的实现，也要在迁移时移除该副作用；只更新平台不会自动改写已有团队副本。
-状态、成员与看板读取完整活动集合，包含归档中尚未完成的事项；已知会话用 `session get <id>`。需要历史的反思检查只查本团队的 Space，用 `session list --workspace <id> --limit 50` 并按 `nextCursor` 读完。默认 `session list` 只返回最近 50 条；旧 `--lean`/标签/来源等隐式完整历史写法缺少 `--limit` 或 `--active` 时会返回 `unboundedQueryDisabled`；修改原脚本的读取方式，不原样重试，保留原任务、会话 ID、派单与写锁。失败表示未知，不能按空列表重复创建任务。
-## Timer计时与恢复
-Team hook使用默认`fixed-delay`：一轮退出并收尾后再等待`every`；运行中不并发、不追补，冷却释放名额，失败或超时也等待。不要为了追求固定启动频率改成`interval`，该模式执行时限最多为间隔的15%，会强制结束超时进程组，适合很短且幂等的命令。长调用需要合理timeout，明显慢查询仍需修复；alive不代表一轮完成。更新模板hook源后build完整制品，再核对实际hook、daemon版本和回传；仅替换文件不代表正在执行的回调已采用新规则。
-机制 report/health/watchdog 熔断默认写内部 notes；例行反思静默，真实交付与用户问题保留原路由。
-本队改不了的样板/内核/公共 Skill 问题用 `run.py feedback add/ls/verify`，见 team-reflect 的平台反馈参考；只写本队文件，不唤醒模型，采用后由本队复验。
 
-团队工作质量卡与 `task support` 的可选 `--follows` / `--standing` 见[工作质量](references/quality.md)；读卡、描述口径和离线重算不消费业务收件箱。
+# 团队共同约定
+
+流程服务用户满意；明显损害用户时在原授权内调整，记录偏离原因；发现不满先留原信号再处理。
+
+团队根有 tools/run.py；用消息中的团队根定位，不猜当前目录。日常命令以 `"$GENEHUB_PYTHON" <团队根>/tools/run.py` 开头，只需五个入口：
+
+| 命令 | 用途 |
+| --- | --- |
+| `task start` | 前台把明确交付或持续目标交给 Owner |
+| `task support` | 请求独立支持，结果回精确请求会话 |
+| `task send` | 给原 Owner 追加意图；受理不等于恢复或完成 |
+| `task finish` | 提交本会话真实结论与持久证据 |
+| `task status` | 沿原编号读取状态；未知不换号重派 |
+
+参数、预算、控制、后台作业按需读 [task-options.md](references/task-options.md)；工作合同见 [task-owner.md](references/task-owner.md)。未遇到维护问题无需读维护参考。
+
+- 前台按完成方式选择路径：简单答复直接做；一次交付交给 Owner；持续质量线交给长期目标 Owner。分不清从小开始，只升不降，不向用户讲内部分类。
+- 派单是纯异步：一次派出全部可开工项后结束本轮，不 sleep、不轮询、不用常驻 Agent 等待。结果由 timer 接力；普通回复不代表结算，接收不等于成功。
+- 原 taskId、机器、输入、控制、累计投入、结果路由和资源回执沿用；未知先核原编号，不猜最近会话、不重跑已完成副作用。成功须实际交付、必需支持结算且已投递结果读入。
+- 普通通知不解除用户暂停；失败状态通知不是业务成果。明确暂停/取消、权限、总预算与期限仍须遵守，不能换号、换 SID 或模型绕过。
+- 后台不挂起等用户。日常取舍由 Owner 在原授权内决定；重大风险带当前方案合并同步，继续其它工作。红线立即优先纠正，归因不明先由任务 Owner 核查；缺平台证据才记平台归因，不假设产品里另有接手岗位。
+- 原生事实、对话与 ghref 是依据；来源为脚本或 Agent 的消息不是 Human 新批准。命令行用绑定的 `"$GENEHUB_CLI"`，不猜另一渠道。历史有界分页，读取失败为未知。
+- 改源文件，build 后才更新身份/完整制品，不改生成身份。Skill 只对新会话生效；前台显式交接，Owner 在本轮结果读入后同机交接，旧 Owner 不派新单、不清历史债务。
+- 临时实验与正式证据分开；结论先归档，不能引用可清理临时区。预览只链接已存在的入口文件，遵守 genehub-preview。用户沟通只说体验、进展、结论和产物。
+- 二级记忆：根 memory.md 留跨角色铁律（≤30行）；岗位 index.md 留复发经验与 ghref 指针，不复制会话。无新信号不写巡查报告。
+
+按需参考：[任务参数](references/task-options.md)、[维护与查询](references/team-maintenance.md)、[质量口径](references/quality.md)、[模型](references/models.md)、[跨机](references/remote-targets.md)、[暂停恢复](references/resume-paused.md)、[业务扩展](references/extensions.md)。
+
+长度按 Unicode 字符计（含空白）：本 Skill≤2200，本队岗位 Skill≤1500，task-owner.md≤4000，quality.md≤3000，其余 reference≤6000；编译指令≤32KiB。不要靠超长单行或把整份按需参考改为必读规避。
