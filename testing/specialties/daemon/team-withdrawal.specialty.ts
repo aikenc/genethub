@@ -100,9 +100,11 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
     const config = join(r.root, ".genethub/open.env"); writeFileSync(config, readFileSync(config, "utf8") + "\nTEAM_AGENT=ctl-cli-command\nTEAM_WAKE_GAP=999999\nTEAM_WAKE_ROUNDS=999999\nTEAM_BOARD_PORT=0\n");
     const front = await r.create("ctl-cli-command");
     const idle = (sid: string) => t.tools.waitUntil(async () => { const s = (await r.snapshot(sid)).summary; return s.status === "idle" && !s.inputSummary?.pendingMessageIds.length; }, 30000);
+    let commandSequence = 0;
     const cli = async (sid: string, args: string[], expected = 0) => {
-      await r.send(sid, JSON.stringify({ argv: [process.env.GENEHUB_PYTHON!, join(r.root, "tools/run.py"), ...args], cwd: r.root })); await idle(sid);
-      const reply = (await r.snapshot(sid)).items.filter(x => x.type === "assistantMessage").at(-1);
+      const requestId = "withdraw-command." + (++commandSequence);
+      await r.send(sid, JSON.stringify({ argv: [process.env.GENEHUB_PYTHON!, join(r.root, "tools/run.py"), ...args], cwd: r.root, requestId })); await idle(sid);
+      const reply = (await r.snapshot(sid)).items.filter(x => x.type === "assistantMessage" && x.text.includes(JSON.stringify(requestId))).at(-1);
       if (reply?.type !== "assistantMessage") throw Error("native caller has no actual reply");
       const result = JSON.parse(reply.text); t.assertions.assert(expected === 0 ? result.code === 0 : result.code !== 0, result.out + result.err); return expected === 0 ? lastJson(result.out) : result;
     };
@@ -169,7 +171,9 @@ defineSpecialty({ ...common, requiredRepos: ["cloud"], id: "specialty.daemon.tea
       && closed.resolution.nativeFactsSha256 && existsSync(r.state("quality", "incidents", incident.id+".closed.json")),
       "the actual receiver fence did not automatically archive its incident in the same tick");
     t.assertions.assert(!closedState.measurementEpochs?.length, "automatic native closure started a new metric window");
-    const facts=await cli(owner,["quality","facts"]);
+    // The scripted Agent intentionally retains only32KiB of command stdout.
+    // Read the full diagnostic through the same public CLI, not that reply cap.
+    const facts=JSON.parse(r.ok(["quality","facts"], {GENEHUB_SESSION_ID:owner}));
     const tree=facts.taskTrees.find((x: any)=>x.taskId===survivingTask.taskId);
     t.assertions.assert(facts.measurementWindow.startAtMs===facts.window.endAtMs-24*3600000
       && tree?.sessions.some((x: any)=>x.sessionId===priorChild.collaborator && x.readable===true),
