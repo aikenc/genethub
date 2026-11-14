@@ -7,8 +7,8 @@ import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.preview.inventory-project-aliases",
   title: "One real preview stays visible through many projects without multiplying its failed health probe",
-  oracle: "A shipped Python application is exposed by 97 actual workspace roots, 96 with 32 pinned previews. Suspending only that application makes all aliases unreachable in under three seconds; resuming it restores every alias, scoped isolation and authenticated shutdown without reusing the failed observation.",
-  catches: ["one timeout per alias turns a process inventory into seconds of waves", "deduplication drops legitimate project entries", "a completed failed probe is cached after app recovery", "aliases borrow another project's service metadata"],
+  oracle: "A shipped Python application is exposed by 97 actual workspace roots, 96 with 32 pinned previews. Reconfiguring one real project's roots removes then restores its alias on subsequent inventories. Suspending only the application makes all aliases unreachable in under three seconds; resuming it restores every alias, scoped isolation and authenticated shutdown without reusing the failed observation.",
+  catches: ["one timeout per alias turns a process inventory into seconds of waves", "deduplication drops legitimate project entries", "a completed failed probe is cached after app recovery", "aliases borrow another project's service metadata", "inventory retains an alias after its project root changes"],
   tags: ["core", "service-preview", "session-catalog", "preview-inventory-aliases"],
   llm: { default: "none" }, expectedDurationMs: 20000, timeoutMs: 90000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "standard" },
@@ -69,6 +69,22 @@ defineSpecialty({
     await checkAliases(true);
     const liveMs = Math.round(performance.now() - liveStarted);
     t.assertions.assert(liveMs < 3000, "populated project metadata starves live process inventory: " + liveMs);
+    // A later inventory must resolve the current project roots, even when a
+    // previous request already discovered this same authenticated Run.
+    const remapped = aliases.at(-1)!;
+    const definitionRoot = join(t.env.root, "alias-definition-95");
+    const definition = join(definitionRoot, "project.code-workspace");
+    await writeFile(definition, JSON.stringify({ folders: [{ path: otherRoot }, { path: definitionRoot }] }));
+    const reopened = await o.client.call({ type: "workspace.open", payload: { root: definition } });
+    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === remapped.id, "root change replaced the actual alias project");
+    const afterRemap = await list();
+    t.assertions.assert(afterRemap?.type === "processes" && !afterRemap.data.some(p => p.workspaceId === remapped.id && p.service?.runId === runId), "inventory reused a Run through a removed project root");
+    const remappedScope = await o.client.call({ type: "process.workspaceList", payload: { workspaceId: remapped.id } });
+    t.assertions.assert(remappedScope?.type === "processes" && !remappedScope.data.some(p => p.service?.runId === runId), "scoped inventory retained the former root's Run");
+    await writeFile(definition, JSON.stringify({ folders: [{ path: t.env.workspace }, { path: definitionRoot }] }));
+    const restored = await o.client.call({ type: "workspace.open", payload: { root: definition } });
+    t.assertions.assert(restored?.type === "workspace" && restored.data.id === remapped.id, "restoring the root replaced the alias project");
+    await checkAliases(true);
     // Real fault in our own external SDK application. The daemon, registry,
     // protocol responses and timeouts are untouched.
     t.assertions.assert(app.kill("SIGSTOP"), "could not suspend actual SDK app");
