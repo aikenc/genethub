@@ -4,9 +4,9 @@ import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-task-capacity-budget",
-  title: "A long Task can receive an explicit original-front capacity decision without resetting spent work or user controls",
-  oracle: "Real SDK Tasks retain cumulative/age/global limits and native pauses. Only an explicit original-front capacity decision permits more work. A supplementary message never resumes a concluded Task; explicit continuation preserves both prior conclusions and original identity, retains independently paused supports and really dispatches remaining work after a separate capacity decision. Capability status occurs once and cannot supply Human approval.",
-  catches: ["long goal requires a new Task ID to bypass a spent budget", "finished support refunds lifetime spending", "budget automatically grows", "Owner changes original front budget", "replay renews or duplicates a decision", "stale decision overwrites current limits", "task capacity overrides global active ceiling", "capacity change resumes paused work"],
+  title: "A long Task can receive an explicit current-Owner or original-front capacity decision without resetting spent work or user controls",
+  oracle: "Real SDK Tasks retain cumulative/age/global limits and native pauses. Only an explicit current-Owner or original-front capacity decision permits more work. A supplementary message never resumes a concluded Task; explicit continuation preserves both prior conclusions and original identity, retains independently paused supports and really dispatches remaining work after a separate capacity decision. Capability status occurs once and cannot supply Human approval.",
+  catches: ["long goal requires a new Task ID to bypass a spent budget", "finished support refunds lifetime spending", "budget automatically grows", "unrelated support changes Task capacity", "replay renews or duplicates a decision", "stale decision overwrites current limits", "task capacity overrides global active ceiling", "capacity change resumes paused work"],
   tags: ["core", "team-task"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py tick", "session.get", "session.interrupt"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -44,13 +44,13 @@ defineSpecialty({
       && initial.limits.taskMaximumSessions === 2 && initial.limits.teamMaximumActiveSessions === 64
       && initial.blockedReasons.includes("task-session-limit"), "spent support was refunded or original limits were not observable");
     const expired = Date.now() - 1;
-    await cli(owner, ["task", "budget", task.taskId, "--max-sessions", "4", "--request-id", "not-front", "--expected-budget-revision", "0", "--reason", "Owner cannot replace front decision"], 1);
+    await cli(first.collaborator, ["task", "budget", task.taskId, "--max-sessions", "4", "--request-id", "not-owner", "--expected-budget-revision", "0", "--reason", "Unrelated support cannot allocate Owner capacity"], 1);
     const pausedBudget = await cli(front, ["task", "budget", task.taskId, "--expires-at-ms", String(expired), "--request-id", "stop-new-creates", "--expected-budget-revision", "0", "--reason", "Explicitly stop new creations while retaining original work"]);
     t.assertions.assert(pausedBudget.revision === 1 && pausedBudget.blockedReasons.includes("task-age-limit"), "explicit expiry was hidden or reset the original Task");
     await cli(owner, pendingSupport, 1);
     const expires = Date.now() + 120000;
-    const decision = ["task", "budget", task.taskId, "--max-sessions", "4", "--expires-at-ms", String(expires), "--request-id", "continue-original", "--expected-budget-revision", "1", "--reason", "Original front explicitly allocates capacity within the unchanged user goal"];
-    const renewed = await cli(front, decision);
+    const decision = ["task", "budget", task.taskId, "--max-sessions", "4", "--expires-at-ms", String(expires), "--request-id", "continue-original", "--expected-budget-revision", "1", "--reason", "Current Owner explicitly allocates remaining capacity within the unchanged user goal"];
+    const renewed = await cli(owner, decision);
     t.assertions.assert(renewed.revision === 2 && renewed.usage.taskIntentCount === 2 && renewed.limits.taskMaximumSessions === 4
       && renewed.taskCreatedAtMs === original.createdAtMs && renewed.decision.countsAsHumanApproval === false,
       "explicit capacity decision reset spending/age or claimed Human approval");
@@ -58,9 +58,9 @@ defineSpecialty({
     const again = await cli(owner, pendingSupport); t.assertions.assert(again.collaborator === second.collaborator, "same support retry created another native Session");
     await r.client.call({ type: "session.interrupt", payload: { sessionId: second.collaborator } });
     const before = (await r.snapshot(second.collaborator)).summary.inputSummary;
-    const replay = await cli(front, decision);
+    const replay = await cli(owner, decision);
     t.assertions.assert(replay.replayed === true && replay.revision === 2 && replay.usage.taskIntentCount === 3, "replay renewed a decision or refunded used intents");
-    await cli(front, decision.map(x => x === "4" ? "5" : x), 1);
+    await cli(owner, decision.map(x => x === "4" ? "5" : x), 1);
     await cli(front, ["task", "budget", task.taskId, "--max-sessions", "5", "--request-id", "stale", "--expected-budget-revision", "1", "--reason", "Stale decision must reject"], 1);
     const after = (await r.snapshot(second.collaborator)).summary.inputSummary;
     t.assertions.assert(after?.paused === true && JSON.stringify(after.pendingMessageIds) === JSON.stringify(before?.pendingMessageIds)
