@@ -13,9 +13,9 @@ mod machine;
 mod machines;
 pub mod output;
 mod place;
+mod preview;
 mod process;
 mod provider;
-mod preview;
 mod query;
 mod rpc;
 // The local CLI now calls the router in-process. Keep the loopback dialer in
@@ -211,9 +211,9 @@ async fn dispatch(args: Vec<String>) -> i32 {
         return output::fail(error);
     }
     match args.first().map(String::as_str) {
-        Some(
-            "schema" | "context" | "capabilities" | "workspace" | "file-access" | "access",
-        ) => Box::pin(query::run(&args, &selection)).await,
+        Some("schema" | "context" | "capabilities" | "workspace" | "file-access" | "access") => {
+            Box::pin(query::run(&args, &selection)).await
+        }
         Some("preview") => match args.get(1).map(String::as_str) {
             Some("feedback") => Box::pin(query::run(&args, &selection)).await,
             _ => Box::pin(preview::preview(&args[1..], &selection)).await,
