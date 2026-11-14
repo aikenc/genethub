@@ -173,8 +173,8 @@ class TaskService:
                              space=role, desc=goal[:80], words=[goal], directory=directory,
                              machine=machine, parameters=parameters or {}, tier=tier, model=model)
 
-    def status(self, task_id):
-        return self._command("status", task_id=task_id)
+    def status(self, task_id, *, summary=False):
+        return self._command("status", task_id=task_id, summary=summary)
 
     def send(self, task_id, *, request_id, text):
         return self._command("send", task_id=task_id, request_id=request_id, words=[text])

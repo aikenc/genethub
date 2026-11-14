@@ -494,6 +494,8 @@ def remote_receive(target, request):
         argv.append('--require-background-jobs')
     if request.get('operation') == 'task-operation' and operation.get('task_action') == 'budget':
         argv.append('--require-task-budget')
+    if request.get('operation') == 'task-operation' and operation.get('task_action') == 'status' and operation.get('summary'):
+        argv.append('--require-task-summary')
     cause = ""
     try:
         done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=25 if withdrawing else 120)
@@ -506,7 +508,7 @@ def remote_receive(target, request):
         terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
         required = next((flag for flag in ("--require-prepare-settlement", "--require-dispatch-fence",
                                           "--require-quality-metadata", "--require-background-jobs",
-                                          "--require-task-budget", "--require-session-workstation") if flag in argv), None)
+                                          "--require-task-budget", "--require-task-summary", "--require-session-workstation") if flag in argv), None)
         if required and not failure and not output.strip() and terminal.get("exitCode") == 2 and not terminal.get("timedOut"):
             diagnostic = "".join(f.get("data", {}).get("data", "") for f in frames
                                  if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stderr")
@@ -517,6 +519,12 @@ def remote_receive(target, request):
                                   "原派单意图、回执与资源保持原状；不确认未创建，不自动重派",
                                   "在团队定义源升级并用 employee sync 同步远端，再沿原操作编号对账",
                                   code="REMOTE_PROTOCOL_UNSUPPORTED")
+        # A dropped middle can leave the outer JSON valid while corrupting an
+        # embedded Task result. Never accept any truncated command as a receipt.
+        if any(f.get("type") == "shell.truncated" for f in frames):
+            raise ExpertError("远端响应被截断，不能作为完整回执", "原任务、输入与资源保留；操作结果未确认，没有自动重试",
+                              "任务状态使用 task status TASK --summary；其他操作先沿原编号核对回执，不能从响应片段推断完成",
+                              code="REMOTE_RESPONSE_TRUNCATED")
         receipt = json.loads(output)
         if not isinstance(receipt, dict):
             raise ValueError("invalid receiver envelope")
@@ -1868,6 +1876,12 @@ def _send_explicit_resume(root, args, sender, machine, allow_active=False):
         current = read_json(pending_path)
         if os.path.exists(pending_path) and not isinstance(current, dict):
             raise ExpertError("原派单记录不可读", "没有覆盖原任务或投递恢复", "先核对原派单文件")
+        workspace = getattr(args, "workspace", None)
+        bound_record = (operation or {}).get("record") or current or {}
+        execution_machine = (bound_record.get("machine") or machine) if machine else None
+        bound_workspace = (((bound_record.get("remoteDispatch") or {}).get("target") or {}).get("workspaceId"))
+        if machine and workspace is not None and workspace != bound_workspace:
+            raise ExpertError("--workspace 与原恢复派单绑定不同", "没有投递恢复或改写回执", "沿用原派单中的工作区；机器别名不能改变执行工位")
         if not operation:
             if current and current.get("resumeAwaitingReceipt"):
                 raise ExpertError("原恢复操作尚未确认", "没有覆盖回执或发出另一恢复", "保留原操作 ID 和原文，先核对原接收状态")
@@ -1878,11 +1892,16 @@ def _send_explicit_resume(root, args, sender, machine, allow_active=False):
                 raise ExpertError("原派单已有待交付结果", "没有重开已有工作", "先采用原结果，再发送新的诉求")
             if failed_notice and current.get("requester") != sender:
                 raise ExpertError("失败工作须由原请求方明确恢复", "没有投递或改变原暂停", "由原请求方核对已送达的失败通知后续接")
-            if machine and (not current or current.get("machine") != machine or current.get("remoteReleased")):
+            mismatched_machine = bool(current and current.get("machine") != machine)
+            if machine and current and current.get("machine") and mismatched_machine:
+                # A paired selector and its stable device handle are the same
+                # executor only when the native directory confirms that fact.
+                mismatched_machine = canonical_machine(current["machine"]) != canonical_machine(machine)
+            if machine and (not current or mismatched_machine or current.get("remoteReleased")):
                 raise ExpertError("远端原派单已释放或回执不匹配", "没有绕过远端工位或恢复会话", "核对原派单；已结束的远端新工作通过 spawn 取得新回执")
             if not machine and current and current.get("machine"):
                 raise ExpertError("原派单属于远端机器", "没有按本机会话处理", "沿用原回执中的 --machine")
-            summary = session_summary(target, machine, fresh=failed_notice)
+            summary = session_summary(target, execution_machine, fresh=failed_notice)
             # Only an explicit concluded-Task control uses this mode. A native
             # Owner may be idle after reporting blocked; it need not be paused
             # just to continue. Standalone send --resume keeps its strict guard.
@@ -1898,7 +1917,7 @@ def _send_explicit_resume(root, args, sender, machine, allow_active=False):
                 native_failure = summary.get("status") == "failed" or TURN_FAILED_ERROR in (inputs.get("error") or "")
                 failure_round = (current.get("executionFailure") or {}).get("roundId")
                 if (not native_failure or (summary.get("interactionSummary") or {}).get("requests")
-                        or not failure_round or latest_round(target, machine) != failure_round
+                        or not failure_round or latest_round(target, execution_machine) != failure_round
                         or delivery.get("queued") is not True or not delivery.get("messageId")
                         or delivery.get("recipient") != sender or delivery.get("generation") != [sender, done["reply"]]):
                     raise ExpertError("原失败代次或通知送达尚未确认", "保留原失败、暂停和资源，没有恢复",
@@ -1933,7 +1952,7 @@ def _send_explicit_resume(root, args, sender, machine, allow_active=False):
         write_json(pending_path, operation["record"])
     payload = body + "\n\n[系统提示：直接在本会话输出最终回复，团队将转交原结果接收方 %s；本次续接由 %s 发起，无需另行回传。]" % (operation["record"].get("requester") or sender, sender)
     try:
-        genet("session", "send", target, payload, "--message-id", args.message_id, "--no-wait", *machine_args(machine))
+        genet("session", "send", target, payload, "--message-id", args.message_id, "--no-wait", *machine_args(execution_machine))
     except ExpertError as error:
         operation["state"] = "unknown"
         operation["lastError"] = error.what
@@ -5313,6 +5332,7 @@ def main(argv):
     receive.add_argument('--require-quality-metadata', action='store_true', help='require follows/standing support; old receivers reject before dispatch')
     receive.add_argument('--require-background-jobs', action='store_true', help='require bounded native background-work registration; old receivers reject before interpreting the operation')
     receive.add_argument('--require-task-budget', action='store_true', help='require explicit Task capacity budget support; old receivers reject before interpreting the operation')
+    receive.add_argument('--require-task-summary', action='store_true', help='require bounded caller-specific Task status; old receivers reject before returning a historical full ledger')
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):

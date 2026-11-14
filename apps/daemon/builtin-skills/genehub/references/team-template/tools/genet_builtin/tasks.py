@@ -474,6 +474,8 @@ def command(t, args, root=None, sender=None):
     task = read_task(t, root, args.task_id)
     path = task_path(t, root, args.task_id)
     if action == 'status':
+        if getattr(args, 'summary', False):
+            print(json.dumps(status_summary(task, sid), ensure_ascii=False)); return
         from .quality_live import current
         try:live_quality=current(root)
         except (OSError,ValueError,KeyError,TypeError):live_quality={'unknown':[{'rule':'live-alerts-unavailable'}]}
@@ -568,6 +570,33 @@ def command(t, args, root=None, sender=None):
                               capacityBudgetView=capacity_budget(t, root, task)), ensure_ascii=False))
     elif action == 'bind-directory':
         print(json.dumps(bind_directory(t, root, task['taskId'], sid, args.directory), ensure_ascii=False))
+
+
+def status_summary(task, sid):
+    """Bounded decision view, distinct from the full historical Task ledger.
+
+    Each participant owns its own conclusion. A completed sibling or an Owner's
+    blocked stage never discharges an unfinished support's result obligation.
+    """
+    def conclusion(value):
+        return {key: value.get(key) for key in ('outcome', 'atMs')} if value else None
+    owner = task['owner']
+    supports = task.get('collaborators', [])
+    mine = owner if owner['sessionId'] == sid else next((x for x in supports if x['sessionId'] == sid), None)
+    own_finished = task.get('finished') if mine is owner else (mine or {}).get('finished')
+    return dict(schema='team-task-status-summary/1', taskId=task['taskId'],
+                state=task.get('state'), revision=task.get('revision', 0),
+                owner={key: owner.get(key) for key in ('sessionId', 'machine')},
+                taskConclusion=conclusion(task.get('finished')),
+                ownWork=dict(sessionId=sid, participant=mine is not None,
+                             role='owner' if mine is owner else ('support' if mine else None),
+                             operationId=(mine or {}).get('operationId'),
+                             finished=conclusion(own_finished),
+                             mustFinish=(mine is not None and not own_finished
+                                         and task.get('state') not in ('canceled', 'cancelled'))),
+                supports=dict(total=len(supports), finished=sum(bool(x.get('finished')) for x in supports),
+                              pending=sum(not x.get('finished') for x in supports)),
+                conclusionPolicy=CONCLUSION_POLICY)
 
 
 def require_results_read(t, root, sid, require_supports=True):
@@ -1423,7 +1452,7 @@ def parser(sub):
         p.add_argument('--space', required=True); p.add_argument('--desc', required=True)
         p.add_argument('--request-id', required=True); p.add_argument('--machine'); p.add_argument('--directory')
         p.add_argument('--tier'); p.add_argument('--model'); p.add_argument('--parameters', help='business JSON object; normally supplied by a project command'); p.add_argument('words', nargs='+')
-    p = actions.add_parser('status'); p.add_argument('task_id')
+    p = actions.add_parser('status'); p.add_argument('task_id'); p.add_argument('--summary', action='store_true', help='bounded caller-specific conclusion and outstanding support counts; full evidence stays in the source ledger')
     p = actions.add_parser('budget', help='inspect dispatch capacity or record an explicit original-front decision; never changes User scope/deadline')
     p.add_argument('task_id'); p.add_argument('--max-sessions', type=int); p.add_argument('--expires-at-ms', type=int)
     p.add_argument('--request-id'); p.add_argument('--expected-budget-revision', type=int); p.add_argument('--reason')
