@@ -95,9 +95,11 @@ Owner 工时只分配给当时唯一可归属的单元；并发单元之间不�
 | 1小时至不足2小时 | 1.5 |
 | 2小时及以上 | 2 |
 
-Agent工时除本小时有效墙钟得到并行度。读不到的会话贡献0到1倍墙钟：下界达到本档门槛则通过，上界低于门槛则触发，其余未知。短任务不适用，不能为凑数拆碎或空转；无符合条件的任务为不适用。卡的 `taskParallelism` 列出每个任务的时长、工时、上下界、缺失会话、判定和实际 `required`；不足半小时的 `required=null`。R6 失分实例也带实际门槛。瞬时parallelism提示含协调等待，与这里累计原生工时不同。
+新卡 `acceptance-unit-agent-hours/4` 的正式并行度，使用同一完整验收单元起点至本卡截止（单元已结束则至结束）的累计 Agent 工时除累计有效墙钟；档位与均值范围一致，正常跨整点的串行收尾不单独触发 R6。小时至少15分钟仅决定本卡适用性。读不到的会话贡献0到1倍墙钟：下界达到本档门槛则通过，上界低于门槛则触发，其余未知。短任务不适用，不能为凑数拆碎或空转；无符合条件的任务为不适用。卡的 `taskParallelism` 列出每个任务的时长、工时、上下界、缺失会话、判定和实际 `required`；不足半小时的 `required=null`。R6 失分实例也带实际门槛。瞬时parallelism提示含协调等待，与这里累计原生工时不同。
 
-新事实标注 `r6Basis=acceptance-unit-agent-hours/3`、`acceptanceUnitBasis=dispatch-acceptance-unit/1` 和
+`taskParallelism.low/high` 在 `/4` 下为累计正式上下界，`totalAgentMs` 为累计已知投入，`aggregationScope=unit-to-card-end/1`；`agentMs` 仍表示小时投入，`hourLow/hourHigh` 保留小时诊断，在途摘要仍用小时范围。累计高并行会平滑后段持续串行，小时下降交给现有警告观察；真实停滞仍按 R4，不新增红线。旧 `/1`、`/2`、`/3` 卡保留原解释，新 `/4` 使用不同连续达标兼容键，不回改旧卡或追补计数。
+
+新事实标注 `r6Basis=acceptance-unit-agent-hours/4`、`acceptanceUnitBasis=dispatch-acceptance-unit/1` 和
 `executionBasis=registered-native-execution-union/2`，版本进入卡和连续达标兼容键。
 `taskParallelism` 每行保留根 taskId，增加 unitId、operationIds、boundaryKnown、结束依据及实际 required。
 旧 /2 仍用根任务分档，未标 r6Basis 的 /1 仍固定门槛 2；冻结重算和旧卡不改，不拼接不同版本的连续达标。

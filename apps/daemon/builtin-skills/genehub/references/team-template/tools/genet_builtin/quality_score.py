@@ -234,25 +234,30 @@ def score(facts):
 
     task_report = None
     if model == 'tq/2':
-        from .task_hours import evaluate, BASIS, TIERED_BASIS, LEGACY_BASIS
+        from .task_hours import evaluate, BASIS, UNIT_BASES, TIERED_BASIS, LEGACY_BASIS
         r6_basis = facts.get('r6Basis', LEGACY_BASIS)
-        if r6_basis == BASIS and (execution_basis is None or facts.get('acceptanceUnitBasis') != 'dispatch-acceptance-unit/1'):
+        if r6_basis in UNIT_BASES and (execution_basis is None or facts.get('acceptanceUnitBasis') != 'dispatch-acceptance-unit/1'):
             raise ValueError('acceptance units require their native association and execution basis')
-        task_report = evaluate(facts.get('acceptanceUnits') if r6_basis == BASIS else facts.get('taskTrees'), start, end, basis=r6_basis)
+        task_report = evaluate(facts.get('acceptanceUnits') if r6_basis in UNIT_BASES else facts.get('taskTrees'), start, end, basis=r6_basis)
         eligible = [x for x in task_report if x['eligible']]
         failed = [x for x in eligible if x['state']=='fail']
         instances['R6'] = [dict(taskId=x['taskId'], effectiveParallelism=x['low'],
                                possibleParallelism=x['high'], required=x.get('required', 2),
                                hourEffectiveMs=x['hourEffectiveMs']) for x in failed]
-        if r6_basis == BASIS:
+        if r6_basis in UNIT_BASES:
             for instance, row in zip(instances['R6'], failed):
                 instance.update(unitId=row['unitId'], workItemId=row['unitId'],
                                 totalEffectiveMs=row['totalEffectiveMs'], boundaryBasis=row['boundaryBasis'])
+        if r6_basis == BASIS:
+            for instance, row in zip(instances['R6'], failed):
+                instance.update(aggregationScope=row['aggregationScope'],
+                                hourLow=row['hourLow'], hourHigh=row['hourHigh'],
+                                totalAgentMs=row['totalAgentMs'])
         r6_known = bool(failed) or (facts.get('taskTreesSourceComplete') is True
                                    and all(x['state']!='unknown' for x in eligible))
         wall = sum(x['hourEffectiveMs'] for x in eligible)
         parallel = sum(x['agentMs'] for x in eligible)/wall if wall else None
-        possible_parallel = sum(x['high']*x['hourEffectiveMs'] for x in eligible)/wall if wall else None
+        possible_parallel = sum((x['hourHigh'] if r6_basis == BASIS else x['high'])*x['hourEffectiveMs'] for x in eligible)/wall if wall else None
 
     integrity_basis = facts.get('scoringIntegrityBasis')
     integrity_verdict = None
@@ -445,7 +450,7 @@ def score(facts):
         result['scoringIntegrityBasis'] = integrity_basis
         result['cardValidity'] = ('invalid' if red['R7']['triggered'] is True else
                                   'valid' if red['R7']['triggered'] is False else 'unknown')
-    bases = ([r6_basis] if model == 'tq/2' and r6_basis in (TIERED_BASIS, BASIS) else [])
+    bases = ([r6_basis] if model == 'tq/2' and r6_basis in (TIERED_BASIS, *UNIT_BASES) else [])
     if execution_basis is not None:
         result['executionBasis'] = execution_basis
         result['acceptanceUnitBasis'] = facts.get('acceptanceUnitBasis')
