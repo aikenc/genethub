@@ -76,7 +76,66 @@ def store(t, root, row, status=None, **fields):
                                   '留言已读只代表收到；采用仍以完整源端、执行制品和自然卡验证为准。')
                                  if source_changes else '平台升级需要处理：' + status},
                    'upgrade', row['target'], kind, row.get('reason', ''))
-    return row
+    return reread_notices(t, root, row) if status == 'adopted' else row
+
+
+
+def reread_notices(t, root, adopted):
+    """Retain version/recipient intents before delivery; never resume work.
+
+    Adoption is already verified. A failed notice remains pending rather than
+    changing that fact or creating another reflection success/wake loop.
+    """
+    with t.inbox_lock(root, 'upgrade-reread', purpose='采用后重读提醒'):
+        row = t.read_json(str(location(t, root)), {}) or {}
+        if row.get('status') != 'adopted' or row.get('target') != adopted.get('target'):
+            return adopted
+        notice = row.get('rereadNotices')
+        if not notice or notice.get('target') != row['target']:
+            try:
+                from .tasks import records
+                _, mine = t.me(root)
+                spaces = mine['spaces']
+                front = t.front_session(root, spaces) if spaces.get('root') else None
+                recipients = {front: None} if front else {}
+                for task in records(t, root, 'tasks'):
+                    owner = task.get('owner') or {}
+                    sid = owner.get('sessionId')
+                    if (not task.get('finished') and task.get('state') in ('active', 'paused')
+                            and isinstance(sid, str) and t.SESSION_ID.fullmatch(sid)):
+                        recipients.setdefault(sid, owner.get('machine'))
+                if len(recipients) > 128:
+                    raise RuntimeError('active recipient bound exceeded')
+                text = ('采用后重读：已完整采用平台样板 ' + row['target'] +
+                        '。请在下一个决定前重读本岗位 Skill 与 team-core；Owner 同时重读 task-owner，'
+                        '沿原目标维护 datas/goals/<目标编号>/goal.md 和 index.md，并规划下一轮。'
+                        '保留原任务、输入、结果和暂停来源；在途结果仍送回原请求方，读入后再显式交接，'
+                        '最早安全边界切换新会话。本提醒不解除暂停、不重做已完成动作，也不是 Human 新审批。')
+                notice = {'target': row['target'], 'recipients': [
+                    {'sessionId': sid, 'machine': machine, 'text': text,
+                     'messageId': 'upgrade-reread.' + hashlib.sha256(
+                         (row['target'] + '\0' + sid).encode()).hexdigest()}
+                    for sid, machine in sorted(recipients.items())]}
+                row['rereadNotices'] = notice
+                row.pop('rereadDiscoveryError', None)
+                t.write_json(str(location(t, root)), row)
+            except (RuntimeError, t.ExpertError, OSError, ValueError, KeyError) as error:
+                row['rereadDiscoveryError'] = type(error).__name__
+                t.write_json(str(location(t, root)), row)
+                return row
+        for recipient in notice['recipients']:
+            if recipient.get('queuedAtMs'):
+                continue
+            try:
+                receipt = t.deliver_or_notice(root, recipient['sessionId'], 'status', 'platform',
+                    recipient['text'], use_inbox=True, machine=recipient.get('machine'),
+                    delivery_id=recipient['messageId'])
+                recipient.update(queuedAtMs=t.now_ms(), receipt=receipt)
+                recipient.pop('error', None)
+            except (RuntimeError, t.ExpertError, OSError, ValueError) as error:
+                recipient['error'] = type(error).__name__
+            t.write_json(str(location(t, root)), row)
+        return row
 
 
 def invoke(argv, cwd, timeout=180, env=None):
@@ -209,7 +268,7 @@ def schedule(t, root, base=None):
             from .template_version import fingerprint
             if (head and clean(t, root) and fingerprint(root)[0] == previous.get('templateId')
                     and source_identity(t, root, head) == previous.get('adoptedSourceIdentity')):
-                return previous  # normal memory/identity commits are not another platform version
+                return reread_notices(t, root, previous)  # cached adoption can finish a pending notice
         if not head or not t.platform_ref(root):
             row = dict(schema='team-upgrade/1', target=target, head=head)
             return store(t, root, row, 'conflict', reason='missing-platform-baseline', conflictFiles=[])
