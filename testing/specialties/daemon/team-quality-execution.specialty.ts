@@ -73,7 +73,7 @@ defineSpecialty({
     if (!receipt) throw new Error("original activation receipt missing");
     t.assertions.assert(facts.executionFacts?.backgroundRunsAppliedToScore === true
       && facts.executionBasis === "registered-native-execution-union/2"
-      && facts.r6Basis === "acceptance-unit-agent-hours/3" && item.dispatchTiming?.schema === "team-dispatch-timing/1", "formal execution omitted its version or timing provenance");
+      && facts.r6Basis === "acceptance-unit-agent-hours/4" && item.dispatchTiming?.schema === "team-dispatch-timing/1", "formal execution omitted its version or timing provenance");
     const timing = item.dispatchTiming;
     t.assertions.assert(timing.sessionStart.inputReceivedAtMs === receipt.receivedAtMs && timing.sessionStart.durationMs === item.startedAtMs-receipt.receivedAtMs && timing.platformPreparation.durationMsUpperBound >= 0 && timing.additive === false, "dispatch segments guessed a clock or lost native input/start provenance");
     const nativeRuns = facts.taskTrees.find((x: any) => x.taskId === task.taskId).sessions.find((x: any) => x.sessionId === owner).backgroundRuns;

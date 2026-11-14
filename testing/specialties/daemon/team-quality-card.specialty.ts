@@ -299,7 +299,7 @@ defineSpecialty({
   t.assertions.assert(evaluate(unsupported).status!==0,"unsupported R6 basis silently received a score");
   const describe=spawnSync(python,[path.join(output,"tools/run.py"),"quality","describe"],{cwd:output,env,encoding:"utf8",timeout:10000});
   const policy=describe.status===0?JSON.parse(describe.stdout).r6:null;
-  t.assertions.assert(policy?.basis==="acceptance-unit-agent-hours/3" && policy.minimumTotalEffectiveMs===1800000
+  t.assertions.assert(policy?.basis==="acceptance-unit-agent-hours/4" && policy.aggregationScope==="unit-to-card-end/1" && policy.minimumTotalEffectiveMs===1800000
     && policy.minimumHourEffectiveMs===900000 && JSON.stringify(policy.tiers.map((x:any)=>[x.minimumTotalEffectiveMs,x.required]))===JSON.stringify([[1800000,.75],[3600000,1.5],[7200000,2]]),"public R6 description differs from the duration-tier contract");
   // Independently calculable full acceptance-unit windows. A 42-hour
   // container is deliberately irrelevant to the duration of its new unit.
