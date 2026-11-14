@@ -139,6 +139,10 @@ async fn load_entry(
 ) -> Result<Option<Run>> {
     let resolved = crate::file_access::resolve_source(state, workspace_id, entry_path).await?;
     let entry = std::fs::canonicalize(resolved.absolute)?;
+    load_registration(state, &entry)
+}
+
+fn load_registration(state: &crate::state::Shared, entry: &std::path::Path) -> Result<Option<Run>> {
     let native = crate::guest_paths::host_form(&entry.to_string_lossy()).into_owned();
     let entry_identity = if crate::guest_paths::windows_host() {
         native
@@ -446,6 +450,13 @@ async fn read_process_snapshot(
     }
     let mapping_started = std::time::Instant::now();
     let mut candidates: Vec<(Run, Vec<(String, String)>)> = Vec::new();
+    // These hints live for one inventory only. Every alias still resolves its
+    // current project path and canonical entry before reusing a validated Run;
+    // the authenticated probe below establishes current application health.
+    let mut canonical_roots: std::collections::HashMap<std::path::PathBuf, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    let mut verified_runs: std::collections::HashMap<std::path::PathBuf, Run> =
+        std::collections::HashMap::new();
     let mut budget = crate::blocking::WorkBudget::new();
     // Inventory needs registered project roots, not preview-menu and Space
     // health projections for every project. Resolve each matching entry below
@@ -463,9 +474,14 @@ async fn read_process_snapshot(
             .folders
             .iter()
             .filter_map(|folder| {
-                std::fs::canonicalize(&folder.root)
-                    .ok()
-                    .map(|root| (folder, root))
+                let root = if let Some(root) = canonical_roots.get(&folder.root) {
+                    root.clone()
+                } else {
+                    let root = std::fs::canonicalize(&folder.root).ok()?;
+                    canonical_roots.insert(folder.root.clone(), root.clone());
+                    root
+                };
+                Some((folder, root))
             })
             .collect();
         for absolute in &registrations {
@@ -479,7 +495,21 @@ async fn read_process_snapshot(
                     folder.root_handle,
                     relative.to_string_lossy().replace('\\', "/")
                 );
-                if let Ok(Some(verified)) = load_entry(state, &workspace_id, &path).await {
+                let verified = async {
+                    let resolved =
+                        crate::file_access::resolve_source(state, &workspace_id, &path).await?;
+                    let absolute = std::fs::canonicalize(resolved.absolute)?;
+                    if let Some(run) = verified_runs.get(&absolute) {
+                        return anyhow::Ok(Some(run.clone()));
+                    }
+                    let run = load_registration(state, &absolute)?;
+                    if let Some(run) = &run {
+                        verified_runs.insert(absolute, run.clone());
+                    }
+                    Ok(run)
+                }
+                .await;
+                if let Ok(Some(verified)) = verified {
                     // Each project still validates its own path and current
                     // registration. Aliases of the identical Run need only
                     // one authenticated health probe, not one per project.
