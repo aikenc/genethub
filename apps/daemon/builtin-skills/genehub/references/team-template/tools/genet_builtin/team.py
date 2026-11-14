@@ -3346,10 +3346,14 @@ def temp_clean(root, keep_days=None, dry_run=False, now=None):
     limit = max(TEMP_KEEP_DAYS if keep_days is None else keep_days, 0) * 86400
     removed = []
     referenced_creators = team_tasks.active_temp_creators(sys.modules[__name__], root)
+    from pathlib import Path
+    evidence = team_tasks.evidence_temp_references(sys.modules[__name__], root)
     for day, full in temp_entries(root):
         size, newest = tree_stats(full)
         age = now - newest
-        if age > limit and age > TEMP_ACTIVE_S and not team_tasks.temp_is_referenced(sys.modules[__name__], root, full, referenced_creators):
+        targets = (Path(os.path.abspath(full)), Path(full).resolve())
+        protected = any(ref == target or target in ref.parents or ref in target.parents for ref in evidence for target in targets)
+        if age > limit and age > TEMP_ACTIVE_S and not protected and not team_tasks.temp_is_referenced(sys.modules[__name__], root, full, referenced_creators):
             removed.append((full, size))
             if not dry_run:
                 if os.path.isdir(full) and not os.path.islink(full):

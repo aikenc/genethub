@@ -9,7 +9,9 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote
 from .runtime import get_runtime, json_value, check_decision
 from .api import TeamConfigurationError
 from . import resources, quality_events
@@ -84,8 +86,8 @@ def decide_capacity_budget(t, root, task, sid, args):
         if args.request_id or args.reason or args.expected_budget_revision is not None:
             raise t.ExpertError('预算决策需要明确的新限额', '没有改变预算', '只查询时不带决策参数')
         return capacity_budget(t, root, task)
-    if sid != task.get('front'):
-        raise t.ExpertError('任务调度预算由原前台明确决定', '原预算、会话与成果保留', '让原前台在用户既有预算内核对本任务预算；不换任务编号绕过')
+    if sid not in (task.get('front'), (task.get('owner') or {}).get('sessionId')):
+        raise t.ExpertError('任务调度预算由当前 Owner 或原前台核定', '原预算、会话与成果保留', '当前 Owner 在原目标预算内用稳定request-id、预算revision和理由调整，不换任务编号绕过')
     reason = (args.reason or '').strip()
     if (not args.request_id or len(args.request_id) > 128 or '\n' in args.request_id
             or not reason or len(reason) > 2048 or '\n' in reason
@@ -99,6 +101,8 @@ def decide_capacity_budget(t, root, task, sid, args):
     with t.inbox_lock(root, task['taskId'], purpose='任务调度预算'):
         with t.inbox_lock(root, 'task-capacity', purpose='任务共享预算'):
             task = read_task(t, root, task['taskId'])
+            if sid not in (task.get('front'), (task.get('owner') or {}).get('sessionId')):
+                raise t.ExpertError('任务 Owner 已交接', '原预算保留', '由当前 Owner 查询原任务后核定剩余额度')
             decisions = task.get('capacityBudgetDecisions', [])
             if not isinstance(decisions, list) or len(decisions) > 64:
                 raise t.ExpertError('预算决策历史无法核对', '原预算保留', '保留原记录并反馈平台')
@@ -255,7 +259,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
                 if budget['blockedReasons']:
                     raise t.ExpertError('派单调度预算已到限额：'+','.join(budget['blockedReasons']),
                                         '没有创建额外会话；原任务与累计用量保留',
-                                        '用 task budget '+task['taskId']+' 查询实际限额；仅原前台可在用户既有预算内明确调整，不换编号绕过')
+                                        '用 task budget '+task['taskId']+' 查询实际限额；当前 Owner 可在原目标预算内明确调整，不换编号绕过')
                 old = dict(version=1, operationId=op_id, request=request, state='creating',
                            selection=None, lock=None, createdAtMs=t.now_ms(), recoverable=False, createAttempted=False)
                 if machine:
@@ -671,7 +675,7 @@ def notify_settlement_changes(t, root):
                           'task send 的 accepted 只表示补充消息受理，不恢复已结论任务。原前台在已有明确用户继续要求时，'
                           '可查询 task status 后显式 task resume：原完整结论及证据保存在 conclusionHistory，'
                           '恢复负责人继续工作，不把旧失败改为成功，也不自动重试独立暂停的支持。'
-                          '派单容量仍单独按 task budget 核对，由原前台在原用户预算内明确决定，不自动续配。'
+                          '派单容量仍单独按 task budget 核对，由当前 Owner 或原前台在原目标预算内核定，不自动续配。'
                           '没有用户继续要求、已取消或整体到期时仍停止；这条状态不是新用户指令、验收批准或自动恢复。')
                     notice=dict(version=CONTINUATION_VERSION,recipient=sid,machine=None,text=text,
                                 ref=task['taskId'],state='prepared',
@@ -1276,6 +1280,64 @@ def temp_is_referenced(t, root, path, creators=None):
     return bool(creator and creator in (active_temp_creators(t, root) if creators is None else creators))
 
 
+def evidence_temp_references(t, root):
+    """Read durable references before deleting anything; uncertainty retains temp."""
+    goals = Path(t.datas_root(root))/'goals'
+    lexical_base = Path(os.path.abspath(t.temp_root(root)))
+    base = lexical_base.resolve()
+    refs, size, count = set(), 0, 0
+    if not os.path.lexists(goals):
+        return refs
+    if goals.is_symlink():
+        raise t.ExpertError('目标材料目录是符号链接，无法完整核对', '没有自动清理取证材料', '核对原目标目录和引用后重试')
+    def retain(value, relative_to):
+        value = unquote(value.strip().strip('<>').replace('\\/', '/')).split('#', 1)[0].split('?', 1)[0]
+        if 'temp/' not in value and not value.startswith('file:'):
+            return
+        if value.startswith('file://'): value = value[7:]
+        for parent in (Path(root), relative_to):
+            for target in (Path(os.path.abspath(parent/value)), (parent/value).resolve()):
+                if target in (base, lexical_base) or base in target.parents or lexical_base in target.parents:
+                    refs.add(target)
+    def failed(error):
+        raise error
+    for directory, dirs, files in os.walk(goals, followlinks=False, onerror=failed):
+        parent = Path(directory)
+        for name in dirs + files:
+            file = parent/name
+            relative = file.relative_to(goals)
+            evidence = 'evidence' in relative.parts
+            if file.is_symlink():
+                if evidence:
+                    retain(str(file.resolve()), parent)
+                elif name == 'summary.md' or name in dirs:
+                    raise t.ExpertError('目标材料引用含符号链接，无法完整核对', '没有自动清理取证材料', '核对原 summary.md/evidence 引用后重试')
+                continue
+            if name not in files or (name != 'summary.md' and not evidence):
+                continue
+            if evidence and file.suffix.lower() in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4', '.webm', '.pdf', '.zip', '.wasm', '.bin'):
+                continue  # Payloads carry evidence; UTF-8 metadata carries its references.
+            count += 1; size += file.stat().st_size
+            if count > 10000 or size > 8*1024*1024:
+                raise t.ExpertError('目标材料引用超过安全读取范围', '没有自动清理取证材料', '先将所需材料归档到持久 evidence，再核对清理范围')
+            raw = file.read_bytes()
+            if b'\0' in raw:
+                if file.suffix.lower() in ('.md', '.json', '.txt', '.yaml', '.yml'):
+                    raise t.ExpertError('目标引用文本含无效字节', '没有自动清理取证材料', '核对原 summary.md/evidence 文本后重试')
+                continue
+            try:
+                text = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                if file.suffix.lower() in ('.md', '.json', '.txt', '.yaml', '.yml'):
+                    raise t.ExpertError('目标引用文本无法完整读取', '没有自动清理取证材料', '核对原 summary.md/evidence 文件的编码后重试')
+                continue
+            for value in re.findall(r'[^\s<>()[\]"\'`]+', text):
+                retain(value, parent)
+            for group in re.findall(r'`([^`]+)`|"([^"\n]+)"|\(([^)\n]+)\)', text):
+                retain(next(value for value in group if value), parent)
+    return refs
+
+
 def has_intent(t, root, requester):
     return any(x.get('state') in ('creating', 'prepared') and x.get('request', {}).get('requester') == requester
                for x in records(t, root, 'task-dispatch'))
@@ -1287,20 +1349,35 @@ def owner_sessions(t, root):
 
 
 def watchdog(t, root, task, pending):
-    if task.get('state') != 'active' or task.get('finished') or not pending:
+    if task.get('state') != 'active' or task.get('finished'):
         return
     sid = (task.get('owner') or {}).get('sessionId')
+    if sid and not pending:
+        summary = t.session_summary(sid, machine=(task.get('owner') or {}).get('machine'), fresh=True)
+        inputs = summary.get('inputSummary') or {}
+        pending = dict(observedStatus=summary.get('status'), observedPaused=inputs.get('paused'),
+                       observedRequests=inputs.get('pendingMessageIds'), observedAtMs=t.now_ms(),
+                       observedActivityAtMs=summary.get('lastActivityAtMs') or summary.get('updatedAtMs'),
+                       createdAtMs=task['createdAtMs'])
+    pending = pending or {}
     if not sid or pending.get('observedStatus') != 'idle' or pending.get('observedPaused') or pending.get('observedRequests') or pending.get('lastReconcileError') or t.now_ms() - pending.get('observedAtMs', 0) > 120_000:
         return
     if t._inbox_paths(root, sid) or has_intent(t, root, sid):
         return
     if any(x.get('requester') == sid for x in records(t, root, 'pending')):
         return
+    if any(not person.get('finished') for person in task.get('collaborators', [])):
+        return
     now = t.now_ms()
     after = t.setting(root, 'TEAM_WATCHDOG_AFTER', t.WATCHDOG_AFTER_S) * 1000
     state = task.get('watchdog') or {}
     anchor = max(pending.get('observedActivityAtMs') or 0, pending.get('createdAtMs') or 0, state.get('lastWakeAtMs') or 0)
     if now - anchor < after:
+        return
+    processes = t.genet('process', 'list', *t.machine_args((task.get('owner') or {}).get('machine')), timeout=5).get('processes')
+    if not isinstance(processes, list):
+        raise t.ExpertError('任务后台进程状态未知', '未发送空闲提醒', '保留原任务，下一次观测原会话进程')
+    if any(x.get('sessionId') == sid and x.get('service') is None for x in processes):
         return
     progress = identity(json.dumps([(x['operationId'], x.get('finished')) for x in task.get('collaborators', [])], sort_keys=True))
     if state.get('progress') != progress:
@@ -1453,7 +1530,7 @@ def parser(sub):
         p.add_argument('--request-id', required=True); p.add_argument('--machine'); p.add_argument('--directory')
         p.add_argument('--tier'); p.add_argument('--model'); p.add_argument('--parameters', help='business JSON object; normally supplied by a project command'); p.add_argument('words', nargs='+')
     p = actions.add_parser('status'); p.add_argument('task_id'); p.add_argument('--summary', action='store_true', help='bounded caller-specific conclusion and outstanding support counts; full evidence stays in the source ledger')
-    p = actions.add_parser('budget', help='inspect dispatch capacity or record an explicit original-front decision; never changes User scope/deadline')
+    p = actions.add_parser('budget', help='inspect capacity or record a current-Owner/original-front decision within the original goal budget; never changes User scope/deadline')
     p.add_argument('task_id'); p.add_argument('--max-sessions', type=int); p.add_argument('--expires-at-ms', type=int)
     p.add_argument('--request-id'); p.add_argument('--expected-budget-revision', type=int); p.add_argument('--reason')
     p = actions.add_parser('send'); p.add_argument('task_id'); p.add_argument('--request-id', required=True); p.add_argument('words', nargs='+')

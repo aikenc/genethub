@@ -66,7 +66,7 @@ R6 的档位与正式均值使用同一完整累计范围，小时至少十五�
 
 长期目标 Owner 在原整体授权内核定调度额度，先读 `task budget TASK` 的实际上限、用量、budget revision 和阻塞原因。兼容入口为 `task budget TASK --max-sessions N --expires-at-ms MS --request-id ID --expected-budget-revision REV --reason TEXT`；调度 revision 与任务控制 revision 分开，重试复用原编号与参数。
 
-当前旧账本可能仍把该命令绑定原前台：遵守真实返回的归属与回执，保留 Owner 的决定、记录平台不兼容并继续其它已授权工作，不绕过调用校验、不频繁叫醒前台代批。这不改变用户范围、总预算或总截止，不抹去累计用量、支持、暂停和租约，也不把 Agent 的调度决定写成 Human 新批准。
+当前 Owner 与原前台均可核定本任务调度额度；Owner 交接后旧会话不能再决定。先核对 goal.md/index.md 中原整体预算及剩余投入，写明理由后调整；该入口不自动增加目标预算，也不把手工记录当作已验证的自动总账。这不改变用户范围、总预算或总截止，不抹去累计用量、支持、暂停和租约，也不把 Agent 的调度决定写成 Human 新批准。
 
 ## 就绪结果、读入与资源
 
