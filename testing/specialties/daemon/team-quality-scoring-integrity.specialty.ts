@@ -38,6 +38,12 @@ defineSpecialty({
     const cleanCard = card(clean);
     t.assertions.assert(cleanCard.redLines.R7.triggered === false && cleanCard.cardValidity === "valid",
       "pristine reference was not reflected in the public card");
+    const coordination = join(r.root, "tools/genet_builtin/team.py"), coordinationBytes = readFileSync(coordination);
+    try {
+      writeFileSync(coordination, Buffer.concat([coordinationBytes, Buffer.from("\n# Isolated nonscoring Team coordination customization.\n")]));
+      t.assertions.assert(card(facts()).redLines.R7.triggered === false,
+        "R7 incorrectly invalidated unrelated Team coordination customization");
+    } finally { writeFileSync(coordination, coordinationBytes); }
     const alerts = (samples: any[]) => {
       writeFileSync(file, JSON.stringify({ schema: "team-quality-alert-samples/1", samples }));
       return JSON.parse(r.ok(["quality", "alerts", "--snapshot", file]));
