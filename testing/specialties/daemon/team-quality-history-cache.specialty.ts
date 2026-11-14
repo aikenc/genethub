@@ -1,22 +1,22 @@
-import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty, openTeam } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-quality-history-cache",
-  title: "Complete unchanged native history survives horizon and guest-patch checkpoints without repeated full reads",
-  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Two real Tasks and 101 additional archived native Sessions require fresh bounded header pages past the first 100 rows without one get per unchanged history. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. A real public deletion stays unknown despite cached history and preserves its native refusal identifier and remaining budget. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
-  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history", "failed fresh read reuses healthy cached history", "native refusal cause is lost", "stable histories exhaust observation budget with one header RPC each", "only the first header page or unarchived rows are read", "corrupt local header hint aborts every source"],
+  title: "Native history survives cache checkpoints and genuine running-Round progress between pages",
+  oracle: "Real native Task/Owner histories are read through the public collector. A transparent CLI forwarder records actual calls. Two real Tasks and 101 additional archived native Sessions require fresh bounded header pages past the first 100 rows without one get per unchanged history. Labelled cache-only horizon and prior guest-version checkpoints cannot force complete stable histories to be re-inspected; foreign or missing machine identity, legacy completeness gaps and new genuine inputs require fresh histories. A real public deletion stays unknown despite cached history and preserves its native refusal identifier and remaining budget. 101 genuine completed Rounds and a real held child force public history pagination; completing that child between actual unchanged CLI replies must retain coherent history and actual current execution. The next fresh observation must include its genuine completion. Native histories are never fabricated; the version checkpoint is not an actual guest upgrade claim.",
+  catches: ["live cache narrows the hourly history horizon", "guest patch rereads all closed histories and exhausts capture budget", "foreign machine history is reused", "legacy incomplete history is trusted", "new native inputs reuse stale history", "failed fresh read reuses healthy cached history", "native refusal cause is lost", "stable histories exhaust observation budget with one header RPC each", "only the first header page or unarchived rows are read", "corrupt local header hint aborts every source", "genuine running-Round progress invalidates stable historical pages", "pinning history silently drops current execution"],
   tags: ["core", "team-quality"], llm: { default: "none" },
   productInterfaces: ["tools/run.py task", "tools/run.py quality facts", "session.get", "session.list", "session.create", "session.archive", "session.inspect", "session.rounds", "session.narrative", "session.delete"],
   surfaces: ["daemon", "team-template", "filesystem"], requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
-  resources: { environments: 1, cpu: 2, memoryMb: 1024, browser: 0 }, expectedDurationMs: 25000, timeoutMs: 180000,
+  resources: { environments: 1, cpu: 2, memoryMb: 1024, browser: 0 }, expectedDurationMs: 45000, timeoutMs: 180000,
 }, async t => {
   const r=await openTeam(t,"history-cache",[{id:"ctl-cli-command",profile:"cli-command"}]);
   try {
     const config=join(r.root,".genethub/open.env");
-    writeFileSync(config,readFileSync(config,"utf8")+"\nTEAM_BOARD_PORT=0\n");
+    writeFileSync(config,readFileSync(config,"utf8")+"\nTEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\n");
     const idle=(sid:string)=>t.tools.waitUntil(async()=>{const s=(await r.snapshot(sid)).summary;return s.status==="idle"&&!s.inputSummary?.pendingMessageIds.length;},30000);
     const caller=await r.create("ctl-cli-command");
     await r.send(caller,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,join(r.root,"tools/run.py"),"task","start","--space","leader","--desc","bounded history capture","--request-id","history.goal","Assess one bounded goal"],cwd:r.root,requestId:"history.start"}));await idle(caller);
@@ -103,6 +103,65 @@ defineSpecialty({
     const changed=facts();
     t.assertions.assert(changed.issues.length===0&&heavy().some(x=>x[2]===owner)&&changed.turns.filter((x:any)=>x.sessionId===owner).length>before,
       "fresh native input reused stale cached turns");
+    // Advance a genuine running Round between actual public history pages.
+    // The external child and transparent transport belong to this isolated
+    // fixture; every native reply is forwarded byte-for-byte, never fabricated.
+    const historyIds:string[]=[];
+    const latestRound=async()=>{
+      const reply=await r.client.call({type:"session.rounds",payload:{sessionId:owner,throughRoundId:null,cursor:null,limit:1}});
+      if(reply?.type!=="sessionRounds"||!reply.data.rounds[0])throw Error("public Owner Round missing");
+      return reply.data.rounds[0];
+    };
+    for(let i=0;i<101;i++){
+      await r.send(owner,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,"-c","print('real history checkpoint')"],cwd:r.root,requestId:"history.page."+i}));await idle(owner);
+      historyIds.push((await latestRound()).roundId);
+    }
+    const childStarted=join(t.env.root,"history-child-started"),childRelease=join(t.env.root,"history-child-release");
+    const childCode=["import pathlib,time","pathlib.Path("+JSON.stringify(childStarted)+").touch()",
+      "while not pathlib.Path("+JSON.stringify(childRelease)+").exists(): time.sleep(.01)","print('genuine child completed')"].join("\n");
+    await r.send(owner,JSON.stringify({argv:[process.env.GENEHUB_PYTHON!,"-c",childCode],cwd:r.root,requestId:"history.active"}));
+    await t.tools.waitUntil(()=>existsSync(childStarted),10000);
+    const activeRound=await latestRound();
+    t.assertions.assert(!activeRound.endedAtMs,"external child did not keep the genuine Round running");
+    const raceProof=join(t.env.root,"actual-page-progress.json"),raceOnce=join(t.env.root,"history-race-once");
+    const transparent=readFileSync(proxy,"utf8");
+    writeFileSync(proxy,["#!"+process.env.GENEHUB_PYTHON,"import sys,json,pathlib,subprocess,time",
+      "cli="+JSON.stringify(r.daemon.genet),"args=sys.argv[1:]",
+      "with open("+JSON.stringify(log)+",'a') as f:f.write(json.dumps(args)+'\\n')",
+      "reply=subprocess.run([cli]+args,capture_output=True)",
+      "if args[:3]==['session','rounds',"+JSON.stringify(owner)+"] and '--cursor' not in args and '--through-round' not in args and not pathlib.Path("+JSON.stringify(raceOnce)+").exists():",
+      " before=json.loads(reply.stdout)['data']['page']",
+      " if before.get('nextCursor'):",
+      "  pathlib.Path("+JSON.stringify(raceOnce)+").touch()",
+      "  pathlib.Path("+JSON.stringify(childRelease)+").touch()",
+      "  stop=time.monotonic()+10",
+      "  while time.monotonic()<stop:",
+      "   state=subprocess.run([cli,'session','get',"+JSON.stringify(owner)+"],capture_output=True,check=True)",
+      "   summary=json.loads(state.stdout)['data']['summary']",
+      "   if summary['status']=='idle' and not (summary.get('inputSummary') or {}).get('pendingMessageIds'):break",
+      "   time.sleep(.01)",
+      "  after=json.loads(subprocess.run([cli]+args,capture_output=True,check=True).stdout)['data']['page']",
+      "  pathlib.Path("+JSON.stringify(raceProof)+").write_text(json.dumps({'before':before['source'],'after':after['source'],'idle':summary['status']=='idle'}))",
+      "sys.stdout.buffer.write(reply.stdout)","sys.stderr.buffer.write(reply.stderr)","sys.exit(reply.returncode)",""].join("\n"));
+    const concurrent=facts();
+    const progress=JSON.parse(readFileSync(raceProof,"utf8"));
+    t.assertions.assert(progress.idle&&progress.before.digest!==progress.after.digest,"real same-Round progress did not change the native source between pages");
+    t.assertions.assert(concurrent.issues.length===0&&concurrent.evidenceCoverage.nativeComplete===true,
+      "ordinary running-Round completion discarded coherent native history: "+JSON.stringify(concurrent.issues));
+    const captured=JSON.parse(readFileSync(ownerCache,"utf8"));
+    t.assertions.assert(captured.historyCoverage.roundsComplete===true&&historyIds.every(id=>captured.rounds.filter((x:any)=>x.roundId===id).length===1)
+      &&captured.rounds.filter((x:any)=>x.roundId===activeRound.roundId).length===1,
+      "bounded completed history or fresh active Round was lost or duplicated");
+    const person=concurrent.taskTrees.flatMap((x:any)=>x.sessions).find((x:any)=>x.sessionId===owner);
+    t.assertions.assert(person?.readable===true&&person.runs.some((x:any)=>
+      x.startAtMs<=activeRound.startedAtMs&&x.endAtMs===concurrent.window.endAtMs),
+      "coherent history discarded actual current execution from task Agent time");
+    t.note("Genuine pagination progress: "+progress.before.digest+" -> "+progress.after.digest+"; 101 completed Rounds and current execution retained");
+    writeFileSync(proxy,transparent);
+    await idle(owner);const completed=facts();
+    const refreshed=JSON.parse(readFileSync(ownerCache,"utf8"));
+    t.assertions.assert(completed.issues.length===0&&refreshed.rounds.some((x:any)=>x.roundId===activeRound.roundId&&x.endedAtMs),
+      "next fresh observation reused a stale running Round");
     // A real native read failure must stay unknown even with a healthy cache.
     // Delete only this case's own idle Session through its public action.
     await r.client.call({type:"session.delete",payload:{sessionId:owner}});
