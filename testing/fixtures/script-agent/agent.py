@@ -483,9 +483,10 @@ class FixtureSession(Session):
                     issued = int(handle.read())
             except (OSError, ValueError):
                 issued = 0
-            answered = "The user answered the interrupted questions" in text
+            answered = "answered the interrupted questions:" in text
             if answered:
-                journal("continuation-received", matched=(CONTROL.get("expectedResume") or "") in text)
+                journal("continuation-received", matched=(CONTROL.get("expectedResume") or "") in text,
+                        responseHeader=text.split("\n", 2)[:2])
             if issued < int(CONTROL.get("questionCount", 1)) and (issued == 0 or answered):
                 with open(marker, "w") as handle:
                     handle.write(str(issued + 1))

@@ -386,6 +386,7 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
         .call(Request::SessionRespondPermission {
             session_id: session.clone(),
             request_id,
+            origin: None,
             outcome: PermissionOutcome::Selected {
                 option_id: "deny".into(),
             },

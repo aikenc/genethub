@@ -63,6 +63,13 @@ defineSpecialty({
     const after = await snapshot();
     t.assertions.assert(after.pendingPermissions.length === 0 && after.summary.modeId === mode, "answer retained a question or elevated mode");
     t.assertions.assert(after.items.filter(i => i.type === "userMessage" && i.text.includes(nonce) && i.text.includes("选项 A")).length === 1, "submitted choice/text missing from persistent chat");
+    const answer = after.items.find(i => i.type === "userMessage" && i.interactionResponse?.requestId === request.id);
+    t.assertions.assert(answer?.type === "userMessage" && answer.interactionResponse?.kind === "question"
+      && answer.interactionResponse.responder.source === "user" && !answer.origin
+      && answer.interactionResponse.outcome.outcome === "answered"
+      && answer.interactionResponse.outcome.answers.some(a => a.freeformText === nonce
+        && a.selectedOptionIds[0] === request.questions?.[0]?.options[0]?.id),
+      "real browser submission did not persist its typed choice and authenticated user source");
     await browser.page.getByText(nonce, { exact: false }).waitFor();
     await browser.page.reload();
     await browser.page.getByText(nonce, { exact: false }).waitFor();

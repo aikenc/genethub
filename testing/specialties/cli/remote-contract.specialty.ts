@@ -1,11 +1,11 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { defineSpecialty, parseJson, runGenetAsync, startRelay, type CaseContext } from "../../framework/public.ts";
+import { defineSpecialty, parseJson, registerControlledAgent, runGenetAsync, startRelay, type CaseContext } from "../../framework/public.ts";
 
 type Opened=Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 type Reply={type:string;data:any;error?:{code:string;message:string;retryable:boolean;details?:{stage?:string}}};
 const records=(s:string):Reply[]=>s.split("\n").filter(line=>line.trim().startsWith("{")).map(line=>JSON.parse(line));
-async function fixture(t:CaseContext,run:(f:{opened:Opened;caller:Opened;machine:string;device:string;cli:(args:string[],stdin?:string)=>ReturnType<typeof runGenetAsync>;json:(args:string[])=>Promise<Reply>;settled:(session:string)=>Promise<number>})=>Promise<void>){
+async function fixture(t:CaseContext,run:(f:{opened:Opened;caller:Opened;callerLease:Parameters<typeof registerControlledAgent>[0];context:CaseContext;machine:string;device:string;cli:(args:string[],stdin?:string)=>ReturnType<typeof runGenetAsync>;json:(args:string[])=>Promise<Reply>;settled:(session:string)=>Promise<number>})=>Promise<void>){
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   const relay=await startRelay({openRoot:t.openRoot});
   const callerRoot=path.join(t.env.root,"caller");
@@ -29,12 +29,56 @@ async function fixture(t:CaseContext,run:(f:{opened:Opened;caller:Opened;machine
     const listed=await opened.client.call({type:"device.list"});if(listed?.type!=="devices")throw new Error("no paired devices");
     const device=listed.data.devices.find(d=>d.name==="TS CLI parity")?.id;if(!device)throw new Error("CLI device missing");
     const settled=async(session:string)=>{let seq=0;await t.tools.waitUntil(async()=>{const r=await opened.client.call({type:"session.get",payload:{sessionId:session}});if(r?.type!=="snapshot")return false;seq=r.data.seq;return r.data.summary.status==="idle";},30000);return seq;};
-    await run({opened,caller,machine,device,cli,json,settled});
+    await run({opened,caller,callerLease:lease,context:t,machine,device,cli,json,settled});
   }finally{caller?.client.close();caller?.daemon.stop();await caller?.mock.stop();opened.client.close();opened.daemon.stop();await opened.mock.stop();relay.stop();}
 }
 function check(id:string,oracle:string,run:Parameters<typeof fixture>[1],mock=false){
   defineSpecialty({id:`specialty.cli.remote-contract.${id}`,title:oracle,oracle,catches:["local and paired CLI disagree","remote failure loses recovery semantics","pairing or stream source silently changes"],tags:["core","cli","remote-cli-parity"],llm:{default:mock?"mock":"none"},expectedDurationMs:30000,timeoutMs:150000,resources:{environments:1,cpu:2,memoryMb:1536,io:1,browser:0},surfaces:["genet-cli","daemon","relay"],productInterfaces:["genet-cli","@genehub/workbench/client"]},t=>fixture(t,run));
 }
+check("question-actor","A real remote CLI answer retains the source Agent Session and machine, never a Human identity",async({opened,caller,callerLease,context:t,machine})=>{
+  const question=registerControlledAgent(t.env,{id:"remote-question",profile:"native-question"});
+  const command=registerControlledAgent(callerLease,{id:"remote-answer",profile:"cli-command"});
+  for(const [side,agent] of [[opened,question],[caller,command]] as const){
+    await side.client.call({type:"agent.reload",payload:{agentId:agent.agentId}});
+    await t.flows.branches.waitForAgent(side.client,agent.agentId,t.flows.branches.agentReady,{timeoutMs:30000,what:"remote Question actor Agent"});
+  }
+  const create=async(side:Opened,agentId:string)=>{
+    const r=await side.client.call({type:"session.create",payload:{workspaceId:side.workspaceId,agentId,modelId:null,modeId:null,cwd:null,title:null}});
+    if(r?.type!=="session")throw Error("real remote Question Session missing");
+    return r.data.id;
+  };
+  const target=await create(opened,question.agentId),actor=await create(caller,command.agentId);
+  await t.flows.main.sendPrompt(opened.client,target,"Ask one native question.");
+  let request="";
+  await t.tools.waitUntil(async()=>{
+    const r=await opened.client.call({type:"session.get",payload:{sessionId:target}});
+    if(r?.type!=="snapshot")return false;
+    request=r.data.pendingPermissions[0]?.id??"";return !!request;
+  },15000);
+  await t.flows.main.sendPrompt(caller.client,actor,JSON.stringify({requestId:"remote-question-answer",
+    argv:[caller.daemon.genet,"session","respond",target,"--request",request,"--choose","b","--machine",machine]}));
+  await t.tools.waitUntil(async()=>{
+    const r=await caller.client.call({type:"session.get",payload:{sessionId:actor}});
+    if(r?.type!=="snapshot"||r.data.summary.status!=="idle")return false;
+    const item=r.data.items.find(i=>i.type==="assistantMessage"&&i.text.includes('"remote-question-answer"'));
+    if(item?.type!=="assistantMessage")return false;
+    t.assertions.assert(JSON.parse(item.text).code===0,"actual paired Agent answer failed");return true;
+  },20000);
+  await t.tools.waitUntil(async()=>{
+    const r=await opened.client.call({type:"session.get",payload:{sessionId:target}});
+    return r?.type==="snapshot"&&r.data.summary.status==="idle";
+  },15000);
+  const page=await opened.client.call({type:"session.narrative",payload:{sessionId:target,itemId:null,throughRoundId:null,cursor:null,limit:100}});
+  if(page?.type!=="sessionNarrative")throw Error("remote answer narrative missing");
+  const answer=page.data.items.find(i=>i.type==="userMessage"&&i.interactionResponse?.requestId===request);
+  const source=await caller.client.call({type:"connection.identity"});
+  if(source?.type!=="hello")throw Error("actual source machine identity missing");
+  t.assertions.assert(answer?.type==="userMessage"&&answer.interactionResponse?.responder.source==="agent"
+    &&answer.interactionResponse.responder.origin.sessionId===actor
+    &&answer.interactionResponse.responder.origin.machineId===source.data.machineId
+    &&answer.origin?.sessionId===actor&&answer.origin.machineId===source.data.machineId,
+    "paired remote Agent answer became Human or target-machine attributed");
+});
 check("identity-and-offline","A paired relay target answers as itself; offline is retryable",async({opened,machine,cli,json})=>{
   const context=await json(["context","--machine",machine]);
   if(context.type!=="context")throw new Error("remote context failed");
