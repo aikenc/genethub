@@ -402,7 +402,17 @@ impl Workspaces {
             discovered.last = clean.then_some((discovery.roots, discovery.problems));
         }
         *self.discovery.lock().expect("never poisoned") = discovered;
-        let projects = self.list().await;
+        // Discovery only needs registration paths and identities. Rendering
+        // every project's pinned previews here repeats foreground UI work and
+        // can starve unrelated health probes on the guest executor.
+        let projects: Vec<_> = self
+            .entries
+            .read()
+            .await
+            .values()
+            .filter(|entry| !entry.removed)
+            .map(describe)
+            .collect();
         let mut directories = HashSet::new();
         let now = std::time::Instant::now();
         for project in &projects {
@@ -713,11 +723,12 @@ impl Workspaces {
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
         let entries = self.entries.read().await;
         let config = self.config.read().await;
-        let mut out: Vec<WorkspaceInfo> = entries
-            .values()
-            .filter(|entry| !entry.removed)
-            .map(|entry| self.describe_with_space(entry, &config))
-            .collect();
+        let mut out = Vec::new();
+        let mut budget = crate::blocking::WorkBudget::new();
+        for entry in entries.values().filter(|entry| !entry.removed) {
+            budget.checkpoint().await;
+            out.push(self.describe_with_space(entry, &config));
+        }
         drop(config);
         drop(entries);
         let descriptors = self.descriptors.lock().expect("never poisoned");
@@ -2246,7 +2257,10 @@ fn read_preview_entries(entry: &WorkspaceEntry) -> Vec<PreviewEntryInfo> {
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Vec::new();
     };
-    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_PREVIEW_ENTRIES_FILE_BYTES {
+    if meta.file_type().is_symlink()
+        || !meta.is_file()
+        || meta.len() > MAX_PREVIEW_ENTRIES_FILE_BYTES
+    {
         return Vec::new();
     }
     let Ok(body) = std::fs::read_to_string(&path) else {
