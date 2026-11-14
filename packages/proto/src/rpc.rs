@@ -572,6 +572,9 @@ pub enum Request {
 
     #[serde(rename = "caller.authority")]
     CallerAuthority,
+    /// Immutable scoring-package reference from this kernel, never a Team path.
+    #[serde(rename = "team.scoringManifest")]
+    TeamScoringManifest,
     /// Non-secret provider metadata; available to session controllers.
     #[serde(rename = "provider.list")]
     ProviderList,
@@ -1044,6 +1047,7 @@ pub enum Reply {
     RemoteAccess(RemoteAccess),
     Settings(Settings),
     CallerAuthority(crate::CallerAuthority),
+    TeamScoringManifest(serde_json::Value),
     Providers(Vec<ProviderInfo>),
     ProviderOperation(crate::ProviderOperationReceipt),
     SpeechCapabilities(SpeechCapabilities),

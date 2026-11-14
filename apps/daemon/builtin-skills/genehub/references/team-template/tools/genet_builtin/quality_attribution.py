@@ -53,6 +53,9 @@ def attach(card, facts):
         if key == 'R6':
             return explanation('team', 'observed-task-parallelism',
                                ['snapshot#/taskTrees' if 'taskTrees' in facts else 'snapshot#/goalIntervals'])
+        if key == 'R7':
+            return explanation('unresolved', 'scoring-copy-differs-from-native-embedded-package; upgrade-or-edit-cause-unconfirmed',
+                               ['snapshot#/scoringIntegrity'])
         return explanation('unresolved', 'native causal evidence is not available for this obligation',
                            ['snapshot#/stalls' if key == 'R4' else base])
 

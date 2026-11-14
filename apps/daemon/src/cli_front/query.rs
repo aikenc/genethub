@@ -844,6 +844,20 @@ async fn execute(
         Query::Context => {
             let rpc = connect_selected(selection).await?;
             let mut value = context_data(rpc.hello(), selection.machine.as_deref());
+            if rpc.hello().features.as_ref().is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature == "team.quality-integrity.v1")
+            }) {
+                match rpc
+                    .call(Request::TeamScoringManifest)
+                    .await
+                    .map_err(rpc_error)?
+                {
+                    Reply::TeamScoringManifest(manifest) => value["teamScoringManifest"] = manifest,
+                    other => return Err(unexpected_reply("Team scoring manifest", &other)),
+                }
+            }
             if !rpc.hello().features.as_ref().is_some_and(|features| {
                 features
                     .iter()
@@ -2646,6 +2660,7 @@ pub fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
 
 pub fn reply_kind(reply: &Reply) -> &'static str {
     match reply {
+        Reply::TeamScoringManifest(_) => "Team scoring manifest",
         Reply::ClientDebug(_) => "client debug",
         Reply::Hello(_) => "hello",
         Reply::Subscribed { .. } => "subscribed",

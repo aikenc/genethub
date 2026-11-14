@@ -10,7 +10,7 @@ from . import quality
 
 HOUR = 3600000
 ROUTES = {'R1':'platform-template','R2':'team','R3':'platform-template',
-          'R4':'unknown','R5':'platform-template','R6':'unknown'}
+          'R4':'unknown','R5':'platform-template','R6':'unknown','R7':'unknown'}
 
 
 def identity(value):

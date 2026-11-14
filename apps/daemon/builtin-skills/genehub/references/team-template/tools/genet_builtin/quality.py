@@ -778,10 +778,17 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
             del wanted[sid]  # Neither a peer nor a cached history can settle it.
         elif sid in routes:
             wanted[sid] = routes[sid]
+    from .scoring_integrity import capture as integrity_capture, combine as integrity_combine, BASIS as INTEGRITY_BASIS
+    integrity_before = integrity_capture(root, None)
+    integrity_reference = None
     native, platforms, processes = {}, {}, {}
-    for machine in sorted(set(wanted.values()),key=lambda x:x or ""):
+    for machine in sorted(set(wanted.values()) | {None},key=lambda x:x or ""):
         try:
-            ctx=capture_call('context',*team.machine_args(machine))['daemon']
+            context=capture_call('context',*team.machine_args(machine))
+            ctx=context['daemon']
+            if machine is None:
+                integrity_reference = context.get('teamScoringManifest')
+                integrity_before = integrity_capture(root, integrity_reference)
             platforms[machine]={'version':ctx['version'],'machineId':ctx['machineId']}
             processes[machine]=capture_call('process','list',*team.machine_args(machine))['processes']
         except Exception as error:
@@ -1059,6 +1066,11 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                         'templateAtCapture':before,'eventTemplates':sorted({x['templateSha256'] for x in log if x.get('templateSha256') and start <= x['atMs'] < end})},
             'issues':issues,'observationBasis':'native minute state samples; explicit controls and native handoff timestamps'}
     facts.update(adoptionBasis=ADOPTION_BASIS,costBasis=COST_BASIS)
+    # The native reference is immutable kernel bytes observed at capture start.
+    # Re-read local dependencies after collection without spending a second
+    # native call at the end of the live capture budget.
+    facts.update(scoringIntegrityBasis=INTEGRITY_BASIS,
+                 scoringIntegrity=integrity_combine(integrity_before, integrity_capture(root, integrity_reference)))
     from .execution_facts import project
     facts['unitCosts']=costs(project(facts))
     cost_path=store/'baselines'/'complete-acceptance-unit-time-v1.json'
@@ -1100,7 +1112,7 @@ def _command(team,args):
         print(canonical(view(read(Path(args.snapshot)))),end='');return
     if action=='describe':
         from .quality_score import WEIGHTS,INDICATORS
-        print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':r6_policy(),'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6'],
+        print(canonical({'model':'tq/2','supportedModels':['tq/1','tq/2'],'r6':r6_policy(),'weights':WEIGHTS,'indicators':INDICATORS,'redLines':['R1','R2','R3','R4','R5','R6','R7'],'scoringIntegrityBasis':'native-embedded-team-scoring/1',
                          'formal':{'knownWeightPct':80,'closedWorkItems':20,'allRedLinesDecidable':True},'window':'red lines: previous complete UTC hour native facts only; indicators: rolling 24h','adoptionBasis':'native-owner-use-reference/1','costBasis':'complete-acceptance-unit-time/1','inference':'read and ten-minute inference are not confirmed adoption; optional task finish --uses gives bounded integration evidence'}),end='');return
     if action=='history':
         latest={}

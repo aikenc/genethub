@@ -254,7 +254,19 @@ def score(facts):
         parallel = sum(x['agentMs'] for x in eligible)/wall if wall else None
         possible_parallel = sum(x['high']*x['hourEffectiveMs'] for x in eligible)/wall if wall else None
 
-    required = {'R1': 'dispatches', 'R2': 'idleObligations' if 'idleObligations' in coverage else 'observations', 'R3': 'deliveries', 'R4': 'observations', 'R5': 'resources'}
+    integrity_basis = facts.get('scoringIntegrityBasis')
+    integrity_verdict = None
+    if integrity_basis is not None:
+        from .scoring_integrity import BASIS as INTEGRITY_BASIS, verdict as integrity_check
+        if integrity_basis != INTEGRITY_BASIS:
+            raise ValueError('unsupported scoring integrity basis')
+        integrity_verdict = integrity_check(facts.get('scoringIntegrity'))
+        # Integrity is an immediate package state, not a timed work obligation.
+        # Keep the same occurrence across captures instead of inventing a new
+        # deadline (and a new urgent notification) on every tick.
+        instances['R7'] = ([dict(workItemId='team-scoring-package', reason='scoring-copy-mismatch')]
+                           if integrity_verdict is True else [])
+    required = {'R1': 'dispatches', 'R2': 'idleObligations' if 'idleObligations' in coverage else 'observations', 'R3': 'deliveries', 'R4': 'observations', 'R5': 'resources', 'R7': 'scoringIntegrity'}
     lifecycle = facts.get('redlineLifecycle')
     if lifecycle is not None:
         from .quality_epoch import validate
@@ -268,6 +280,7 @@ def score(facts):
     red = {}
     for key in instances:
         known = r6_known if key == 'R6' else coverage.get(required[key]) is True
+        if key == 'R7':known = integrity_verdict is not None
         if key=='R2' and idle_uncertain:known=False
         if key=='R3' and delivery_uncertain:known=False
         if key=='R5' and resource_uncertain:known=False
@@ -372,6 +385,8 @@ def score(facts):
     low = max(0, (base or 0)*weight/100-penalty-50*len(unknown))
     high = max(0, ((base or 0)*weight+100*(100-weight))/100-penalty)
     formal = weight >= 80 and not unknown and len(closed) >= 20 and bool(active_ms)
+    if integrity_basis is not None and red['R7']['triggered'] is not False:
+        formal = False
     losses = []
     route = 'platform:template' if facts.get('mechanismPristine') is True else 'pending'
     for key in triggered:
@@ -426,12 +441,16 @@ def score(facts):
     if coverage_basis is not None:result['evidenceCoverageBasis'] = coverage_basis
     if audience_basis is not None:result['resultAudienceBasis'] = audience_basis
     if idle_basis is not None:result['idleObservationBasis'] = idle_basis
+    if integrity_basis is not None:
+        result['scoringIntegrityBasis'] = integrity_basis
+        result['cardValidity'] = ('invalid' if red['R7']['triggered'] is True else
+                                  'valid' if red['R7']['triggered'] is False else 'unknown')
     bases = ([r6_basis] if model == 'tq/2' and r6_basis in (TIERED_BASIS, BASIS) else [])
     if execution_basis is not None:
         result['executionBasis'] = execution_basis
         result['acceptanceUnitBasis'] = facts.get('acceptanceUnitBasis')
         bases += [execution_basis]
-    bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis,adoption_basis,cost_basis) if x is not None]
+    bases += [x for x in (resource_basis,coverage_basis,audience_basis,idle_basis,adoption_basis,cost_basis,integrity_basis) if x is not None]
     if bases:
         result['measurementVersion'] = '+'.join([model]+bases)
         result['streakCompatibilityKey'] = result['measurementVersion']

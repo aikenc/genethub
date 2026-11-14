@@ -508,6 +508,7 @@ async fn dispatch(
                     "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
+                    "team.quality-integrity.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
                     "preview.feedback.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
@@ -1776,6 +1777,9 @@ async fn dispatch(
         }).await,
 
         Request::CallerAuthority => Handled::ok(Reply::CallerAuthority(caller.authority())),
+        Request::TeamScoringManifest => {
+            Handled::ok(Reply::TeamScoringManifest(crate::skills::team_scoring_manifest()))
+        }
         Request::ProviderList => {
             let config = state.config.read().await;
             let providers = config.agents.providers.iter().map(|(id, provider)| {

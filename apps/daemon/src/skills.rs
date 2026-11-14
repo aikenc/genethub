@@ -31,6 +31,18 @@ pub fn builtin_files_under(
     })
 }
 
+/// Operational scoring integrity, not an OS-account security boundary. Include
+/// the whole Python package so newly introduced dependencies cannot be omitted.
+pub fn team_scoring_manifest() -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let files: std::collections::BTreeMap<_, _> =
+        builtin_files_under("genehub/references/team-template/tools/genet_builtin/")
+            .filter(|(name, _)| name.ends_with(".py") && !name.contains('/'))
+            .map(|(name, bytes)| (name, format!("{:x}", Sha256::digest(bytes))))
+            .collect();
+    serde_json::json!({"basis":"native-embedded-team-scoring/1", "files":files})
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
