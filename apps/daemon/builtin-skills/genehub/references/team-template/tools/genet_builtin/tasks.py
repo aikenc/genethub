@@ -1125,7 +1125,7 @@ def release_local(t, root, record):
 
 
 def reconcile_withdrawals(t, root):
-    """Settle uncreated remote preparations, without replaying business.
+    """Settle proven uncreated preparations, without replaying business.
 
     No receipt is not a negative acknowledgement. The executor must first
     serialize a durable fence with its normal receive/install operations.
@@ -1136,6 +1136,39 @@ def reconcile_withdrawals(t, root):
     concluded = {x.get('taskId') for x in tasks if x.get('finished') or x.get('state') in ('delivered', 'canceled')}
     active = {x.get('taskId') for x in tasks if x.get('state') == 'active' and not x.get('finished')
               and not (x.get('control') and not x['control'].get('complete'))}
+    # A local preflight can fail before the explicit creation marker is set.
+    # Once its parent concluded, fence that original identity under the same
+    # operation lock used by dispatch. Absence of a marker is never proof.
+    local_concluded = {x.get('taskId') for x in tasks if x.get('taskId') in concluded
+                       and not (x.get('control') and not x['control'].get('complete'))}
+    local = [x for x in records(t, root, 'task-dispatch')
+             if x.get('request', {}).get('taskId') in local_concluded
+             and x.get('state') == 'creating' and x.get('createAttempted') is False
+             and x.get('request', {}).get('machine') is None
+             and all(x.get(k) is None for k in ('target', 'sessionId', 'lock', 'resourceBinding'))]
+    local.sort(key=lambda x: x.get('createdAtMs', 0))
+    for snapshot in local[:2]:
+        operation = snapshot['operationId']
+        try:
+            # Match explicit controls' Task -> operation order. Both locks are
+            # nonblocking: a concurrent dispatch/control keeps its obligation.
+            with t.inbox_lock(root, snapshot['request']['taskId'], purpose='本地准备结论核对'):
+                with t.inbox_lock(root, operation, purpose='本地未创建准备收尾'):
+                    path = t.state_dir(root, 'task-dispatch', operation + '.json')
+                    intent = t.read_dispatch_record(path)
+                    if (not intent or intent.get('request') != snapshot.get('request')
+                            or intent.get('state') != 'creating' or intent.get('createAttempted') is not False
+                            or intent.get('request', {}).get('machine') is not None
+                            or any(intent.get(k) is not None for k in ('target', 'sessionId', 'lock', 'resourceBinding'))):
+                        continue
+                    task = read_task(t, root, intent['request']['taskId'])
+                    if ((task.get('control') and not task['control'].get('complete'))
+                            or not (task.get('finished') or task.get('state') in ('delivered', 'canceled'))):
+                        continue
+                    intent.update(state='withdrawn', withdrawnAtMs=t.now_ms())
+                    t.write_json(path, intent)
+        except (t.ExpertError, OSError) as error:
+            t.record_system_issue(root, 'local-prepare-settlement', str(error)[:300], operation)
     candidates = [x for x in records(t, root, 'task-dispatch')
                   if x.get('state') == 'creating' and not x.get('sessionId')
                   and (x.get('request', {}).get('taskId') in concluded or
