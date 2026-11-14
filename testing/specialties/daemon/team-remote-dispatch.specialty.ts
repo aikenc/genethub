@@ -1011,7 +1011,27 @@ sys.exit(r.returncode)
     // original native prepare and its exact old command remain obligations.
     const retainedData=path.join(declaredRuntime,"datas/parallel-old-obligation.txt");
     mkdirSync(path.dirname(retainedData),{recursive:true});writeFileSync(retainedData,"old work remains here");
+    // Opaque original target-native registration: preserve bytes, do not claim new rendering.
+    const localGpuBytes=Buffer.from(JSON.stringify({schema:"fixture-gpu-registration/1",renderer:"historical native device",probedAtMs:1700000000000})+"\n");
+    const localGpuPaths=[".genethub/gpu-host.json","spaces/qa/.genethub/gpu-host.json"];
+    for(const rel of localGpuPaths){const file=path.join(declaredRuntime,rel);mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,localGpuBytes);}
     const beforeParallelBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
+    const gpuRootFile=path.join(declaredRuntime,localGpuPaths[0]);
+    const gpuOutside=path.join(t.env.root,"outside-gpu-probe.json");writeFileSync(gpuOutside,localGpuBytes);
+    const assertGpuRefused=async(label:string)=>{
+      const bad=await script(["employee","sync","--parallel"],builder);
+      const binding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
+      t.assertions.assert(bad.code!==0&&JSON.stringify(binding)===JSON.stringify(beforeParallelBinding)
+        &&readFileSync(preparedFile,"utf8")===preparedBytes,"unsafe GPU metadata was installed or changed original work: "+label);
+    };
+    unlinkSync(gpuRootFile);symlinkSync(gpuOutside,gpuRootFile);
+    await assertGpuRefused("alias");unlinkSync(gpuRootFile);writeFileSync(gpuRootFile,localGpuBytes);
+    writeFileSync(gpuRootFile,Buffer.alloc(131073,32));await assertGpuRefused("oversized");writeFileSync(gpuRootFile,localGpuBytes);
+    const nativeInstallFile=path.join(declaredRuntime,".genethub/install-receipt.json");
+    const nativeInstallBytes=readFileSync(nativeInstallFile,"utf8"),foreignInstall=JSON.parse(nativeInstallBytes);
+    foreignInstall.members=foreignInstall.members.map((m:any)=>({...m,machineId:"another-native-machine"}));
+    writeFileSync(nativeInstallFile,JSON.stringify(foreignInstall));await assertGpuRefused("foreign machine");
+    writeFileSync(nativeInstallFile,nativeInstallBytes);
     const parallelInstall=await script(["employee","sync","--parallel"],builder);
     t.assertions.assert(parallelInstall.code===0,"independent version install remained blocked by original prepared work: "+parallelInstall.stdout+parallelInstall.stderr);
     const afterParallelBinding=JSON.parse(readFileSync(path.join(sourceRoot,"agent-space.genet.json"),"utf8")).members.find((m:any)=>m.name==="qa");
@@ -1025,6 +1045,10 @@ sys.exit(r.returncode)
       "parallel install replaced/copied the original runtime, receipt, data or execution workspace");
     t.assertions.assert(readFileSync(path.join(parallelRoot,".genethub/open.env"),"utf8").includes("TEAM_AGENT=ctl-cli-command"),
       "parallel runtime lost the existing target-local Agent selection");
+    for(const rel of localGpuPaths)t.assertions.assert(existsSync(path.join(parallelRoot,rel))
+      &&readFileSync(path.join(parallelRoot,rel)).equals(localGpuBytes)
+      &&readFileSync(path.join(declaredRuntime,rel)).equals(localGpuBytes),
+      "parallel runtime lost or rewrote historical target-local GPU registration: "+rel);
     const oldRetry=installedReceive(preparedForUpgrade);
     t.assertions.assert(oldRetry.status===0&&JSON.parse(oldRetry.stdout.trim().split("\n").at(-1)!).sessionId===preparedSid
       &&!(await inspectSession(preparedSid,true)).items.some((i:any)=>i.type==="assistantMessage"),
