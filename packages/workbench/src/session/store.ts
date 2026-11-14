@@ -58,6 +58,7 @@ import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
 import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
+import { hasCurrentWork } from "./attention";
 import { resolveFileMime, stagedFileName } from "./attachments";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
@@ -950,11 +951,18 @@ return create<WorkbenchState>((set, get) => ({
       }
       set(state => {
         const detail = state.sessions.find(s => s.id === state.activeSessionId);
-        const sessions = detail && !row.sessions.some(s => s.id === detail.id) ? [...row.sessions,detail] : row.sessions;
         // The directory owns the source facts: its confirmation time and its failure.
         const failed = ["offline","timeout","unavailable","rateLimited"].includes(row.state);
-        return {sessions,workspaces:row.workspaces,activitySessions:row.activeSessions ?? [],activityComplete:Boolean(row.activityComplete),
-          sessionsLoaded:!row.refreshing,sessionsComplete:!row.nextCursor,sessionsError:failed,
+        // An unavailable directory repeats its last snapshot. It must not undo
+        // a newer body snapshot/event that this same machine already answered.
+        const checkedAt = row.updatedAt ? Date.parse(row.updatedAt) : 0;
+        const observed = row.cached || row.refreshing || failed
+          ? state.sessions.filter(s => (state.sessionObservations[s.id] ?? 0) > checkedAt) : [];
+        const sessions = [...new Map([...row.sessions,...observed].map(s => [s.id,s])).values()];
+        if (detail && !sessions.some(s => s.id === detail.id)) sessions.push(detail);
+        return {sessions,workspaces:row.workspaces,
+          activitySessions:reconcileObservedActivity(row.activeSessions ?? [],observed,sessions),activityComplete:Boolean(row.activityComplete),
+          sessionsLoaded:Boolean(row.cached) || !row.refreshing,sessionsComplete:!row.nextCursor,sessionsError:failed,
           ...(failed ? {sessionsFailedAtMs:Date.parse(row.observedAt) || Date.now()} : {}),
           sessionsCheckedAtMs:row.updatedAt ? Date.parse(row.updatedAt) : state.sessionsCheckedAtMs};
       });
@@ -3912,20 +3920,34 @@ function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot):
   return { ...previous, status: waiting && !snapshot.summary.inputSummary ? "waiting" : status };
 }
 
+function reconcileObservedActivity(previous: SessionSummary[], observed: SessionSummary[], sessions: SessionSummary[]): SessionSummary[] {
+  if (!observed.length) return previous;
+  const next = new Map(previous.map(session => [session.id,session]));
+  for (const session of observed) {
+    if (hasCurrentWork(session,sessions)) next.set(session.id,session);
+    else next.delete(session.id);
+  }
+  return [...next.values()];
+}
+
 function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
   const status = snapshot?.summary?.status;
   if (!status || snapshot.summary.id !== sessionId) return;
-  set((state) => ({
-    sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
-    // A directory/deep link can select a session outside the loaded pages.
-    // The authoritative snapshot must introduce its summary as well as update it.
-    sessions: state.sessions.some(session => session.id === sessionId)
+  set((state) => {
+    const sessions = state.sessions.some(session => session.id === sessionId)
       ? state.sessions.map(session => session.id === sessionId ? { ...session, ...snapshot.summary } : session)
-      : [...state.sessions, snapshot.summary],
-    tabs: state.tabs.map(tab => tab.kind === "chat" && tab.sessionId === sessionId
-      ? { ...tab, title: snapshot.summary.title || "新会话" } : tab),
-    ...(state.activeSessionId === sessionId ? { activeWorkspaceId: snapshot.summary.workspaceId } : {}),
-  }));
+      : [...state.sessions, snapshot.summary];
+    return {
+      sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
+      // A directory/deep link can select a session outside the loaded pages.
+      // The authoritative snapshot must introduce its summary as well as update it.
+      sessions,
+      activitySessions:reconcileObservedActivity(state.activitySessions,[snapshot.summary],sessions),
+      tabs: state.tabs.map(tab => tab.kind === "chat" && tab.sessionId === sessionId
+        ? { ...tab, title: snapshot.summary.title || "新会话" } : tab),
+      ...(state.activeSessionId === sessionId ? { activeWorkspaceId: snapshot.summary.workspaceId } : {}),
+    };
+  });
 }
 
 function applySessionStatus(
@@ -3974,9 +3996,8 @@ function applySessionStatus(
               ? event.status
               : null;
   if (!status && event.type !== "permissionResolved") return;
-  set((state) => ({
-    sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
-    sessions: state.sessions.map((session) => {
+  set((state) => {
+    const sessions = state.sessions.map((session) => {
       if (session.id !== sessionId) return session;
       const interactionSummary = event.type === "permissionRequested"
         ? { count: (session.interactionSummary?.count ?? 0) + Number(!session.interactionSummary?.requests.some(request => request.requestId === event.request.id)),
@@ -3988,8 +4009,13 @@ function applySessionStatus(
       const next = event.type === "permissionResolved" ? (session.status === "waiting" && !interactionSummary?.count ? "idle" : session.status)
         : status === "idle" && interactionSummary?.count ? "waiting" : status ?? session.status;
       return { ...session, status: next, interactionSummary };
-    }),
-  }));
+    });
+    return {
+      sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
+      sessions,
+      activitySessions:reconcileObservedActivity(state.activitySessions,sessions.filter(session => session.id === sessionId),sessions),
+    };
+  });
 }
 
 function currentWorkspace(state: WorkbenchState): string | null {

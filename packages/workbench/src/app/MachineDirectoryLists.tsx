@@ -112,7 +112,13 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
   const sources = useMemo(() => directory.sources.map(row => {
     const activity = row.activeSessions ?? [];
     row = {...row, sessions: [...new Map([...row.sessions, ...activity].map(s => [s.id,s])).values()]};
-    if (row.catalogRevision !== undefined) return row;
+    if (row.catalogRevision !== undefined) {
+      if (row.target.deviceHandle !== client?.identity?.machineId || row.state === "denied"
+        || !(row.cached || row.refreshing || !fresh(row))) return row;
+      const checkedAt = row.updatedAt ? Date.parse(row.updatedAt) : 0;
+      const observed = liveSessions.filter(s => (observations[s.id] ?? 0) > checkedAt);
+      return {...row,sessions:[...new Map([...row.sessions,...observed].map(s => [s.id,s])).values()]};
+    }
     if (row.target.deviceHandle !== client?.identity?.machineId || client?.connectionState !== "ready" || row.state === "denied") return row;
     return { ...row, state: (["waiting", "loading", "deferred", "notChecked"].includes(row.state) && sessionsChecked ? "partial" : row.state) as MachineSummary["state"], version: client.identity?.daemonVersion ?? row.version, workspaces: liveWorkspaces.length ? liveWorkspaces : row.workspaces,
       sessions: [...new Map([...row.sessions, ...liveSessions.filter(s => (observations[s.id] ?? 0) > (row.updatedAt ? Date.parse(row.updatedAt) : 0))].map(s => [s.id, s])).values()],
@@ -276,6 +282,12 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     const machineKey = row.target.deviceHandle ?? row.target.id;
     const pinned = sessionPinned(machineKey, session.id);
     const unread = hasUnreadReply(machineKey, session);
+    const checkedAt = row.updatedAt ? Date.parse(row.updatedAt) : 0;
+    const bodyObservedAt = row.target.deviceHandle === client?.identity?.machineId ? observations[session.id] ?? 0 : 0;
+    // Only a body read after this source's observation can resolve this row's
+    // stale status. Other rows and the source failure retain their own state.
+    const independentlyChecked = client?.connectionState === "ready"
+      && bodyObservedAt > Math.max(checkedAt, Date.parse(row.observedAt) || 0);
     return <li key={key} className="conversation-row flex min-w-0 items-center">
       {managing && <input aria-label={`选择会话 ${session.title}`} type="checkbox" className="m-2 h-5 w-5 shrink-0" disabled={!fresh(row) || Boolean(session.historyOnly || session.unsupported)} checked={chosen.has(key)} onChange={() => toggle(key)} />}
       <button type="button" disabled={busy || !(managing ? fresh(row) : canOpen) || Boolean(session.unsupported)} aria-current={row.target.deviceHandle === client?.identity?.machineId && activeId === session.id ? "page" : undefined}
@@ -288,7 +300,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
           {pinned && <Pin size={11} aria-label="已置顶" className="shrink-0 text-accent" />}
           <time className="shrink-0 text-[10px] text-faint" dateTime={new Date(latest(session)).toISOString()}>{relativeTime(latest(session))}</time>
         </span><span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted"><span className="min-w-0 flex-1 truncate">{workspace?.name ?? "Space"}{session.archived ? " · 已归档" : ""}{session.historyOnly ? " · 只读" : ""}</span>
-          <SessionStatusIcon session={session} sessions={row.sessions} stale={Boolean(row.cached) || !fresh(row)} disconnected={!fresh(row)} observedAtMs={row.updatedAt ? Date.parse(row.updatedAt) : 0} />
+          <SessionStatusIcon session={session} sessions={row.sessions} stale={(Boolean(row.cached) || !fresh(row)) && !independentlyChecked} disconnected={!fresh(row) && !independentlyChecked} observedAtMs={Math.max(checkedAt,bodyObservedAt)} />
         </span></span>
       </button>
     </li>;
