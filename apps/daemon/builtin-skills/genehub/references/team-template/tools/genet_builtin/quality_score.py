@@ -86,7 +86,7 @@ def score(facts):
     if coverage_basis not in (None, 'per-source-failure-domain/1'):
         raise ValueError('unsupported evidence coverage basis')
     audience_basis = facts.get('resultAudienceBasis')
-    if audience_basis not in (None, 'source-result-generation/1'):
+    if audience_basis not in (None, 'source-result-generation/1', 'source-result-generation/2'):
         raise ValueError('unsupported result audience basis')
     idle_basis = facts.get('idleObservationBasis')
     if idle_basis not in (None, 'native-minute-freshness/1', 'native-minute-freshness/2'):

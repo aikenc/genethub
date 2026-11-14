@@ -10,8 +10,35 @@ import sys
 
 from .quality_score import canonical, number, score
 from .task_hours import BASIS as R6_BASIS, policy as r6_policy
+from .quality_events import EXECUTION_FAILURE_NOTICE
 
 HOUR = 3600000
+NOTIFICATION_BASIS = 'producer-execution-status/1'
+
+
+def execution_status_input(team, recipient, item, header, body, ref):
+    """Recognize the shipped status envelope, including its older result tag.
+
+    An exact leading producer marker is required. Quoted examples, ordinary
+    result text, unrelated source references and missing headers stay results.
+    Retain identity and timing evidence, never the native error body.
+    """
+    if not header.startswith(('用途: result\n', '用途: status\n')) or not isinstance(ref, str):
+        return None
+    prefix = 'ghref:session:'
+    source = ref[len(prefix):] if ref.startswith(prefix) else ''
+    sender = next((line[5:] for line in header.splitlines() if line.startswith('发送方: ')), '')
+    if (not team.SESSION_ID.fullmatch(source)
+            or not (sender == source or sender.startswith(source + '（'))):
+        return None
+    lines = body.splitlines()
+    if lines and lines[0].startswith('[并行决策信息]'):
+        lines = lines[1:]
+    if len(lines) < 2 or lines[0] != EXECUTION_FAILURE_NOTICE or not lines[1].startswith('原生错误：'):
+        return None
+    return dict(messageId=item['id'], sessionId=recipient, sourceSessionId=source,
+                ref=ref, receivedAtMs=item.get('receivedAtMs'),
+                basis=NOTIFICATION_BASIS, legacyResultTag=header.startswith('用途: result\n'))
 
 
 def read_issue(kind, error, budget, **identity):
@@ -205,7 +232,9 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     same_machine = (isinstance((kernel or {}).get('machineId'), str)
                     and bool(kernel['machineId']) and prior_kernel.get('machineId') == kernel['machineId'])
     compatible = same_machine and (prior_kernel == kernel or full_history)
-    if stable and covered and compatible and old.get('integrationReferenceBasis')=='native-owner-use-reference/1' and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
+    notification_ready = old and (old.get('resultNotificationBasis') == NOTIFICATION_BASIS
+        or not any('ghref:session:' in (x.get('ref') or '') for x in old.get('inputLinks', [])))
+    if stable and covered and compatible and notification_ready and old.get('integrationReferenceBasis')=='native-owner-use-reference/1' and old.get('sessionId')==sid and old.get('workspaceId')==summary.get('workspaceId') and old.get('status')==summary.get('status') and old.get('inputSummary')==summary.get('inputSummary',{}) and old.get('updatedAtMs') == summary.get('updatedAtMs'):
         return old
     inspection = call('session', 'inspect', sid)['inspection']
     rounds, cursor, round_digest = [], None, None
@@ -227,7 +256,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
     rounds.sort(key=lambda x: (x['startedAtMs'], x['roundId']))
     completed = [x for x in rounds if x.get('endedAtMs', 0) > 0 and x.get('outcome')]
     anchor = completed[-1]['roundId'] if completed else None
-    turns, links, integration_items, cursor, digest = [], [], [], None, None
+    turns, links, status_inputs, integration_items, cursor, digest = [], [], [], [], None, None
     narrative_complete = False
     if anchor:
         for _ in range(100):
@@ -247,9 +276,14 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
                     integration_items.extend(integration_references(item,rounds))
                     if len(integration_items)>4096: raise ValueError('bounded native integration history exceeded')
                 if item.get('type') != 'userMessage': continue
-                header=item.get('text','').split('\n\n',1)[0]
+                header, _, body = item.get('text','').partition('\n\n')
+                ref=next((line[5:] for line in header.splitlines() if line.startswith('ref: ')),None)
+                status_input=execution_status_input(team,sid,item,header,body,ref)
+                if status_input is not None:
+                    status_inputs.append(status_input)
+                    if len(status_inputs)>4096: raise ValueError('bounded native execution status history exceeded')
+                    continue
                 if header.startswith('用途: result\n'):
-                    ref=next((line[5:] for line in header.splitlines() if line.startswith('ref: ')),None)
                     if ref:links.append({'messageId':item['id'],'ref':ref,'sessionId':sid,'purpose':'result','receivedAtMs':item.get('receivedAtMs')})
             cursor = page.get('nextCursor')
             if not cursor or any(x.get('finishedAtMs', since+1) < since for x in batch):
@@ -263,6 +297,7 @@ def native_snapshot(team, sid, machine, since, kernel, cache, budget, summary=No
              'waitingForUser': bool((summary.get('interactionSummary') or {}).get('requests')),
              'retainedInputs': inspection.get('retainedInputs'), 'rounds': rounds,
              'turns': list({x['turnId']: x for x in turns}.values()), 'inputLinks':links,'historyDigest': digest,
+             'resultNotificationBasis':NOTIFICATION_BASIS, 'executionStatusInputs':status_inputs,
              'integrationReferenceBasis':'native-owner-use-reference/1','integrationReferences':integration_items,
              'historyCoverage': {'basis':'native-page-completion/2','roundsComplete':rounds_complete,
                                  'narrativeComplete':narrative_complete}}
@@ -753,6 +788,22 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
                     and event.get('ref')==link.get('ref')):
                 merged['acceptedUpperBoundMs']=event['atMs']
             delivery_map[key]=merged
+    execution_statuses = []
+    for recipient, snapshot in native.items():
+        for notice in snapshot.get('executionStatusInputs', []):
+            key = (recipient, notice['messageId'])
+            event = delivery_map.get(key, {})
+            receipt = next((x for x in snapshot.get('retainedInputs') or []
+                            if x['messageId'] == notice['messageId']), {})
+            received = receipt.get('receivedAtMs') or notice.get('receivedAtMs')
+            if number(received) and received > cutoff:
+                continue
+            delivery_map.pop(key, None)
+            proof = dict(notice, receivedAtMs=received)
+            if (not number(received) and event.get('timeBasis') == 'observed-acceptance'
+                    and event.get('ref') == notice['ref'] and number(event.get('atMs'))):
+                proof['acceptedUpperBoundMs'] = event['atMs']
+            execution_statuses.append(proof)
     deliveries = list(delivery_map.values())
     reworked = {i['follows'] for i in work if i.get('follows')}
     resources_complete, idle_complete = True, True
@@ -946,7 +997,8 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     by_op={x['operationId']:x for x in intents}
     for unit in units:
         unit['costComparison']=comparison(by_op.get(unit['unitId'],{}).get('request',{}))
-    facts = {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/1','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':trees,
+    facts = {'schema':'team-quality-facts/1','scoringModel':'tq/2','resourceObligationBasis':'dispatch-resource-obligation/2','evidenceCoverageBasis':'per-source-failure-domain/1','resultAudienceBasis':'source-result-generation/2','idleObservationBasis':'native-minute-freshness/2','attributionContext':attribution,'taskTrees':trees,
+            'executionStatusNotifications':execution_statuses,
             'acceptanceUnits':units,'acceptanceUnitBasis':UNIT_BASIS,'executionBasis':EXECUTION_BASIS,
             'executionFacts':{'schema':'team-execution-facts/2','scoreMeaningChanged':True,
                               'backgroundBasis':'registered-native-process-runtime/1',

@@ -4509,7 +4509,7 @@ def reconcile(root, name, mine):
                         record['done'] = dict(outcome='failed',
                             reply='native-failure:%s:%s' % (session_id, round_id or 'unknown'),
                             ref='ghref:session:' + session_id,
-                            text='执行回合已失败，业务任务尚未结论；原输入、未完成支持及资源义务保留。\n原生错误：%s' % (inputs.get('error') or '无附加信息'))
+                            text=quality_events.EXECUTION_FAILURE_NOTICE + '\n原生错误：%s' % (inputs.get('error') or '无附加信息'))
                         update_pending(root, path, record)
                     continue
                 if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
@@ -4654,27 +4654,31 @@ def reconcile(root, name, mine):
                 record['resultDelivery'] = delivery
                 update_pending(root, path, record)
             if delivery.get('generation') != key:
+                purpose = ('status' if record.get('executionFailure') and not record.get('taskConclusion')
+                           and done.get('outcome') == 'failed'
+                           and str(done.get('reply', '')).startswith('native-failure:' + record['sessionId'] + ':')
+                           else 'result')
                 wt = (' [工位: %s, 分支: %s]' % (record['worktree'], record.get('branch') or '-')) if record.get('worktree') else ''
                 sender = '%s（%s）%s' % (record['sessionId'], record['desc'], wt)
                 text = '%s\n\nref: %s' % (done['text'], done['ref'])
                 if record.get('taskId') and parent.get('taskId') == record['taskId']:
                     text = team_tasks.parallelism_text(sys.modules[__name__], root, record['taskId']) + text
-                delivery = dict(generation=key, recipient=to, machine=parent_machine,
+                delivery = dict(generation=key, purpose=purpose, recipient=to, machine=parent_machine,
                                 sender=sender, text=text, ref=done['ref'], queued=False)
                 if to:
-                    delivery['messageId'] = message_id(to, 'result', sender, text, done['ref'], record['sessionId'], done['reply'])
+                    delivery['messageId'] = message_id(to, purpose, sender, text, done['ref'], record['sessionId'], done['reply'])
                 record['resultDelivery'] = delivery
                 update_pending(root, path, record)  # durable identity before any send
             if to and not delivery.get('queued'):
                 _advance_parent_baseline(root, to)
-                accepted = deliver_or_notice(root, to, 'result', delivery['sender'], delivery['text'],
+                accepted = deliver_or_notice(root, to, delivery.get('purpose', 'result'), delivery['sender'], delivery['text'],
                     ref=delivery['ref'], machine=delivery.get('machine'), delivery_id=delivery['messageId'])
                 delivery['queued'] = accepted == 'queue'
                 update_pending(root, path, record)
             for watcher in record.get('watchers') or []:
                 if watcher and watcher != to:
                     try:
-                        deliver_or_notice(root, watcher, 'result', delivery['sender'],
+                        deliver_or_notice(root, watcher, delivery.get('purpose', 'result'), delivery['sender'],
                             '%s\n\nref: %s' % (done['text'], done['ref']), record['sessionId'], done['reply'],
                             'watcher', watcher, ref=done['ref'])
                     except Exception:

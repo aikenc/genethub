@@ -12,6 +12,8 @@ import tempfile
 
 _TEMPLATE_SHA = None
 LEDGER_BASIS = 'task-and-note-ledger/1'
+# Stable producer marker for an execution status, never a business conclusion.
+EXECUTION_FAILURE_NOTICE = '执行回合已失败，业务任务尚未结论；原输入、未完成支持及资源义务保留。'
 
 
 def ledger_before(path):
