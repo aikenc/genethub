@@ -82,16 +82,28 @@ def records(base):
     return [read(p) for p in paths]
 
 
-def events(root, cutoff):
+def events(root, cutoff, observation_since=None, deadline=None):
+    """Read append history without making its lifetime size a capture limit.
+
+    Original files remain intact. Stable IDs bound duplicate crash replay;
+    observation rows only support the current measurement window. Older
+    lifecycle/control/background facts remain available for complete units.
+    Missing pre-window observations cannot establish negative wake evidence.
+    """
     path = Path(root)/'.genethub/team/events/events.jsonl'
     spool = path.parent/'spool'
+    maximum = 64*1024*1024
     if spool.is_symlink() or spool.exists() and not spool.is_dir():
         raise ValueError('event spool must be a regular directory')
     queued = sorted(spool.glob('*.json'))
     if len(queued) > 10000:
         raise ValueError('queued events exceed bounded read')
-    lines, queued_bytes = [], 0
+    pending, queued_bytes = [], 0
+    def within_budget():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError('quality event history capture budget exhausted')
     for queued_path in queued:
+        within_budget()
         try:
             if queued_path.is_symlink():
                 raise ValueError('queued event alias')
@@ -106,29 +118,49 @@ def events(root, cutoff):
         if len(payload) > 8192:
             raise ValueError('queued event exceeds bounded read')
         queued_bytes += len(payload)
+        if queued_bytes > maximum:
+            raise ValueError('queued events exceed bounded read')
         value = json.loads(payload)
         if value.get('eventId') != queued_path.stem:
             raise ValueError('queued event identity mismatch')
-        lines.append(payload)
+        pending.append((value, len(payload)))
+    found, retained_bytes = {}, 0
+    observations = ('session-observed', 'ledger-observed', 'ledger-changed', 'ledger-gap')
+    def retain(value, size):
+        nonlocal retained_bytes
+        if value.get('schema') != 'team-process-event/1':
+            raise ValueError('unknown process event schema')
+        if value.get('recordedAtMs', cutoff+1) > cutoff:
+            return
+        if (observation_since is not None and value.get('kind') in observations
+                and number(value.get('atMs')) and value['atMs'] < observation_since):
+            return
+        identity = value['eventId']
+        if identity in found:
+            return
+        retained_bytes += size
+        if retained_bytes > maximum:
+            raise ValueError('selected event history exceeds bounded read')
+        found[identity] = value
     if path.is_symlink():
         raise ValueError('event history alias')
     if path.exists():
         with path.open('rb') as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ValueError('event history must be regular')
-            payload = handle.read(64*1024*1024+1)
-        if len(payload) + queued_bytes > 64*1024*1024:
-            raise ValueError('event history exceeds bounded read')
-        lines = payload.splitlines() + lines
-    elif queued_bytes > 64*1024*1024:
-        raise ValueError('event history exceeds bounded read')
-    found = {}
-    for line in lines:
-        value = json.loads(line)
-        if value.get('schema') != 'team-process-event/1':
-            raise ValueError('unknown process event schema')
-        if value.get('recordedAtMs', cutoff+1) <= cutoff:
-            found.setdefault(value['eventId'], value)
+            while True:
+                within_budget()
+                payload = handle.readline(8193)
+                if not payload:
+                    break
+                if len(payload) > 8192:
+                    raise ValueError('event history record exceeds bounded read')
+                # Validate every record, even one outside the selected window.
+                # A broken source remains unknown, never a healthy empty set.
+                retain(json.loads(payload), len(payload))
+    for value, size in pending:
+        within_budget()
+        retain(value, size)
     return sorted(found.values(), key=lambda x: (x['atMs'], x['eventId']))
 
 
@@ -624,6 +656,7 @@ def session_routes(team, intents, tasks, pending, end):
 def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     state = Path(root)/'.genethub/team'
     store = state/'quality'
+    budget = time.monotonic()+budget_seconds
     start = end-HOUR
     metric_start = end-24*HOUR
     from .quality_epoch import context as epoch_context
@@ -631,13 +664,12 @@ def capture(team, root, end, cutoff, budget_seconds=100, live=False):
     before = template_digest()
     from .template_version import capture as running_version
     version_before = running_version(root, cutoff)
-    log = events(root, cutoff)
+    log = events(root, cutoff, observation_since=metric_start-125000, deadline=budget)
     tasks = {v['taskId']: v for v in records(state/'tasks')}
     conclusion_periods = task_continuations(tasks,end)
     intents = records(state/'task-dispatch')
     pending = {v['sessionId']: v for area in ['pending', 'done'] for v in records(state/area)}
     issues, work, wanted = [], [], {}
-    budget = time.monotonic()+budget_seconds
     def capture_call(*args):
         remaining=budget-time.monotonic()
         if remaining<=0:raise TimeoutError("quality capture budget exhausted")
