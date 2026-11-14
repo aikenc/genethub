@@ -4,7 +4,7 @@
 // daemon lays experts out (<data>/spaces/<name> next to <data>/builtin-skills), with no daemon and no model.
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
@@ -95,6 +95,26 @@ defineSpecialty(
     const custom=sync();
     t.assertions.assert(custom.status===0,"custom timer made identity upgrade fail");
     t.assertions.assert(JSON.stringify(JSON.parse(readFileSync(timerFile,"utf8")))===JSON.stringify(customTimer),"upgrade rewrote a custom timer command");
+
+    // A real old root descriptor still names the removed front alias.
+    // Compile it through the normal public entry, preserving exact canonical
+    // identity bytes; a new style-only descriptor must not create a twin.
+    const rootDescriptor = join(expert, "agent-space.genet.json");
+    const originalDescriptor = JSON.parse(readFileSync(rootDescriptor,"utf8"));
+    const legacyDescriptor = structuredClone(originalDescriptor);
+    legacyDescriptor.identity=legacyDescriptor.identity.map((x:string)=>x==="front/style.md"?"front/role.md":x);
+    const canonicalFront="# Front identity compatibility\n\nCanonical owner service marker.\n";
+    writeFileSync(join(expert,"front/style.md"),canonicalFront);
+    rmSync(join(expert,"front/role.md"),{force:true});
+    writeFileSync(rootDescriptor,JSON.stringify(legacyDescriptor));
+    const oldFront=sync();
+    t.assertions.assert(oldFront.status===0 && read("front/role.md")===canonicalFront
+      && read("front/AGENTS.md").includes("Canonical owner service marker."),"old root identity alias did not compile the exact canonical front source");
+    writeFileSync(rootDescriptor,JSON.stringify(originalDescriptor));
+    rmSync(join(expert,"front/role.md"),{force:true});
+    const currentFront=sync();
+    t.assertions.assert(currentFront.status===0 && !existsSync(join(expert,"front/role.md"))
+      && read("front/AGENTS.md").includes("Canonical owner service marker."),"style-only front recreated an unused duplicate or lost compiled identity");
 
     const stranded = join(t.env.root, "expert-identity-sync-stranded");
     mkdirSync(join(stranded, "spaces"), { recursive: true });
