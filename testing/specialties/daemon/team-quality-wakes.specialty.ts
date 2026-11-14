@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, openTeam, runGenetAsync } from "../../framework/public.ts";
 
@@ -101,14 +101,23 @@ defineSpecialty({
       "absent observation became zero progress or erased a genuine delta");
     writeFileSync(eventFile, original);
     const saved = eventFile + ".saved";
+    // Append failure alone is recoverable through the durable spool. To test
+    // actual missing diagnostic evidence, publication itself must also fail.
+    const spool=r.state("events","spool"),savedSpool=spool+".saved";
+    renameSync(spool,savedSpool);writeFileSync(spool,"publication unavailable");
     renameSync(eventFile, saved); mkdirSync(eventFile);
     try {
       const success = await system("wake.diagnostic-fault", start.map(x => x === "wake.original" ? "wake.fault" : x));
       const durable = JSON.parse(readFileSync(r.state("tasks", success.taskId + ".json"), "utf8"));
       t.assertions.assert(durable.owner.sessionId === success.owner.sessionId, "diagnostic append failure rolled back the actual task");
-    } finally { rmdirSync(eventFile); renameSync(saved, eventFile); }
+    } finally { rmdirSync(eventFile); renameSync(saved, eventFile);
+      unlinkSync(spool);renameSync(savedSpool,spool); }
     r.ok(["hook"]);
     const failed = facts();
-    t.assertions.assert(failed.wakes.every((x: any) => x.ledgerChanged === null), "failed diagnostic append manufactured complete absence evidence");
+    t.assertions.assert(rows("wake.diagnostic-fault",failed).length===1
+      &&rows("wake.diagnostic-fault",failed)[0].ledgerChanged===null
+      &&rows("wake.read",failed)[0]?.ledgerChanged===false
+      &&rows("wake.changed",failed)[0]?.ledgerChanged===true,
+      "a real publication gap became healthy absence or erased independent prior evidence");
   } finally { await r.dispose(); }
 });
