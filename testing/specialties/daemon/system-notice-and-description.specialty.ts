@@ -154,10 +154,10 @@ noticeCase(
       input?.pendingMessageIds.includes("s9.r1.done") === true,
       `the notice should still be pending: ${JSON.stringify(input)}`,
     );
-    t.assertions.assert(
-      input?.pendingMessageIds.includes("u.one") === true,
-      `the person's message should be in pendingMessageIds until round finishes: ${JSON.stringify(input)}`,
-    );
+    await t.tools.waitUntil(async () =>
+      (await snapshot(session)).summary.inputSummary?.pendingMessageIds.includes("u.one") === false, 10_000);
+    t.assertions.assert((await snapshot(session)).summary.inputSummary?.pendingMessageIds.includes("s9.r1.done") === true,
+      "acknowledged active input hid a genuinely queued system notice");
     t.assertions.assert(prompts(session) === 2, "the notice was delivered ahead of, or together with, the person's message");
   },
   40_000,
