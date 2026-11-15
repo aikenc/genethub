@@ -96,11 +96,11 @@ impl Daemon {
             .scan_spaces(&state.paths.root.join("spaces"), true)
             .await;
         let pty = transport::local::pty_fanout(pty_rx);
-        // The same channel every client already listens on, handed to the state
-        // so anything the machine wants to volunteer — download progress, for
-        // one — reaches them without a second bus to subscribe to.
+        // Terminal output only. What the machine volunteers (download
+        // progress, Agents, processes) has its own `machine_events` channel,
+        // so a burst of output cannot push it out of a slow client's queue.
         let _ = state.fanout.set(pty.clone());
-        state.processes.announce_to(pty.clone());
+        state.processes.announce_to(state.machine_events.clone());
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 

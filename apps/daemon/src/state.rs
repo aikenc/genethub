@@ -20,6 +20,10 @@ use crate::remote::SharedRemote;
 use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
+/// Agent, request, process and download frames per burst. A list push already
+/// coalesces Agent changes, so this only has to absorb several families at once.
+const MACHINE_EVENT_CAPACITY: usize = 256;
+
 pub struct AppState {
     pub(crate) logical_connections: Arc<crate::dataplane::logical_registry::Registry>,
     pub client_debug: crate::client_debug::Broker,
@@ -58,13 +62,17 @@ pub struct AppState {
     pub remote: std::sync::OnceLock<SharedRemote>,
     /// How far the installer fetch has got, when one was asked for.
     pub updates: crate::updates::Downloader,
-    /// The channel every connected client is listening on.
+    /// Terminal output for every connected client.
     ///
-    /// The same one terminal output uses, which is why it is set from outside:
-    /// it is created with the listener, after this state exists. Anything the
-    /// machine needs to say to whoever is watching, rather than to whoever
-    /// asked, goes through here.
+    /// Set from outside because it is created with the listener, after this
+    /// state exists. Only terminal frames travel here: a burst of output may
+    /// outrun a slow client, and that must cost that client some output, never
+    /// the machine state below.
     pub fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
+    /// What the machine volunteers to whoever is watching, rather than to
+    /// whoever asked: Agents, their requests, background processes, download
+    /// progress. Low volume, so terminal output can never evict it.
+    pub machine_events: broadcast::Sender<ServerFrame>,
     /// What each provider answered when asked for its models. See `discover`.
     models: RwLock<std::collections::HashMap<String, Discovery>>,
     /// Raised when a local client asks the daemon to stop.
@@ -194,6 +202,7 @@ impl AppState {
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Downloader::new(updates_dir),
             fanout: std::sync::OnceLock::new(),
+            machine_events: broadcast::channel(MACHINE_EVENT_CAPACITY).0,
             models: RwLock::new(std::collections::HashMap::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             reload: Arc::new(tokio::sync::Notify::new()),
@@ -657,9 +666,7 @@ impl AppState {
     /// for again (`update.downloadState`), so a missed frame costs a stale
     /// screen until the next one, never a lost fact.
     pub fn push(&self, frame: ServerFrame) {
-        if let Some(fanout) = self.fanout.get() {
-            let _ = fanout.send(frame);
-        }
+        let _ = self.machine_events.send(frame);
     }
 }
 
