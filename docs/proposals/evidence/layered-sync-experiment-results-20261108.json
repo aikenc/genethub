@@ -1,0 +1,238 @@
+{
+  "schema": "genehub.sync-experiment-evidence.v1",
+  "runId": "261108-1348-layered-sync-final-3a01",
+  "status": "passed",
+  "open": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub",
+    "sha": "a301ce11a496a93f090c6b9b5e401e719eee93cb",
+    "branch": "fix/daemon-resource-pressure-20261107",
+    "dirty": true,
+    "dirtyDigest": "413d3746f75b871a18ce977d7edf0c958b37082288e2e6a71f151ccd8fbf9256"
+  },
+  "cloud": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub-cloud",
+    "sha": "e7dd53ea04bbddefcb6bf4622cc206b3312c7efc",
+    "branch": "fix/daemon-resource-pressure-20261107",
+    "dirty": false,
+    "dirtyDigest": "51355576c78ee82a6859402c9b73c75d895473523a18a3d92d1d5097ac0a0a19"
+  },
+  "artifact": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub/target/iterate/genet-local",
+    "hash": "5b7b9cc1d97068e3ab9f1b89a7dc0b8af33078c5c7f0684edd03bbd4b05c0d76",
+    "kind": "genet-local"
+  },
+  "artifactBundleHash": "e29467f44e191db54d52b01c58bb56dd34325825d17bc55e46c5b3c1ceec9394",
+  "inputDrift": false,
+  "inputObservation": {
+    "changed": false,
+    "complete": true,
+    "errors": [],
+    "changedPaths": []
+  },
+  "qualification": {
+    "gate": "dev-feedback",
+    "scope": "feedback",
+    "policyVersion": "gates.v3",
+    "qualified": true,
+    "reasons": []
+  },
+  "counts": {
+    "passed": 11,
+    "failed": 0,
+    "blocked": 0,
+    "unstable": 0,
+    "interrupted": 0,
+    "not-applicable": 0,
+    "total": 11
+  },
+  "governanceDigest": "858b019bf276806b7903cd7029fd40560c790116f1bc9a4632edca8ca41550bd",
+  "results": [
+    {
+      "caseId": "specialty.daemon.activity-pages.complete-and-recovery",
+      "status": "passed",
+      "durationMs": 34346,
+      "message": "{\"label\":\"1000 metadata refresh\",\"activity\":130,\"elapsedMs\":9}\n{\"label\":\"10000 metadata refresh\",\"activity\":130,\"elapsedMs\":2188}\n{\"label\":\"10000 metadata hot\",\"activity\":130,\"elapsedMs\":88}\n{\"label\":\"archived obligations retained\",\"activity\":130,\"elapsedMs\":89}\n{\"label\":\"10000 metadata cold recovery\",\"activity\":130,\"elapsedMs\":3356}\n130 older sessions, complete multi-page activity, 1k/10k warm and 10k cold metadata, concurrent cursor rejection, archived obligations, deletion and clock-independent staleness",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.daemon.catalog-sync.conditional-and-restart",
+      "status": "passed",
+      "durationMs": 5411,
+      "message": "{\"activities\":13,\"onlineChangedRows\":1,\"quietRepairRows\":0,\"closedChangedRows\":1,\"removed\":1,\"coldChangedRows\":0}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-cache",
+      "status": "passed",
+      "durationMs": 497,
+      "message": "{\"restartReuse\":0,\"repairNodes\":35,\"bodyReads\":1,\"sourceIsolation\":\"wrongAuthority\"}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-canonical",
+      "status": "passed",
+      "durationMs": 146,
+      "message": "Independent literal-byte SHA oracle passed; profile is deliberately narrower than RFC8785 and is not a Rust/browser interoperability result.",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-scale",
+      "status": "passed",
+      "durationMs": 2159,
+      "message": "{\"count\":1000,\"bodyFixtureBytes\":4096000,\"coldMs\":95,\"cold\":{\"sourceReads\":1000,\"sourceBytes\":216890,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":1,\"hashes\":1267,\"hashBytes\":327971,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":0,\"residentNodes\":1267,\"pins\":0},\"initial\":{\"state\":\"ready\",\"applied\":true,\"hash\":\"0e314023ba41ba56a9caf2aab565ed7d8f34deb4d9f7b2391e252b26ec232606\",\"latestHash\":\"0e314023ba41ba56a9caf2aab565ed7d8f34deb4d9f7b2391e252b26ec232606\",\"receivedNodes\":1267,\"requestBytes\":86929,\"responseBytes\":436327,\"requests\":26},\"warm\":{\"requestBytes\":27,\"responseBytes\":211,\"requests\":1,\"sourceReads\":0,\"sourceBytes\":0,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":0,\"hashes\":0,\"hashBytes\":0,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":0,\"residentNodes\":1267,\"pins\":0},\"change\":{\"sourceReads\":0,\"sourceBytes\":0,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":0,\"hashes\":4,\"hashBytes\":3029,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":1,\"residentNodes\":1267,\"pins\":0},\"delta\":{\"state\":\"ready\",\"applied\":true,\"hash\":\"22168b914e6ff4095f5511889f4cc8bf1c481ca12234201a927cdda1f4291cbf\",\"latestHash\":\"22168b914e6ff4095f5511889f4cc8bf1c481ca12234201a927cdda1f4291cbf\",\"receivedNodes\":4,\"requestBytes\":767,\"responseBytes\":4310,\"requests\":8},\"flatKnownHintBytes\":92001}\n{\"count\":10000,\"bodyFixtureBytes\":40960000,\"coldMs\":824,\"cold\":{\"sourceReads\":10000,\"sourceBytes\":2178890,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":1,\"hashes\":10273,\"hashBytes\":3019649,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":0,\"residentNodes\":10273,\"pins\":0},\"initial\":{\"state\":\"ready\",\"applied\":true,\"hash\":\"a1484409891b791433de99e3943b660220bf5ae8496948666a88e0201f0b70cd\",\"latestHash\":\"a1484409891b791433de99e3943b660220bf5ae8496948666a88e0201f0b70cd\",\"receivedNodes\":10273,\"requestBytes\":711431,\"responseBytes\":3892508,\"requests\":170},\"warm\":{\"requestBytes\":28,\"responseBytes\":212,\"requests\":1,\"sourceReads\":0,\"sourceBytes\":0,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":0,\"hashes\":0,\"hashBytes\":0,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":0,\"residentNodes\":10273,\"pins\":0},\"change\":{\"sourceReads\":0,\"sourceBytes\":0,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":0,\"hashes\":4,\"hashBytes\":6305,\"nodeRequests\":0,\"nodeBytes\":0,\"physicalCommits\":1,\"residentNodes\":10273,\"pins\":0},\"delta\":{\"state\":\"ready\",\"applied\":true,\"hash\":\"632b760609b47cb0d6d3a348418d787582ee1c43755762a4644607edbd85ab1e\",\"latestHash\":\"632b760609b47cb0d6d3a348418d787582ee1c43755762a4644607edbd85ab1e\",\"receivedNodes\":4,\"requestBytes\":775,\"responseBytes\":7594,\"requests\":8},\"flatKnownHintBytes\":920001}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-crash",
+      "status": "passed",
+      "durationMs": 788,
+      "message": "{\"stage\":\"beforeRename\",\"signal\":\"SIGKILL\",\"retryDuplicate\":false,\"finalRevision\":\"1\"}\n{\"stage\":\"afterRename\",\"signal\":\"SIGKILL\",\"retryDuplicate\":true,\"finalRevision\":\"1\"}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-events",
+      "status": "passed",
+      "durationMs": 288,
+      "message": "{\"committed\":42,\"retainedReceipts\":32,\"oldRetry\":\"explicit revisionConflict after receipt expiry\"}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-external",
+      "status": "passed",
+      "durationMs": 363,
+      "message": "{\"partialWasUnknown\":true,\"finalCount\":8,\"reconciliation\":{\"sourceReads\":26,\"sourceBytes\":5420,\"bodyReads\":0,\"bodyBytes\":0,\"sourceScans\":3,\"hashes\":77,\"hashBytes\":13496,\"nodeRequests\":9,\"nodeBytes\":3604,\"physicalCommits\":0,\"residentNodes\":24,\"pins\":0},\"discovery\":\"explicit full scan; watcher not implemented\"}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-freshness",
+      "status": "passed",
+      "durationMs": 187,
+      "message": "Real command-boundary interleaving preserved a coherent old snapshot, marked it stale, then recovered the final quiet change.",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-model",
+      "status": "passed",
+      "durationMs": 462,
+      "message": "{\"changes\":120,\"finalMembers\":54,\"replayLog\":false,\"finalQuietRepair\":true}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-snapshots",
+      "status": "passed",
+      "durationMs": 372,
+      "message": "{\"pinnedRows\":100,\"pinLimit\":8,\"updates\":80,\"beforeNodes\":194,\"afterNodes\":194}",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    }
+  ]
+}

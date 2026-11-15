@@ -1,0 +1,1556 @@
+{
+  "schema": "genethub.proposal-migration.v1",
+  "date": "2026-11-15",
+  "sourceDirectory": "spaces/dev-3/docs",
+  "openMainBaseline": "24eb228d6230ab08a3321c215838489efff21dfe",
+  "cloudMainBaseline": "1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e",
+  "files": [
+    {
+      "source": "spaces/dev-3/docs/agent-authority-simplification-handoff-20261029.md",
+      "destination": "docs/proposals/agent-authority-simplification-handoff-20261029.md",
+      "originalSha256": "ec1a3e2133922a0f5ddb18c9524fcf41e1c8e18f172e0237272b44aeb47ffd17",
+      "migratedSha256": "5131560cd406c0d7753362ae14a314105f33c60611276353fdd3e35d72ab058e",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/agent-authority-simplification-proposal-20261029.md",
+      "destination": "docs/proposals/agent-authority-simplification-proposal-20261029.md",
+      "originalSha256": "299a276fb0594b8c2715fda4a678455efa09a6bc308de22bef970fce1d4cb0fa",
+      "migratedSha256": "c0665fb077e2b5cbb9dc93f3f61ce7083d210d73154afae1c3a3fb0177134fca",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/connection-stability-proposal-20261024.md",
+      "destination": "docs/proposals/connection-stability-proposal-20261024.md",
+      "originalSha256": "adba894680a84a0bbd9045d99c1a773eec6a017d9ed8507f41d2eb9887b0baee",
+      "migratedSha256": "d60947be08a57eeece8e229c0a2b9ffeeb126e4ceb8fe95bd2e91dce71e66a8e",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/connection-stability-fb-pKg_dCycuz7Q-20261024.json",
+      "destination": "docs/proposals/evidence/connection-stability-fb-pKg_dCycuz7Q-20261024.json",
+      "originalSha256": "7b046e6f74718aa65c603f575ae4e9639d21c1184bef111faec0a5bb41105c2b",
+      "migratedSha256": "7b046e6f74718aa65c603f575ae4e9639d21c1184bef111faec0a5bb41105c2b",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-experiment-results-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-experiment-results-20261108.json",
+      "originalSha256": "087c13d362f49840603395523e22f744f5569a2060117ea528462fb4617c475a",
+      "migratedSha256": "087c13d362f49840603395523e22f744f5569a2060117ea528462fb4617c475a",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-host-results-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-host-results-20261108.json",
+      "originalSha256": "fe1ddf76795f4ffa73d2df820cb297a014741a011330e62d327a36f75c9c2ac0",
+      "migratedSha256": "fe1ddf76795f4ffa73d2df820cb297a014741a011330e62d327a36f75c9c2ac0",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-interface-inventory-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-interface-inventory-20261108.json",
+      "originalSha256": "64b1fb61015272f6e71dcbcefc0dbc8812f4e294c1514ad1951d2ca33f5f2b07",
+      "migratedSha256": "64b1fb61015272f6e71dcbcefc0dbc8812f4e294c1514ad1951d2ca33f5f2b07",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-object-boundary-review-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-object-boundary-review-20261108.json",
+      "originalSha256": "f32e6eabb90e844739ad21ba8fd7321f9ae6a2d24f2ce18a8de3d669ef041aa5",
+      "migratedSha256": "f32e6eabb90e844739ad21ba8fd7321f9ae6a2d24f2ce18a8de3d669ef041aa5",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-units-cli-review-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-units-cli-review-20261108.json",
+      "originalSha256": "47ba1057f6d007fdfc6a61ecfcc04542b873c8364d4148bddf7596e6e6046902",
+      "migratedSha256": "47ba1057f6d007fdfc6a61ecfcc04542b873c8364d4148bddf7596e6e6046902",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-worker-failed-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-worker-failed-20261108.json",
+      "originalSha256": "0f5f15c699af11e15eca42d5f1fd1f61e1620664cdda5b2a7da74a1f16092c63",
+      "migratedSha256": "0f5f15c699af11e15eca42d5f1fd1f61e1620664cdda5b2a7da74a1f16092c63",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/layered-sync-worker-results-20261108.json",
+      "destination": "docs/proposals/evidence/layered-sync-worker-results-20261108.json",
+      "originalSha256": "5733d512ad0bb37ff33a2f6fd4f4581e1bbfe3893c637b7013218df7f8f90a08",
+      "migratedSha256": "5733d512ad0bb37ff33a2f6fd4f4581e1bbfe3893c637b7013218df7f8f90a08",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/evidence/team-reliability-20261026.json",
+      "destination": "docs/proposals/evidence/team-reliability-20261026.json",
+      "originalSha256": "7ec103b247ae08112f1a1c091383cf221bce7d9fdd9e3a9cc6c18698e07fe3b8",
+      "migratedSha256": "7ec103b247ae08112f1a1c091383cf221bce7d9fdd9e3a9cc6c18698e07fe3b8",
+      "evidenceUnchanged": true
+    },
+    {
+      "source": "spaces/dev-3/docs/full-agent-simplification-closeout-20261030.md",
+      "destination": "docs/proposals/full-agent-simplification-closeout-20261030.md",
+      "originalSha256": "3b27dd5126e50d9be69589880e2166a06a9d20b11a5901afc58e2ff0b04a02ba",
+      "migratedSha256": "30b9dff56957c5e6dddab492fa48ec9540d4fbc97e421a01412df78289807134",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/full-agent-simplification-final-validation-20261030.md",
+      "destination": "docs/proposals/full-agent-simplification-final-validation-20261030.md",
+      "originalSha256": "93ffcf34986a4aa525c4beb5a9fd27eabd3d00f09082327c603b05a3c291cf8a",
+      "migratedSha256": "8f9be4ae1507245007ce1f2fb36f92a9d380b7796d91354cff0d00a6991d143c",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/full-agent-simplification-progress-20261030.md",
+      "destination": "docs/proposals/full-agent-simplification-progress-20261030.md",
+      "originalSha256": "ed1470123d47a827aca998c342dae3409461c05fabaa65b846341deb21e3946e",
+      "migratedSha256": "65910719f4e073bf565bf4f4493b52cd326382ffa6365a8731503823e5dbf381",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/layered-file-hash-sync-proposal-20261108.md",
+      "destination": "docs/proposals/layered-file-hash-sync-proposal-20261108.md",
+      "originalSha256": "b599b66919db096705d60a5e9784e6cebdeaa4c8ef6a8161e8869ebe74fdfe6e",
+      "migratedSha256": "0467f1031918bc3c625bb24979df4abc54fefd401a587d74ad9c57e78c196bdc",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/layered-file-hash-sync-proposal-v2-20261108.md",
+      "destination": "docs/proposals/layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalSha256": "d9d72aac1cb94f812d73b990db104e8ee774f9fdb35b09ae12ee8d2ca192c1f6",
+      "migratedSha256": "55e2511ac8932a9f447d00a40f85563a34b70016283322db473eea9d077520a7",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/layered-sync-interface-audit-20261108.md",
+      "destination": "docs/proposals/layered-sync-interface-audit-20261108.md",
+      "originalSha256": "eb5d998f18d0c932226214ec176be1c85a40deb789dec63f93c747386652cf1f",
+      "migratedSha256": "d7b0f906474dcba42f87c7579299248abb9f201a5317cea8ed938ed1ba242709",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/next-simplification-feasibility-20261029.md",
+      "destination": "docs/proposals/next-simplification-feasibility-20261029.md",
+      "originalSha256": "b6d7b7a26612530b61bd7d925b74b183e117c14a43c8045e9927d1059496d844",
+      "migratedSha256": "2a9465dac6b666ce4ae3eb3200578cae1dd598fbad0369ac819424b33a449968",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/platform-audit-findings-20261029.md",
+      "destination": "docs/proposals/platform-audit-findings-20261029.md",
+      "originalSha256": "1c75eb115aca65c86a686b3af8dd7e53f7bce608163a6410a940ca403c3d8f0e",
+      "migratedSha256": "7b8195fecac412884b8ab0d5505feeb6cc24161fa1f0b704b95538c6fc9db1e3",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/platform-simplification-proposal-20261028-v2.md",
+      "destination": "docs/proposals/platform-simplification-proposal-20261028-v2.md",
+      "originalSha256": "d6a51f1b7c689fbd11381c2b9d0f34dc0884505cb6023807bf8a053dbace4e9e",
+      "migratedSha256": "95dcf2513a88a08e130ac86da3cf582b6e5a194c0a307788545b62759d75a48a",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/platform-simplification-proposal-20261028-v3.md",
+      "destination": "docs/proposals/platform-simplification-proposal-20261028-v3.md",
+      "originalSha256": "87e5ed1829644d4cb1f2375a4d7e269edeafebb7fd75fc5718ffedb97b0d1c3d",
+      "migratedSha256": "d744e1df3e4c90001551393ef6404a5bcc2879b9bde53bf66c09a83c2fcceab7",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/platform-simplification-proposal-20261028.md",
+      "destination": "docs/proposals/platform-simplification-proposal-20261028.md",
+      "originalSha256": "1b3a60db5cb9bfe1c0f8f3a23442fd62dadfae1ed2e4895a02e9823f45fa0a62",
+      "migratedSha256": "46a5b1adbf294287e3e9abc1c39da9597d16da9813bc5bb2cb3256dd21ca102a",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/stage-closeout-20261029.md",
+      "destination": "docs/proposals/stage-closeout-20261029.md",
+      "originalSha256": "300d7ed343b30337e66561cb924d996e0faa6482ce3b8c2a09a62afc7bfb85a9",
+      "migratedSha256": "e13354b845a48bfb8484c10eee57909ca85a69aaa34bd6761f3c1bad0009f4b2",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/sync-core-v6-20261108.md",
+      "destination": "docs/proposals/sync-core-v6-20261108.md",
+      "originalSha256": "bf76fe36526c47925bf97677cc5efc7f492bb13c6dab03e2b7d0795b7764159f",
+      "migratedSha256": "5a0a3b9862aad4071d4111e8fdcaaa08a7f096b364245bd2c16886684526f8ed",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/sync-kernel-v7-20261108.md",
+      "destination": "docs/proposals/sync-kernel-v7-20261108.md",
+      "originalSha256": "18ca4ff279271ecc37610c783fd624a22f959ea6c20c69eb6edcf17b51467afd",
+      "migratedSha256": "9f7d320bb3613f2d6460edc29be551419a5620b9218214ed2f08972823dd1f68",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/team-reliability-improvement-proposal-20261026.md",
+      "destination": "docs/proposals/team-reliability-improvement-proposal-20261026.md",
+      "originalSha256": "6ffbcba45e25bedc12e2410416a1728a82581cf5613564bd768a5adafca1011d",
+      "migratedSha256": "9d10b00590f8c950242c21271494cd63e63da847d7f7a8caae92bdc50f6cf730",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/unified-node-sync-system-v5-20261108.md",
+      "destination": "docs/proposals/unified-node-sync-system-v5-20261108.md",
+      "originalSha256": "c481cdde646110fe546965fdbe1b1f96865b4aa5193202c94b095b73a7763527",
+      "migratedSha256": "aee7c22069c23b5a0fa1980d0403587937df28d7225785b53ff43182afe46adb",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/unified-state-sync-architecture-v3-20261108.md",
+      "destination": "docs/proposals/unified-state-sync-architecture-v3-20261108.md",
+      "originalSha256": "edd068a225b6cfd7d771d5c5f0590b98a9420d8adacfa16cc902a2a15808150b",
+      "migratedSha256": "a759c3f5b65c9d12153cea986a4fbd8c37c9a44ed015b20426933f896c3e816e",
+      "evidenceUnchanged": false
+    },
+    {
+      "source": "spaces/dev-3/docs/unified-state-sync-architecture-v4-20261108.md",
+      "destination": "docs/proposals/unified-state-sync-architecture-v4-20261108.md",
+      "originalSha256": "ffe65f61bbf404ea914284cd3486a19646f111102333b01297b3e458c62b4e92",
+      "migratedSha256": "a1a032baf7f2f4fb3f6a586b48436dbefdd3bd8c5b2974b5deb3032882c522be",
+      "evidenceUnchanged": false
+    }
+  ],
+  "referencePolicy": "同仓文件使用相对路径；Cloud 使用已验证提交固定链接；不属于本次30文件的工作区资料保留原位置与摘要但不伪造仓库链接；缺失历史原型明确标记。JSON证据保持原字节，其内部路径、时间和SHA均为历史数据。",
+  "references": [
+    {
+      "document": "agent-authority-simplification-handoff-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/docs/security-model.md#full-agent-authority",
+      "kind": "repository-relative",
+      "target": "../../docs/security-model.md#full-agent-authority",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-handoff-20261029.md",
+      "originalTarget": "../../../skills/common/genethub-agent-workflow/references/product-authority.md",
+      "kind": "workspace-only-reference",
+      "source": "skills/common/genethub-agent-workflow/references/product-authority.md",
+      "availableAtMigration": true,
+      "sha256": "99b3c56894fc3d4069a9acd45b6f080d1c1a1d38e6ef515f9405b71517ea5cd5",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/authz.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/authz.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/transport/local.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/transport/local.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/router.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/router.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/dataplane/endpoint.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/dataplane/endpoint.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/dataplane/exec.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/dataplane/exec.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/dataplane/file_read.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/dataplane/file_read.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/isolation.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/isolation.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/store.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/store.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/peer-admission.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/peer-admission.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/dataplane/logical_registry.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/dataplane/logical_registry.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/dataplane/handshake.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/dataplane/handshake.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/manager.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/manager.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/app/WorkbenchApp.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/app/WorkbenchApp.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/adapter/genet.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/adapter/genet.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/domain.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/domain.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/config.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/config.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/rpc.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/project.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/project.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/settings/ProviderConfigurationCard.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/settings/ProviderConfigurationCard.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/docs/testing/engineering-principles.md",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/docs/testing/engineering-principles.md",
+      "occurrences": 1
+    },
+    {
+      "document": "agent-authority-simplification-proposal-20261029.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/docs/testing/engineering-laws.md",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/docs/testing/engineering-laws.md",
+      "occurrences": 1
+    },
+    {
+      "document": "connection-stability-proposal-20261024.md",
+      "originalTarget": "../../dev-2/docs/connection-stability-proposal-20261024.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-2/docs/connection-stability-proposal-20261024.md",
+      "availableAtMigration": true,
+      "sha256": "11b5e907050be3b3cf16247e9daf28e34d710a07d5cf8f941e8e8d4b898f935e",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-remote-observation-003.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-remote-observation-003.json",
+      "availableAtMigration": true,
+      "sha256": "199611308503c89a8e46e1b1d6cd7793a80ceb86f956ea84728e1a38b22551f0",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-commit-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-commit-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "32a5b4281291923f8fbd72a36f1ee557234585493bf0012f48eec4e2be8c644c",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-guidance-commit.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-guidance-commit.json",
+      "availableAtMigration": true,
+      "sha256": "68fbfc698da91a6b434e63743cab848cb0f4bfde5e819f21d3910a1779febb20",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-commit.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-commit.json",
+      "availableAtMigration": true,
+      "sha256": "a68d02ecf02284dc1db83bc50e462a4d67e706489f1b1a67d5c3ed1b11fc7f53",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261030-2320-authority-main-sync-dev-feedback-4b5c/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261030-2320-authority-main-sync-dev-feedback-4b5c/summary.md",
+      "availableAtMigration": true,
+      "sha256": "37856a114db7f188c7f8f0a128b75c241bda3ba28b3aa3e52bd06c02de46daea",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261030-2346-authority-main-sync-dev-feedback-1fa5/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261030-2346-authority-main-sync-dev-feedback-1fa5/summary.md",
+      "availableAtMigration": true,
+      "sha256": "c8d4d853d41e3bf4b2351d9131c480fd0e467f89c04259d906bb565884271d66",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261031-0130-authority-main-sync-dev-feedback-d9e1/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261031-0130-authority-main-sync-dev-feedback-d9e1/summary.md",
+      "availableAtMigration": true,
+      "sha256": "2cb700e31a4118eccd6ac4284355fe58d65bb50bf13f997d1157782085479b79",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-ci-verified-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-ci-verified-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "4d81e0328be8458c07f73b81a69a6a60b69aaef0317f7ded15b36736ae8c20e7",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-capture-package-identity.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-capture-package-identity.json",
+      "availableAtMigration": true,
+      "sha256": "b2b188762633eb8ad9c509519365cc7907f42461c0599af2ff28c7e445097f2e",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-interrupted-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-interrupted-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "23d758a7a947468568d25067c42c98953779c8e5dc42264c170fd7bb1005da30",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261031-0121-authority-main-sync-dev-feedback-a1c2/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261031-0121-authority-main-sync-dev-feedback-a1c2/summary.md",
+      "availableAtMigration": true,
+      "sha256": "05745a2226fa2fc6a1f43446aebf78d386702cb53cc5fb99b93625ada74f8e3f",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-tail-selection.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-tail-selection.json",
+      "availableAtMigration": true,
+      "sha256": "1daf2a8f56ddeb9b5dc1abe7aaaaf446e7b3d751f0151c93a7e85cce726bf920",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-tail-status.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-tail-status.json",
+      "availableAtMigration": true,
+      "sha256": "1398b6da0c3517b42cac3f14a8d92ffdcdb65758ad37533011547364e31648de",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-artifact-inventory-start.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-artifact-inventory-start.json",
+      "availableAtMigration": true,
+      "sha256": "95fe252bee1e81383e01b9e5d535a9d8650df9291780d865e31ae50635275681",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-interrupted-artifact-inventory-end.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-interrupted-artifact-inventory-end.json",
+      "availableAtMigration": true,
+      "sha256": "95fe252bee1e81383e01b9e5d535a9d8650df9291780d865e31ae50635275681",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-auto100-comparison-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-auto100-comparison-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "a5bef512212fa90d325529863241f5ff8212911c26abdbead1561ea1e7999270",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-main-sync-coverage-with-open-failure-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-main-sync-coverage-with-open-failure-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "5fc2a8879071b8ed2edde4a3cb6a2f206f9d3aaca9014430dffb2125dc95c53b",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-v2-upstream-qualified-observation.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-v2-upstream-qualified-observation.json",
+      "availableAtMigration": true,
+      "sha256": "6e3da5682f51907e29b83e35cb123f0af2860b094ed3f242990d0ca5390733e9",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261031-0825-authority-v2-management-96cb/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261031-0825-authority-v2-management-96cb/summary.md",
+      "availableAtMigration": true,
+      "sha256": "9e99f3d94cd86f8c7e4f69b73fa42c256dbc2b136ba49089bce76ef635bbccf6",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-v2-management-observation.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-v2-management-observation.json",
+      "availableAtMigration": true,
+      "sha256": "44e30903c57b0f230f99a55c4dc59f29a38e603b05d0fe411f3b091ff2b437ce",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../runs/261031-0849-authority-rtc-final-ac39/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261031-0849-authority-rtc-final-ac39/summary.md",
+      "availableAtMigration": true,
+      "sha256": "453878af73a4a023d3f3ccac6727c9597bfb0cc93053240e5a34be472bcd1602",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-rtc-final-artifact-inventory-end.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-rtc-final-artifact-inventory-end.json",
+      "availableAtMigration": true,
+      "sha256": "1b459e13fc3d8bbcd778dcc67206c1183b7a519033cfbf42a79df3ef47923836",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-final-candidate-evidence.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-final-candidate-evidence.json",
+      "availableAtMigration": true,
+      "sha256": "a2254ab6ea4baac8ea244ccded3880334938dbb7db8741dceb77db8b271259e4",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-closeout-20261030.md",
+      "originalTarget": "../closeout-final-completed.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/closeout-final-completed.json",
+      "availableAtMigration": true,
+      "sha256": "5b56dfb8ee4b62f7ef22feb2651b8b97e1842422534390163710a4c159691422",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../runs/261030-1343-full-agent-reserved-merge-6644/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261030-1343-full-agent-reserved-merge-6644/summary.md",
+      "availableAtMigration": true,
+      "sha256": "8ed56db64a57fc0137fe8e2844cb864b017b970daede486da8cf822ce8df91d0",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../runs/261030-1343-full-agent-reserved-merge-6644/manifest.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261030-1343-full-agent-reserved-merge-6644/manifest.json",
+      "availableAtMigration": true,
+      "sha256": "500d45c85c2017fb765c9d5d8699a7bc0e3d91dd3980cfa80d13b402286e358b",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-qualified-candidate-receipt.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-qualified-candidate-receipt.json",
+      "availableAtMigration": true,
+      "sha256": "58163d772669d61507d56b8ae1597e46ae2430234e1883f7811f86228c3a657d",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-artifact-inventory-end.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-artifact-inventory-end.json",
+      "availableAtMigration": true,
+      "sha256": "5b107022c093ff0c2b36b4718fda48bd40bdfa8e8f377f7bd51d59885fe8cc1d",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/testing/deprecated/archive/concurrency-reconstruction-20261030/summary.md",
+      "kind": "repository-relative",
+      "target": "../../testing/deprecated/archive/concurrency-reconstruction-20261030/summary.md",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/testing/deprecated/archive/cli-reconstruction-20261030/takeover.json",
+      "kind": "repository-relative",
+      "target": "../../testing/deprecated/archive/cli-reconstruction-20261030/takeover.json",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-main-compatibility.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-main-compatibility.json",
+      "availableAtMigration": true,
+      "sha256": "b47df3a0a69c0d797f991958266fee86a11bda23473751a2e8dddb220a37fe47",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-pr-merge-readiness.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-pr-merge-readiness.json",
+      "availableAtMigration": true,
+      "sha256": "23cd313d76f8c55021a2b2c16e831ba7653e3d6f8230464a567b2b32866ffc0a",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-pr-ready-bodies-verified.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-pr-ready-bodies-verified.json",
+      "availableAtMigration": true,
+      "sha256": "75991d13d3b0a719d742a65cab1c3dd654ecde7d57b1adec5f950ba37f931d82",
+      "occurrences": 1
+    },
+    {
+      "document": "full-agent-simplification-final-validation-20261030.md",
+      "originalTarget": "../final-workflow-completed.json",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/final-workflow-completed.json",
+      "availableAtMigration": true,
+      "sha256": "92ce2cbb4f6896a02c91928c426f105cb19d65657e95dd6a4483e1ec6f50b203",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/host/src/load.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/host/src/load.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/blocking.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/blocking.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/host/src/process.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/host/src/process.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/run.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/run.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/store.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/store.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/prototypes/layered-file-hash-sync/prototype.mjs",
+      "kind": "unavailable-historical-file",
+      "source": "genethub/prototypes/layered-file-hash-sync/prototype.mjs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory-cache.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory-cache.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/catalog.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/catalog.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/rpc.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/prototypes/layered-file-hash-sync/README.md",
+      "kind": "unavailable-historical-file",
+      "source": "genethub/prototypes/layered-file-hash-sync/README.md",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/testing/specialties/contracts/layered-file-hash-sync.specialty.ts",
+      "kind": "unavailable-historical-file",
+      "source": "genethub/testing/specialties/contracts/layered-file-hash-sync.specialty.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1348-layered-sync-final-3a01/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1348-layered-sync-final-3a01/summary.md",
+      "availableAtMigration": true,
+      "sha256": "b15127ab62804eb7b6b4d9f7f31f3ce7fce8d83f4c79cc3ebf0fc9d6220de66d",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1333-layered-sync-experiment-0bfb/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1333-layered-sync-experiment-0bfb/summary.md",
+      "availableAtMigration": true,
+      "sha256": "b1412940afe8ac6dba8f355d3afd222568213725994c91f1c94f9b926b433e3e",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1338-layered-sync-product-baseline-f530/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1338-layered-sync-product-baseline-f530/summary.md",
+      "availableAtMigration": true,
+      "sha256": "87b1d24fcf4518af87c801a750fc2a9ddfbc726078be8204f8fc0b04930d2051",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1345-layered-sync-freshness-39d5/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1345-layered-sync-freshness-39d5/summary.md",
+      "availableAtMigration": true,
+      "sha256": "5bebd19b763302622f62495394f9289e8af52906f484956a3a782b96942ab696",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1513-layered-sync-worker-final-0b3e/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1513-layered-sync-worker-final-0b3e/summary.md",
+      "availableAtMigration": true,
+      "sha256": "8b0688c9cd0ba403041a0bed78ab02248ed7f9a6588d5122b4f5c7a5993bcf49",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1512-layered-sync-worker-preflight-880a/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1512-layered-sync-worker-preflight-880a/summary.md",
+      "availableAtMigration": true,
+      "sha256": "155175ef7051d9db5f2a6ae0f20f9b2ac1c4183bb0c4918d7b92e09449d8a014",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/prototypes/layered-file-hash-sync/workers.mjs",
+      "kind": "unavailable-historical-file",
+      "source": "genethub/prototypes/layered-file-hash-sync/workers.mjs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/testing/specialties/contracts/layered-sync-preflight.specialty.ts",
+      "kind": "unavailable-historical-file",
+      "source": "genethub/testing/specialties/contracts/layered-sync-preflight.specialty.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-20261108.md",
+      "originalTarget": "../runs/261108-1517-layered-sync-host-baseline-0d0c/summary.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-3/runs/261108-1517-layered-sync-host-baseline-0d0c/summary.md",
+      "availableAtMigration": true,
+      "sha256": "51a54eb3d2c0b82daed5bc546b1b80f8060ee9255d1c0d4879ebc5c514e7be70",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/catalog.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/catalog.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/store.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/store.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/manager.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/manager.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory-cache.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory-cache.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/session/store.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/session/store.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-file-hash-sync-proposal-v2-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/client.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/client.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/rpc.rs",
+      "occurrences": 128
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/authz.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/authz.rs",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/query.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/query.rs",
+      "occurrences": 18
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/preview/fileFeedback.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/preview/fileFeedback.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/router.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/router.rs",
+      "occurrences": 124
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/client.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/client.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/client-debug/index.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/client-debug/index.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/rpc.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/client.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/client.ts",
+      "occurrences": 14
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/converse.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/converse.rs",
+      "occurrences": 22
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/builtin-skills/genehub-preview/assets/unreal/signalling.py",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/builtin-skills/genehub-preview/assets/unreal/signalling.py",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/app/WorkbenchApp.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/app/WorkbenchApp.tsx",
+      "occurrences": 5
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/session/store.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/session/store.ts",
+      "occurrences": 53
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/lib.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/lib.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/space.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/space.rs",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/session-pages.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/session-pages.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/preview/PreviewAnnotation.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/preview/PreviewAnnotation.tsx",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/session/ForwardDialog.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/session/ForwardDialog.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/builtin-agents/sdk/genehub_agent/serve.py",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/builtin-agents/sdk/genehub_agent/serve.py",
+      "occurrences": 9
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/preview/sessionArtifactUpload.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/preview/sessionArtifactUpload.ts",
+      "occurrences": 4
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/app/ConversationList.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/app/ConversationList.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/settings/ProviderConfigurationCard.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/settings/ProviderConfigurationCard.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/provider.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/provider.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/speech.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/speech.rs",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/speech/useSpeechInput.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/speech/useSpeechInput.ts",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/desktop.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/desktop.rs",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/preview/PreviewFloat.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/preview/PreviewFloat.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/machine.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/machine.rs",
+      "occurrences": 4
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/host/index.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/host/index.ts",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/hub.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/hub.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/rpc_wire.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/rpc_wire.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/devices/claim.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/devices/claim.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/workspace/AgentDetails.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/workspace/AgentDetails.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/app/MachineDirectoryLists.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/app/MachineDirectoryLists.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/workspace/OpenProject.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/workspace/OpenProject.tsx",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/settings/FileAccessSettings.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/settings/FileAccessSettings.tsx",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/files/FilesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/files/FilesPanel.tsx",
+      "occurrences": 5
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/changes/ChangesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/changes/ChangesPanel.tsx",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/terminal/TerminalPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/terminal/TerminalPanel.tsx",
+      "occurrences": 4
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/process.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/process.rs",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/processes/ProcessesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/processes/ProcessesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/client_debug.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/client_debug.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/provider_control.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/provider_control.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/preview_feedback.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/preview_feedback.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/app-api.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/app-api.ts",
+      "occurrences": 14
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/auth.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/auth.ts",
+      "occurrences": 8
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/console.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/console.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/downloads.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/downloads.ts",
+      "occurrences": 4
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/enrollment.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/enrollment.ts",
+      "occurrences": 10
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/pages.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/pages.ts",
+      "occurrences": 5
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/peer-admission.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/peer-admission.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/rtc.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/rtc.ts",
+      "occurrences": 2
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/workspace-catalog.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/workspace-catalog.ts",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/http/workspaces.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/http/workspaces.ts",
+      "occurrences": 3
+    },
+    {
+      "document": "layered-sync-interface-audit-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/main.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/main.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "platform-simplification-proposal-20261028.md",
+      "originalTarget": "../../dev-2/docs/network-transport-refactor-proposal-20261028.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-2/docs/network-transport-refactor-proposal-20261028.md",
+      "availableAtMigration": true,
+      "sha256": "18fd6b71013e489fbc531eb0af06adcebfbf37a98954d9fd4d53eac910aab26c",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-core-v6-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/docs/storage-layout.md",
+      "kind": "repository-relative",
+      "target": "../../docs/storage-layout.md",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/client.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/client.ts",
+      "occurrences": 3
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/rpc.rs",
+      "occurrences": 10
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/catalog.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/catalog.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory-cache.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory-cache.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/event.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/event.rs",
+      "occurrences": 2
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/app/WorkbenchApp.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/app/WorkbenchApp.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/changes/ChangesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/changes/ChangesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/files/FilesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/files/FilesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/session/store.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/session/store.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin/team.py",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin/team.py",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin/board.py",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin/board.py",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/preview_feedback.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/preview_feedback.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/domain.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/domain.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/speech.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/speech.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "sync-kernel-v7-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub-cloud/server/src/db.ts",
+      "kind": "pinned-cross-repository",
+      "target": "https://github.com/aikenc/genethub-cloud/blob/1f365d620a4b6cbe8ae9e972de46fb4d4e8a232e/server/src/db.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/docs/teams.md",
+      "kind": "repository-relative",
+      "target": "../../docs/teams.md",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/docs/machine-discovery-and-remote-team-proposal.md",
+      "kind": "repository-relative",
+      "target": "../../docs/machine-discovery-and-remote-team-proposal.md",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/cli_front/file.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/cli_front/file.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/transfer.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/transfer.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../dev-2/docs/team-scale-infrastructure-proposal-20261025.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/dev-2/docs/team-scale-infrastructure-proposal-20261025.md",
+      "availableAtMigration": true,
+      "sha256": "ae508d8e7c235e5b089b408bf5093fc9934068c569f1f418b27c07f0ded7824d",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../release-beta/docs/connection-recovery-and-diagnostics-proposal-20261025.md",
+      "kind": "workspace-only-reference",
+      "source": "spaces/release-beta/docs/connection-recovery-and-diagnostics-proposal-20261025.md",
+      "availableAtMigration": true,
+      "sha256": "1137c469b0b6c8021c1166718f875d6395a51e0a69be7fef2372c20fa675822d",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/inbox.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/inbox.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/manager.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/manager.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/adapter/mod.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/adapter/mod.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "team-reliability-improvement-proposal-20261026.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v3-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/catalog.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/catalog.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v3-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/rpc.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v3-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/files/FilesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/files/FilesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v3-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/changes/ChangesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/changes/ChangesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v3-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory-cache.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory-cache.ts",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v4-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/apps/daemon/src/session/catalog.rs",
+      "kind": "repository-relative",
+      "target": "../../apps/daemon/src/session/catalog.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v4-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/proto/src/rpc.rs",
+      "kind": "repository-relative",
+      "target": "../../packages/proto/src/rpc.rs",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v4-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/files/FilesPanel.tsx",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/files/FilesPanel.tsx",
+      "occurrences": 1
+    },
+    {
+      "document": "unified-state-sync-architecture-v4-20261108.md",
+      "originalTarget": "../../../worktrees/dev-3/genethub/packages/workbench/src/protocol/summary-directory-cache.ts",
+      "kind": "repository-relative",
+      "target": "../../packages/workbench/src/protocol/summary-directory-cache.ts",
+      "occurrences": 1
+    }
+  ]
+}

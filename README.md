@@ -6,7 +6,7 @@ GeneHub 是一个开源、local-first 的 coding agent 工作台。它把你的�
 在桌面前开始任务，离开后用浏览器或手机继续；换设备不换项目，不丢会话，也不必把工作区搬进某个云端沙箱。
 
 [快速开始](#快速开始) · [为什么做 GeneHub](#为什么做-genethub) · [项目理念](#愿景与理念) · [架构](#它如何工作) ·
-[本地开发](#本地开发) · [自建](./docs/self-hosting.md) · [安全模型](./docs/security-model.md)
+[本地开发](#本地开发) · [自建](./docs/self-hosting.md) · [安全模型](./docs/security-model.md) · [设计提案](./docs/proposals/README.md)
 
 > 发布平台：Windows x64 桌面端 · Linux x64 daemon/CLI · macOS 源码构建
 

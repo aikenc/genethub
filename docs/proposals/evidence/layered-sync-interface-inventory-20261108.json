@@ -1,0 +1,3781 @@
+{
+  "schema": "genehub.sync-source-inventory.v1",
+  "openSha": "a301ce11a496a93f090c6b9b5e401e719eee93cb",
+  "cloudSha": "e7dd53ea04bbddefcb6bf4622cc206b3312c7efc",
+  "operationCount": 127,
+  "families": {
+    "agent": 9,
+    "agentSpace": 3,
+    "blob": 2,
+    "caller": 1,
+    "catalog": 1,
+    "client": 1,
+    "connection": 1,
+    "device": 6,
+    "diagnostics": 1,
+    "directory": 2,
+    "file": 6,
+    "fileAccess": 2,
+    "git": 3,
+    "hub": 7,
+    "log": 1,
+    "preview": 1,
+    "process": 5,
+    "provider": 2,
+    "pty": 4,
+    "round": 3,
+    "session": 43,
+    "settings": 4,
+    "speech": 6,
+    "subscribe": 1,
+    "unsubscribe": 1,
+    "update": 5,
+    "workspace": 6
+  },
+  "operations": [
+    {
+      "wire": "preview.feedback",
+      "variant": "PreviewFeedback",
+      "definition": "packages/proto/src/rpc.rs:33",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/authz.rs:61",
+          "apps/daemon/src/dataplane/endpoint.rs:1196",
+          "apps/daemon/src/router.rs:423",
+          "apps/daemon/src/router.rs:432"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:688"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/fileFeedback.ts:7"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "client.debug",
+      "variant": "ClientDebug",
+      "definition": "packages/proto/src/rpc.rs:35",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:438"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/client.rs:19"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/client-debug/index.ts:62",
+          "packages/workbench/src/client-debug/index.ts:63",
+          "packages/workbench/src/client-debug/index.ts:197"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "connection.identity",
+      "variant": "ConnectionIdentity",
+      "definition": "packages/proto/src/rpc.rs:39",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/authz.rs:61",
+          "apps/daemon/src/router.rs:423",
+          "apps/daemon/src/router.rs:447"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/rpc.rs:127",
+          "apps/daemon/src/cli_front/rpc_wire.rs:207",
+          "apps/daemon/src/cli_front/rpc_wire.rs:294"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:1287",
+          "packages/workbench/src/protocol/client.ts:1887",
+          "packages/workbench/src/protocol/client.ts:1987",
+          "packages/workbench/src/protocol/fake-socket.ts:293"
+        ],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "subscribe",
+      "variant": "Subscribe",
+      "definition": "packages/proto/src/rpc.rs:43",
+      "fields": [
+        "session_id",
+        "since_seq",
+        "expand_last_round",
+        "recent_rounds"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:498"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1253"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:1001",
+          "packages/workbench/src/protocol/client.ts:1621",
+          "packages/workbench/src/protocol/client.ts:1683",
+          "packages/workbench/src/protocol/client.ts:1687",
+          "packages/workbench/src/protocol/client.ts:2383"
+        ],
+        "consumers": [
+          "apps/daemon/builtin-skills/genehub-preview/assets/unreal/signalling.py:154"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "unsubscribe",
+      "variant": "Unsubscribe",
+      "definition": "packages/proto/src/rpc.rs:58",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:526"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:1027",
+          "packages/workbench/src/protocol/client.ts:1683",
+          "packages/workbench/src/protocol/client.ts:1687",
+          "packages/workbench/src/protocol/client.ts:2384"
+        ],
+        "consumers": [
+          "apps/daemon/builtin-skills/genehub-preview/assets/unreal/signalling.py:164"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "catalog.sync",
+      "variant": "CatalogSync",
+      "definition": "packages/proto/src/rpc.rs:62",
+      "fields": [
+        "subscription_id",
+        "enabled",
+        "known_sessions",
+        "known_workspaces"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:487"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:890",
+          "packages/workbench/src/protocol/client.ts:924",
+          "packages/workbench/src/protocol/client.ts:1679",
+          "packages/workbench/src/protocol/client.ts:1680",
+          "packages/workbench/src/protocol/client.ts:1681"
+        ],
+        "consumers": [],
+        "cloud": [
+          "server/src/http/app-api.ts:899"
+        ]
+      }
+    },
+    {
+      "wire": "agent.list",
+      "variant": "AgentList",
+      "definition": "packages/proto/src/rpc.rs:73",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:533"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1112"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/app/WorkbenchApp.tsx:730",
+          "packages/workbench/src/session/store.ts:2936",
+          "packages/workbench/src/session/store.ts:3157"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.refresh",
+      "variant": "AgentRefresh",
+      "definition": "packages/proto/src/rpc.rs:77",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:537",
+          "apps/daemon/src/router.rs:2526"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2759",
+          "packages/workbench/src/session/store.ts:2805",
+          "packages/workbench/src/session/store.ts:2813"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:897"
+        ]
+      }
+    },
+    {
+      "wire": "agent.action",
+      "variant": "AgentAction",
+      "definition": "packages/proto/src/rpc.rs:81",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:541",
+          "apps/daemon/src/router.rs:2527"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:745"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2821"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.reload",
+      "variant": "AgentReload",
+      "definition": "packages/proto/src/rpc.rs:85",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:548",
+          "apps/daemon/src/router.rs:2528"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:757"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2904"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.reset",
+      "variant": "AgentReset",
+      "definition": "packages/proto/src/rpc.rs:88",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:560",
+          "apps/daemon/src/router.rs:2529"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:766"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2913"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.test",
+      "variant": "AgentTest",
+      "definition": "packages/proto/src/rpc.rs:91",
+      "fields": [
+        "agent_id",
+        "live"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:572",
+          "apps/daemon/src/router.rs:2530"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:774"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.logs",
+      "variant": "AgentLogs",
+      "definition": "packages/proto/src/rpc.rs:98",
+      "fields": [
+        "agent_id",
+        "lines"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:579"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:792"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2934"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.requests",
+      "variant": "AgentRequests",
+      "definition": "packages/proto/src/rpc.rs:107",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:590"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2850"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agent.requestAnswer",
+      "variant": "AgentRequestAnswer",
+      "definition": "packages/proto/src/rpc.rs:110",
+      "fields": [
+        "agent_id",
+        "request_id",
+        "outcome"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:597",
+          "apps/daemon/src/router.rs:2531"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2829"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.create",
+      "variant": "SessionCreate",
+      "definition": "packages/proto/src/rpc.rs:118",
+      "fields": [
+        "creation_id",
+        "workspace_id",
+        "agent_id",
+        "model_id",
+        "effort_id",
+        "fast",
+        "mode_id",
+        "runtime_values",
+        "title",
+        "cwd"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:611",
+          "apps/daemon/src/router.rs:2532"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1467"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2398"
+        ],
+        "consumers": [
+          "packages/proto/src/lib.rs:127",
+          "packages/workbench/src/app/WorkbenchApp.tsx:759",
+          "packages/workbench/src/session/store.ts:3461"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:929"
+        ]
+      }
+    },
+    {
+      "wire": "session.createRouted",
+      "variant": "SessionCreateRouted",
+      "definition": "packages/proto/src/rpc.rs:152",
+      "fields": [
+        "creation_id",
+        "workspace_id",
+        "tags",
+        "media_tags",
+        "title",
+        "cwd"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:686",
+          "apps/daemon/src/router.rs:2532"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1444"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": [
+          "server/src/http/app-api.ts:930"
+        ]
+      }
+    },
+    {
+      "wire": "agentSpace.configure",
+      "variant": "AgentSpaceConfigure",
+      "definition": "packages/proto/src/rpc.rs:174",
+      "fields": [
+        "workspace_id",
+        "expected_revision",
+        "operation",
+        "plan_digest",
+        "action_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2181",
+          "apps/daemon/src/router.rs:2574"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/space.rs:157"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1237"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agentSpace.changePlan",
+      "variant": "AgentSpaceChangePlan",
+      "definition": "packages/proto/src/rpc.rs:191",
+      "fields": [
+        "workspace_id",
+        "expected_revision",
+        "operation"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2160",
+          "apps/daemon/src/router.rs:2535"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/space.rs:139"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "agentSpace.children",
+      "variant": "AgentSpaceChildren",
+      "definition": "packages/proto/src/rpc.rs:203",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2201",
+          "apps/daemon/src/router.rs:2536"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/space.rs:97"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.list",
+      "variant": "SessionList",
+      "definition": "packages/proto/src/rpc.rs:205",
+      "fields": [
+        "workspace_id",
+        "include_archived",
+        "lean"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:758"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:852"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3686",
+          "packages/workbench/src/workspace/AgentDetails.tsx:23"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.page",
+      "variant": "SessionPage",
+      "definition": "packages/proto/src/rpc.rs:214",
+      "fields": [
+        "requests",
+        "include_archived"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:775"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:811"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/session-pages.ts:8"
+        ],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3302",
+          "packages/workbench/src/session/store.ts:3760"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.get",
+      "variant": "SessionGet",
+      "definition": "packages/proto/src/rpc.rs:220",
+      "fields": [
+        "session_id",
+        "recent_rounds",
+        "before_item_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:793"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1062",
+          "apps/daemon/src/cli_front/converse.rs:1205",
+          "apps/daemon/src/cli_front/converse.rs:1401",
+          "apps/daemon/src/cli_front/query.rs:875"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1548"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.drafts",
+      "variant": "SessionDrafts",
+      "definition": "packages/proto/src/rpc.rs:230",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:814"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:637",
+          "packages/workbench/src/session/store.ts:2054"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.drafts.replace",
+      "variant": "SessionDraftsReplace",
+      "definition": "packages/proto/src/rpc.rs:232",
+      "fields": [
+        "session_id",
+        "drafts"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:821",
+          "apps/daemon/src/router.rs:2538"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2068",
+          "packages/workbench/src/session/store.ts:2130"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.previewAnnotations.get",
+      "variant": "SessionPreviewAnnotationsGet",
+      "definition": "packages/proto/src/rpc.rs:237",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:828"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/PreviewAnnotation.tsx:100",
+          "packages/workbench/src/session/store.ts:652"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.previewAnnotations.upsert",
+      "variant": "SessionPreviewAnnotationUpsert",
+      "definition": "packages/proto/src/rpc.rs:239",
+      "fields": [
+        "session_id",
+        "annotation",
+        "expected_revision"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:835",
+          "apps/daemon/src/router.rs:2539"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/PreviewAnnotation.tsx:197"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.previewAnnotations.remove",
+      "variant": "SessionPreviewAnnotationRemove",
+      "definition": "packages/proto/src/rpc.rs:246",
+      "fields": [
+        "session_id",
+        "ids",
+        "expected_revision"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:855",
+          "apps/daemon/src/router.rs:2540"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/PreviewAnnotation.tsx:218",
+          "packages/workbench/src/session/store.ts:2149"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.components",
+      "variant": "SessionComponents",
+      "definition": "packages/proto/src/rpc.rs:259",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:870"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:888"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.inspect",
+      "variant": "SessionInspect",
+      "definition": "packages/proto/src/rpc.rs:261",
+      "fields": [
+        "session_id",
+        "through_round_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:877"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:906"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": [
+          "console/src/sessionReport.ts:71"
+        ]
+      }
+    },
+    {
+      "wire": "session.narrative",
+      "variant": "SessionNarrative",
+      "definition": "packages/proto/src/rpc.rs:267",
+      "fields": [
+        "session_id",
+        "through_round_id",
+        "item_id",
+        "cursor",
+        "limit"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:891"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:924"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1535",
+          "packages/workbench/src/session/store.ts:3403"
+        ],
+        "cloud": [
+          "console/src/sessionReport.ts:90"
+        ]
+      }
+    },
+    {
+      "wire": "session.rounds",
+      "variant": "SessionRounds",
+      "definition": "packages/proto/src/rpc.rs:280",
+      "fields": [
+        "session_id",
+        "through_round_id",
+        "cursor",
+        "limit"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:914"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:944"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": [
+          "console/src/sessionReport.ts:120"
+        ]
+      }
+    },
+    {
+      "wire": "session.context",
+      "variant": "SessionContext",
+      "definition": "packages/proto/src/rpc.rs:290",
+      "fields": [
+        "session_id",
+        "through_round_id",
+        "token_budget"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:935"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:1018"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "round.trunk.list",
+      "variant": "RoundTrunkList",
+      "definition": "packages/proto/src/rpc.rs:299",
+      "fields": [
+        "session_id",
+        "round_id",
+        "cursor",
+        "limit"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:950"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:963"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/ForwardDialog.tsx:189",
+          "packages/workbench/src/session/store.ts:1565",
+          "packages/workbench/src/session/store.ts:1619"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "round.trunk.get",
+      "variant": "RoundTrunkGet",
+      "definition": "packages/proto/src/rpc.rs:308",
+      "fields": [
+        "session_id",
+        "round_id",
+        "trunk_index"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:966"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:981"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1652",
+          "packages/workbench/src/session/store.ts:2191"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "blob.get",
+      "variant": "BlobGet",
+      "definition": "packages/proto/src/rpc.rs:317",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:981"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:1002"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1673",
+          "packages/workbench/src/session/store.ts:2226"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "round.trunk.batchGet",
+      "variant": "RoundTrunkBatchGet",
+      "definition": "packages/proto/src/rpc.rs:322",
+      "fields": [
+        "session_id",
+        "refs"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:988"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2186"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "blob.batchGet",
+      "variant": "BlobBatchGet",
+      "definition": "packages/proto/src/rpc.rs:330",
+      "fields": [
+        "session_id",
+        "blobs"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:995"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2221"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.send",
+      "variant": "SessionSend",
+      "definition": "packages/proto/src/rpc.rs:335",
+      "fields": [
+        "message_id",
+        "task_run_id",
+        "session_id",
+        "text",
+        "attachments",
+        "artifact_preview_base_url",
+        "continues_round",
+        "origin"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1002",
+          "apps/daemon/src/router.rs:2537"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1327"
+        ],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:743",
+          "packages/workbench/src/app/WorkbenchApp.tsx:777",
+          "packages/workbench/src/session/store.ts:1948",
+          "packages/workbench/src/session/store.ts:3433"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:941"
+        ]
+      }
+    },
+    {
+      "wire": "session.artifact.begin",
+      "variant": "SessionArtifactBegin",
+      "definition": "packages/proto/src/rpc.rs:376",
+      "fields": [
+        "session_id",
+        "files",
+        "metadata"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1130",
+          "apps/daemon/src/router.rs:2541"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/sessionArtifactUpload.ts:30"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.artifact.chunk",
+      "variant": "SessionArtifactChunk",
+      "definition": "packages/proto/src/rpc.rs:382",
+      "fields": [
+        "session_id",
+        "upload_id",
+        "file_index",
+        "offset",
+        "data_base64"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1145",
+          "apps/daemon/src/router.rs:2542"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/sessionArtifactUpload.ts:49"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.artifact.finish",
+      "variant": "SessionArtifactFinish",
+      "definition": "packages/proto/src/rpc.rs:392",
+      "fields": [
+        "session_id",
+        "upload_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1162",
+          "apps/daemon/src/router.rs:2543"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/sessionArtifactUpload.ts:65"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.artifact.abort",
+      "variant": "SessionArtifactAbort",
+      "definition": "packages/proto/src/rpc.rs:399",
+      "fields": [
+        "session_id",
+        "upload_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1176",
+          "apps/daemon/src/router.rs:2544"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/sessionArtifactUpload.ts:76"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.fork",
+      "variant": "SessionFork",
+      "definition": "packages/proto/src/rpc.rs:404",
+      "fields": [
+        "session_id",
+        "turn_id",
+        "target"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1186",
+          "apps/daemon/src/router.rs:2545"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:794",
+          "packages/proto/src/lib.rs:144",
+          "packages/proto/src/lib.rs:163",
+          "packages/workbench/src/session/store.ts:2251"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:932"
+        ]
+      }
+    },
+    {
+      "wire": "session.forkRouted",
+      "variant": "SessionForkRouted",
+      "definition": "packages/proto/src/rpc.rs:417",
+      "fields": [
+        "session_id",
+        "turn_id",
+        "workspace_id",
+        "tags"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1231",
+          "apps/daemon/src/router.rs:2546"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2266"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:936"
+        ]
+      }
+    },
+    {
+      "wire": "session.forkExport",
+      "variant": "SessionForkExport",
+      "definition": "packages/proto/src/rpc.rs:425",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1305",
+          "apps/daemon/src/router.rs:2547"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/app/WorkbenchApp.tsx:832"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:933"
+        ]
+      }
+    },
+    {
+      "wire": "session.forkImport",
+      "variant": "SessionForkImport",
+      "definition": "packages/proto/src/rpc.rs:427",
+      "fields": [
+        "transfer",
+        "target"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1315",
+          "apps/daemon/src/router.rs:2548"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/app/WorkbenchApp.tsx:792"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:934"
+        ]
+      }
+    },
+    {
+      "wire": "session.forkImportRouted",
+      "variant": "SessionForkImportRouted",
+      "definition": "packages/proto/src/rpc.rs:435",
+      "fields": [
+        "transfer",
+        "workspace_id",
+        "tags"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1341",
+          "apps/daemon/src/router.rs:2549"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [],
+        "cloud": [
+          "server/src/http/app-api.ts:935"
+        ]
+      }
+    },
+    {
+      "wire": "session.importList",
+      "variant": "SessionImportList",
+      "definition": "packages/proto/src/rpc.rs:444",
+      "fields": [
+        "workspace_id",
+        "limit"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1391"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2279"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.import",
+      "variant": "SessionImport",
+      "definition": "packages/proto/src/rpc.rs:452",
+      "fields": [
+        "workspace_id",
+        "candidate_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1409",
+          "apps/daemon/src/router.rs:2550"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2289"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:937"
+        ]
+      }
+    },
+    {
+      "wire": "session.interrupt",
+      "variant": "SessionInterrupt",
+      "definition": "packages/proto/src/rpc.rs:457",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1427",
+          "apps/daemon/src/router.rs:2551"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:847",
+          "apps/daemon/src/cli_front/converse.rs:1554"
+        ],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:746",
+          "packages/workbench/src/session/store.ts:2303"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:938"
+        ]
+      }
+    },
+    {
+      "wire": "session.close",
+      "variant": "SessionClose",
+      "definition": "packages/proto/src/rpc.rs:459",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1434"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:884"
+        ],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:763"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.archive",
+      "variant": "SessionArchive",
+      "definition": "packages/proto/src/rpc.rs:461",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1441"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:912"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/app/ConversationList.tsx:123",
+          "packages/workbench/src/app/MachineDirectoryLists.tsx:209",
+          "packages/workbench/src/session/store.ts:2569"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.rename",
+      "variant": "SessionRename",
+      "definition": "packages/proto/src/rpc.rs:469",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1451"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2546"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.label",
+      "variant": "SessionLabel",
+      "definition": "packages/proto/src/rpc.rs:474",
+      "fields": [
+        "session_id",
+        "add",
+        "remove"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1458"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:942"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2557"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.describe",
+      "variant": "SessionDescribe",
+      "definition": "packages/proto/src/rpc.rs:486",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1465"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:957"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.delete",
+      "variant": "SessionDelete",
+      "definition": "packages/proto/src/rpc.rs:494",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1472",
+          "apps/daemon/src/router.rs:2552"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2578"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:931"
+        ]
+      }
+    },
+    {
+      "wire": "session.setModel",
+      "variant": "SessionSetModel",
+      "definition": "packages/proto/src/rpc.rs:496",
+      "fields": [
+        "session_id",
+        "model_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1479"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1042"
+        ],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:776",
+          "packages/workbench/src/session/store.ts:2315"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.switchAgent",
+      "variant": "SessionSwitchAgent",
+      "definition": "packages/proto/src/rpc.rs:503",
+      "fields": [
+        "session_id",
+        "target"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1538",
+          "apps/daemon/src/router.rs:2553"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2383"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:942"
+        ]
+      }
+    },
+    {
+      "wire": "session.route",
+      "variant": "SessionRoute",
+      "definition": "packages/proto/src/rpc.rs:510",
+      "fields": [
+        "session_id",
+        "tags",
+        "media_tags"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1560",
+          "apps/daemon/src/router.rs:2554"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1016"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3553"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:940"
+        ]
+      }
+    },
+    {
+      "wire": "session.setMode",
+      "variant": "SessionSetMode",
+      "definition": "packages/proto/src/rpc.rs:517",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1581"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:779",
+          "packages/workbench/src/session/store.ts:2450"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.setEffort",
+      "variant": "SessionSetEffort",
+      "definition": "packages/proto/src/rpc.rs:519",
+      "fields": [
+        "session_id",
+        "effort_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1596"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1050",
+          "apps/daemon/src/cli_front/converse.rs:1301"
+        ],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:782",
+          "packages/workbench/src/session/store.ts:2469"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.setFast",
+      "variant": "SessionSetFast",
+      "definition": "packages/proto/src/rpc.rs:524",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1611"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:785",
+          "packages/workbench/src/session/store.ts:2488"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.setRuntimeAxis",
+      "variant": "SessionSetRuntimeAxis",
+      "definition": "packages/proto/src/rpc.rs:526",
+      "fields": [
+        "session_id",
+        "axis_id",
+        "value_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1619"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "apps/daemon/builtin-agents/sdk/genehub_agent/serve.py:788",
+          "packages/workbench/src/session/store.ts:2521"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "session.respondPermission",
+      "variant": "SessionRespondPermission",
+      "definition": "packages/proto/src/rpc.rs:532",
+      "fields": [
+        "session_id",
+        "request_id",
+        "outcome"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1653",
+          "apps/daemon/src/router.rs:2555"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1182",
+          "apps/daemon/src/cli_front/converse.rs:1606"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3068",
+          "packages/workbench/src/settings/ProviderConfigurationCard.tsx:38"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:939"
+        ]
+      }
+    },
+    {
+      "wire": "session.ask",
+      "variant": "SessionAsk",
+      "definition": "packages/proto/src/rpc.rs:540",
+      "fields": [
+        "session_id",
+        "request_id",
+        "title",
+        "questions"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1635",
+          "apps/daemon/src/router.rs:2556"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:808"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "caller.authority",
+      "variant": "CallerAuthority",
+      "definition": "packages/proto/src/rpc.rs:548",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1707"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:672"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/settings/ProviderConfigurationCard.tsx:21"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "provider.list",
+      "variant": "ProviderList",
+      "definition": "packages/proto/src/rpc.rs:551",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1708"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/provider.rs:42"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "provider.operation",
+      "variant": "ProviderOperation",
+      "definition": "packages/proto/src/rpc.rs:553",
+      "fields": [
+        "session_id",
+        "operation"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:187",
+          "apps/daemon/src/router.rs:195",
+          "apps/daemon/src/router.rs:1724",
+          "apps/daemon/src/router.rs:2558"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/provider.rs:119",
+          "apps/daemon/src/cli_front/provider.rs:197"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2651",
+          "packages/workbench/src/settings/ProviderConfigurationCard.tsx:20"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "settings.get",
+      "variant": "SettingsGet",
+      "definition": "packages/proto/src/rpc.rs:560",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1739"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/app/WorkbenchApp.tsx:732",
+          "packages/workbench/src/session/store.ts:2665",
+          "packages/workbench/src/session/store.ts:3161"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "settings.setProvider",
+      "variant": "SettingsSetProvider",
+      "definition": "packages/proto/src/rpc.rs:566",
+      "fields": [
+        "provider_id",
+        "api_key",
+        "base_url",
+        "label",
+        "dialect",
+        "models",
+        "model_inputs",
+        "model_capabilities"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:185",
+          "apps/daemon/src/router.rs:1843",
+          "apps/daemon/src/router.rs:2557"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2743"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:945"
+        ]
+      }
+    },
+    {
+      "wire": "settings.setAgentPreferences",
+      "variant": "SettingsSetAgentPreferences",
+      "definition": "packages/proto/src/rpc.rs:598",
+      "fields": [
+        "preferences"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1743",
+          "apps/daemon/src/router.rs:2559"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2426"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:944"
+        ]
+      }
+    },
+    {
+      "wire": "settings.forgetProvider",
+      "variant": "SettingsForgetProvider",
+      "definition": "packages/proto/src/rpc.rs:604",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:186",
+          "apps/daemon/src/router.rs:1940",
+          "apps/daemon/src/router.rs:2560"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2800"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:943"
+        ]
+      }
+    },
+    {
+      "wire": "speech.capabilities",
+      "variant": "SpeechCapabilities",
+      "definition": "packages/proto/src/rpc.rs:610",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1750"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/speech.rs:27"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/speech/useSpeechInput.ts:546"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "speech.settings.setQwen3",
+      "variant": "SpeechSettingsSetQwen3",
+      "definition": "packages/proto/src/rpc.rs:613",
+      "fields": [
+        "stub_enabled",
+        "context_enabled",
+        "pinned_terms",
+        "language_hints",
+        "collect_corrections",
+        "workspace_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1754"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2774"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "speech.runtime.probe",
+      "variant": "SpeechRuntimeProbe",
+      "definition": "packages/proto/src/rpc.rs:631",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1778"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/speech.rs:34"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2791"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "speech.runtime.configure",
+      "variant": "SpeechRuntimeConfigure",
+      "definition": "packages/proto/src/rpc.rs:635",
+      "fields": [
+        "command",
+        "args"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1784"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/speech.rs:50",
+          "apps/daemon/src/cli_front/speech.rs:63"
+        ],
+        "client": [],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "speech.context.preview",
+      "variant": "SpeechContextPreview",
+      "definition": "packages/proto/src/rpc.rs:643",
+      "fields": [
+        "workspace_id",
+        "session_id",
+        "draft"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1798"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/speech/useSpeechInput.ts:587"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "speech.feedback.record",
+      "variant": "SpeechFeedbackRecord",
+      "definition": "packages/proto/src/rpc.rs:654",
+      "fields": [
+        "workspace_id",
+        "request_id",
+        "context_snapshot_id",
+        "candidates",
+        "selected_candidate_id",
+        "rejected_candidate_id",
+        "scope",
+        "score_kind"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1816"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/speech/useSpeechInput.ts:354",
+          "packages/workbench/src/speech/useSpeechInput.ts:445"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "log.tail",
+      "variant": "LogTail",
+      "definition": "packages/proto/src/rpc.rs:676",
+      "fields": [
+        "name"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1871"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2673"
+        ],
+        "cloud": [
+          "console/src/Feedback.tsx:423"
+        ]
+      }
+    },
+    {
+      "wire": "diagnostics.snapshot",
+      "variant": "DiagnosticsSnapshot",
+      "definition": "packages/proto/src/rpc.rs:689",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1890"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:816"
+        ],
+        "consumers": [],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "update.check",
+      "variant": "UpdateCheck",
+      "definition": "packages/proto/src/rpc.rs:695",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1903"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2686"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "update.appCheck",
+      "variant": "UpdateAppCheck",
+      "definition": "packages/proto/src/rpc.rs:700",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1910",
+          "apps/daemon/src/updates.rs:1051"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2701"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "update.download",
+      "variant": "UpdateDownload",
+      "definition": "packages/proto/src/rpc.rs:705",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1922"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2713"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "update.downloadState",
+      "variant": "UpdateDownloadState",
+      "definition": "packages/proto/src/rpc.rs:708",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1932"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1053"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "update.dismiss",
+      "variant": "UpdateDismiss",
+      "definition": "packages/proto/src/rpc.rs:715",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1936",
+          "apps/daemon/src/updates.rs:451"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2725"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "hub.status",
+      "variant": "HubStatus",
+      "definition": "packages/proto/src/rpc.rs:720",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1947"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/desktop.rs:58",
+          "apps/daemon/src/cli_front/hub.rs:53",
+          "apps/daemon/src/cli_front/hub.rs:205",
+          "apps/daemon/src/cli_front/hub.rs:289",
+          "apps/daemon/src/cli_front/machine.rs:118"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/preview/PreviewFloat.tsx:761",
+          "packages/workbench/src/session/store.ts:2959"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "hub.pair",
+      "variant": "HubPair",
+      "definition": "packages/proto/src/rpc.rs:724",
+      "fields": [
+        "hub_url",
+        "display_name"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1954",
+          "apps/daemon/src/router.rs:2561"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/desktop.rs:111",
+          "apps/daemon/src/cli_front/hub.rs:97"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2965"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:919"
+        ]
+      }
+    },
+    {
+      "wire": "hub.trial",
+      "variant": "HubTrial",
+      "definition": "packages/proto/src/rpc.rs:732",
+      "fields": [
+        "hub_url",
+        "display_name"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:1977",
+          "apps/daemon/src/router.rs:2562"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2973"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:920"
+        ]
+      }
+    },
+    {
+      "wire": "hub.claimLink",
+      "variant": "HubClaimLink",
+      "definition": "packages/proto/src/rpc.rs:739",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2001",
+          "apps/daemon/src/router.rs:2563"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/desktop.rs:82",
+          "apps/daemon/src/cli_front/hub.rs:144"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2982"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:917"
+        ]
+      }
+    },
+    {
+      "wire": "hub.machines",
+      "variant": "HubMachines",
+      "definition": "packages/proto/src/rpc.rs:749",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2014"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/machine.rs:131"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/host/index.ts:429",
+          "packages/workbench/src/host/index.ts:540"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "hub.connect",
+      "variant": "HubConnect",
+      "definition": "packages/proto/src/rpc.rs:754",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2027",
+          "apps/daemon/src/router.rs:2564"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:1186"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/host/index.ts:424",
+          "packages/workbench/src/preview/PreviewFloat.tsx:766"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:918"
+        ]
+      }
+    },
+    {
+      "wire": "hub.unpair",
+      "variant": "HubUnpair",
+      "definition": "packages/proto/src/rpc.rs:758",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2037",
+          "apps/daemon/src/router.rs:2565"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/hub.rs:189"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2989"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:921"
+        ]
+      }
+    },
+    {
+      "wire": "device.list",
+      "variant": "DeviceList",
+      "definition": "packages/proto/src/rpc.rs:763",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2047"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/machine.rs:376"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:2994"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "device.invite",
+      "variant": "DeviceInvite",
+      "definition": "packages/proto/src/rpc.rs:775",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2054",
+          "apps/daemon/src/router.rs:2566"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/machine.rs:391"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/proto/src/lib.rs:276",
+          "packages/proto/src/lib.rs:284",
+          "packages/proto/src/lib.rs:287",
+          "packages/proto/src/lib.rs:288",
+          "packages/workbench/src/session/store.ts:3003"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:901"
+        ]
+      }
+    },
+    {
+      "wire": "device.claim",
+      "variant": "DeviceClaim",
+      "definition": "packages/proto/src/rpc.rs:779",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/authz.rs:63",
+          "apps/daemon/src/dataplane/endpoint.rs:1119",
+          "apps/daemon/src/router.rs:2066",
+          "apps/daemon/src/router.rs:2567"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/rpc_wire.rs:556"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/devices/claim.ts:36"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:900"
+        ]
+      }
+    },
+    {
+      "wire": "device.revoke",
+      "variant": "DeviceRevoke",
+      "definition": "packages/proto/src/rpc.rs:782",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2073",
+          "apps/daemon/src/router.rs:2568"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/machine.rs:417"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3031"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:904"
+        ]
+      }
+    },
+    {
+      "wire": "device.remoteAttach",
+      "variant": "DeviceRemoteAttach",
+      "definition": "packages/proto/src/rpc.rs:785",
+      "fields": [
+        "relay_url",
+        "join_token",
+        "channel_count"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2083",
+          "apps/daemon/src/router.rs:2569"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3039"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:902"
+        ]
+      }
+    },
+    {
+      "wire": "device.remoteDetach",
+      "variant": "DeviceRemoteDetach",
+      "definition": "packages/proto/src/rpc.rs:796",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2097",
+          "apps/daemon/src/router.rs:2570"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3046"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:903"
+        ]
+      }
+    },
+    {
+      "wire": "workspace.list",
+      "variant": "WorkspaceList",
+      "definition": "packages/proto/src/rpc.rs:800",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2122"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:744",
+          "apps/daemon/src/cli_front/query.rs:749",
+          "apps/daemon/src/cli_front/query.rs:779",
+          "apps/daemon/src/cli_front/query.rs:1034"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/summary-directory.ts:507"
+        ],
+        "consumers": [
+          "packages/workbench/src/app/WorkbenchApp.tsx:731",
+          "packages/workbench/src/preview/AssetPreviewPage.tsx:225",
+          "packages/workbench/src/session/store.ts:1143",
+          "packages/workbench/src/session/store.ts:3203"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "workspace.open",
+      "variant": "WorkspaceOpen",
+      "definition": "packages/proto/src/rpc.rs:802",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2128",
+          "apps/daemon/src/router.rs:2571"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/converse.rs:1518",
+          "apps/daemon/src/cli_front/query.rs:728",
+          "apps/daemon/src/cli_front/space.rs:63"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1132",
+          "packages/workbench/src/workspace/OpenProject.tsx:112"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:949"
+        ]
+      }
+    },
+    {
+      "wire": "workspace.addRoot",
+      "variant": "WorkspaceAddRoot",
+      "definition": "packages/proto/src/rpc.rs:805",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2135",
+          "apps/daemon/src/router.rs:2572"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:732"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/workspace/AgentDetails.tsx:61",
+          "packages/workbench/src/workspace/OpenProject.tsx:112"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "workspace.create",
+      "variant": "WorkspaceCreate",
+      "definition": "packages/proto/src/rpc.rs:807",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2146",
+          "apps/daemon/src/router.rs:2573"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [],
+        "cloud": [
+          "server/src/http/app-api.ts:948"
+        ]
+      }
+    },
+    {
+      "wire": "workspace.rename",
+      "variant": "WorkspaceRename",
+      "definition": "packages/proto/src/rpc.rs:809",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2208",
+          "apps/daemon/src/router.rs:2575"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2396"
+        ],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:1165"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:951"
+        ]
+      }
+    },
+    {
+      "wire": "workspace.remove",
+      "variant": "WorkspaceRemove",
+      "definition": "packages/proto/src/rpc.rs:812",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2215",
+          "apps/daemon/src/router.rs:2576"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:758"
+        ],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2397"
+        ],
+        "consumers": [
+          "packages/workbench/src/app/MachineDirectoryLists.tsx:208",
+          "packages/workbench/src/session/store.ts:1186"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:950"
+        ]
+      }
+    },
+    {
+      "wire": "directory.list",
+      "variant": "DirectoryList",
+      "definition": "packages/proto/src/rpc.rs:818",
+      "fields": [
+        "path"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2236",
+          "apps/daemon/src/router.rs:2577"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/workspace/OpenProject.tsx:139",
+          "packages/workbench/src/workspace/OpenProject.tsx:155",
+          "packages/workbench/src/workspace/OpenProject.tsx:183"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:905"
+        ]
+      }
+    },
+    {
+      "wire": "directory.mkdir",
+      "variant": "DirectoryMkdir",
+      "definition": "packages/proto/src/rpc.rs:824",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2243",
+          "apps/daemon/src/router.rs:2578"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/workspace/OpenProject.tsx:236",
+          "packages/workbench/src/workspace/OpenProject.tsx:245"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:906"
+        ]
+      }
+    },
+    {
+      "wire": "fileAccess.list",
+      "variant": "FileAccessList",
+      "definition": "packages/proto/src/rpc.rs:828",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2112"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:706"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/settings/FileAccessSettings.tsx:17"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "fileAccess.configure",
+      "variant": "FileAccessConfigure",
+      "definition": "packages/proto/src/rpc.rs:831",
+      "fields": [
+        "expected_revision",
+        "additional_directories"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2115"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/query.rs:712"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/settings/FileAccessSettings.tsx:26"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "file.tree",
+      "variant": "FileTree",
+      "definition": "packages/proto/src/rpc.rs:838",
+      "fields": [
+        "workspace_id",
+        "path",
+        "depth"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2253",
+          "apps/daemon/src/router.rs:2579"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2386"
+        ],
+        "consumers": [
+          "packages/workbench/src/files/FilesPanel.tsx:35",
+          "packages/workbench/src/session/store.ts:2610"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:912"
+        ]
+      }
+    },
+    {
+      "wire": "file.write",
+      "variant": "FileWrite",
+      "definition": "packages/proto/src/rpc.rs:846",
+      "fields": [
+        "workspace_id",
+        "path",
+        "content"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2268",
+          "apps/daemon/src/router.rs:2580"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2387"
+        ],
+        "consumers": [],
+        "cloud": [
+          "server/src/http/app-api.ts:913"
+        ]
+      }
+    },
+    {
+      "wire": "file.mkdir",
+      "variant": "FileMkdir",
+      "definition": "packages/proto/src/rpc.rs:853",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2283",
+          "apps/daemon/src/router.rs:2581"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/files/FilesPanel.tsx:159",
+          "packages/workbench/src/files/FilesPanel.tsx:161"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:910"
+        ]
+      }
+    },
+    {
+      "wire": "file.copy",
+      "variant": "FileCopy",
+      "definition": "packages/proto/src/rpc.rs:856",
+      "fields": [
+        "workspace_id",
+        "from",
+        "to"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2297",
+          "apps/daemon/src/router.rs:2582"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/files/FilesPanel.tsx:185",
+          "packages/workbench/src/files/FilesPanel.tsx:192"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:908"
+        ]
+      }
+    },
+    {
+      "wire": "file.move",
+      "variant": "FileMove",
+      "definition": "packages/proto/src/rpc.rs:863",
+      "fields": [
+        "workspace_id",
+        "from",
+        "to"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2331",
+          "apps/daemon/src/router.rs:2583"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/files/FilesPanel.tsx:185",
+          "packages/workbench/src/files/FilesPanel.tsx:202"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:911"
+        ]
+      }
+    },
+    {
+      "wire": "file.delete",
+      "variant": "FileDelete",
+      "definition": "packages/proto/src/rpc.rs:870",
+      "fields": [
+        "workspace_id",
+        "paths"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2365",
+          "apps/daemon/src/router.rs:2584"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/files/FilesPanel.tsx:242",
+          "packages/workbench/src/files/FilesPanel.tsx:244"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:909"
+        ]
+      }
+    },
+    {
+      "wire": "git.status",
+      "variant": "GitStatus",
+      "definition": "packages/proto/src/rpc.rs:877",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2382",
+          "apps/daemon/src/router.rs:2585"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2393"
+        ],
+        "consumers": [
+          "packages/workbench/src/changes/ChangesPanel.tsx:27",
+          "packages/workbench/src/session/store.ts:2623"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:916"
+        ]
+      }
+    },
+    {
+      "wire": "git.diff",
+      "variant": "GitDiff",
+      "definition": "packages/proto/src/rpc.rs:879",
+      "fields": [
+        "workspace_id",
+        "path"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2393",
+          "apps/daemon/src/router.rs:2586"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2388"
+        ],
+        "consumers": [
+          "packages/workbench/src/changes/ChangesPanel.tsx:37",
+          "packages/workbench/src/session/store.ts:2633"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:915"
+        ]
+      }
+    },
+    {
+      "wire": "git.commit",
+      "variant": "GitCommit",
+      "definition": "packages/proto/src/rpc.rs:885",
+      "fields": [
+        "workspace_id",
+        "message",
+        "paths"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2404",
+          "apps/daemon/src/router.rs:2587"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2394"
+        ],
+        "consumers": [
+          "packages/workbench/src/changes/ChangesPanel.tsx:46",
+          "packages/workbench/src/session/store.ts:2643"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:914"
+        ]
+      }
+    },
+    {
+      "wire": "pty.open",
+      "variant": "PtyOpen",
+      "definition": "packages/proto/src/rpc.rs:895",
+      "fields": [
+        "workspace_id",
+        "cols",
+        "rows"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2419",
+          "apps/daemon/src/router.rs:2588"
+        ],
+        "cli": [],
+        "client": [
+          "packages/workbench/src/protocol/client.ts:2395"
+        ],
+        "consumers": [
+          "packages/workbench/src/terminal/TerminalPanel.tsx:54"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:925"
+        ]
+      }
+    },
+    {
+      "wire": "pty.write",
+      "variant": "PtyWrite",
+      "definition": "packages/proto/src/rpc.rs:903",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2442"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/terminal/TerminalPanel.tsx:68"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "pty.resize",
+      "variant": "PtyResize",
+      "definition": "packages/proto/src/rpc.rs:905",
+      "fields": [
+        "pty_id",
+        "cols",
+        "rows"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2449",
+          "apps/daemon/src/router.rs:2589"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/terminal/TerminalPanel.tsx:76"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:926"
+        ]
+      }
+    },
+    {
+      "wire": "pty.close",
+      "variant": "PtyClose",
+      "definition": "packages/proto/src/rpc.rs:911",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2456",
+          "apps/daemon/src/router.rs:2590"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/terminal/TerminalPanel.tsx:60",
+          "packages/workbench/src/terminal/TerminalPanel.tsx:88"
+        ],
+        "cloud": [
+          "server/src/http/app-api.ts:924"
+        ]
+      }
+    },
+    {
+      "wire": "process.list",
+      "variant": "ProcessList",
+      "definition": "packages/proto/src/rpc.rs:920",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2463"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/process.rs:47"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3014"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "process.workspaceList",
+      "variant": "ProcessWorkspaceList",
+      "definition": "packages/proto/src/rpc.rs:922",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2469"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3013"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "process.serviceStop",
+      "variant": "ProcessServiceStop",
+      "definition": "packages/proto/src/rpc.rs:925",
+      "fields": [
+        "workspace_id",
+        "entry_path",
+        "run_id"
+      ],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2481"
+        ],
+        "cli": [],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/processes/ProcessesPanel.tsx:74"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "process.kill",
+      "variant": "ProcessKill",
+      "definition": "packages/proto/src/rpc.rs:937",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2498"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/process.rs:79"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3020"
+        ],
+        "cloud": []
+      }
+    },
+    {
+      "wire": "process.killAll",
+      "variant": "ProcessKillAll",
+      "definition": "packages/proto/src/rpc.rs:940",
+      "fields": [],
+      "references": {
+        "daemon": [
+          "apps/daemon/src/router.rs:2514"
+        ],
+        "cli": [
+          "apps/daemon/src/cli_front/process.rs:129"
+        ],
+        "client": [],
+        "consumers": [
+          "packages/workbench/src/session/store.ts:3025"
+        ],
+        "cloud": []
+      }
+    }
+  ],
+  "cloudLiteralRoutes": [
+    {
+      "verb": "POST",
+      "path": "/app/auth/recover",
+      "definition": "server/src/http/app-api.ts:267"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/me",
+      "definition": "server/src/http/app-api.ts:300"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/feedback",
+      "definition": "server/src/http/app-api.ts:319"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/machines",
+      "definition": "server/src/http/app-api.ts:453"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/machines/:id/rename",
+      "definition": "server/src/http/app-api.ts:461"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/activations/:code",
+      "definition": "server/src/http/app-api.ts:487"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/machines/:id/connect",
+      "definition": "server/src/http/app-api.ts:555"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/machines/:id/revoke",
+      "definition": "server/src/http/app-api.ts:637"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/links",
+      "definition": "server/src/http/app-api.ts:659"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/links",
+      "definition": "server/src/http/app-api.ts:698"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/links/:id/revoke",
+      "definition": "server/src/http/app-api.ts:713"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/sessions/:id/revoke",
+      "definition": "server/src/http/app-api.ts:729"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/sessions/:id/trust",
+      "definition": "server/src/http/app-api.ts:745"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/audit",
+      "definition": "server/src/http/app-api.ts:761"
+    },
+    {
+      "verb": "GET",
+      "path": "/signin",
+      "definition": "server/src/http/auth.ts:75"
+    },
+    {
+      "verb": "POST",
+      "path": "/signin/email",
+      "definition": "server/src/http/auth.ts:83"
+    },
+    {
+      "verb": "GET",
+      "path": "/signin/email/:token",
+      "definition": "server/src/http/auth.ts:134"
+    },
+    {
+      "verb": "POST",
+      "path": "/signin/email/:token",
+      "definition": "server/src/http/auth.ts:153"
+    },
+    {
+      "verb": "GET",
+      "path": "/signin/github",
+      "definition": "server/src/http/auth.ts:172"
+    },
+    {
+      "verb": "GET",
+      "path": "/signin/github/callback",
+      "definition": "server/src/http/auth.ts:200"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/auth/methods",
+      "definition": "server/src/http/auth.ts:233"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/auth/signout",
+      "definition": "server/src/http/auth.ts:239"
+    },
+    {
+      "verb": "GET",
+      "path": "/*",
+      "definition": "server/src/http/console.ts:34"
+    },
+    {
+      "verb": "GET",
+      "path": "/api/downloads",
+      "definition": "server/src/http/downloads.ts:503"
+    },
+    {
+      "verb": "GET",
+      "path": "/install.sh",
+      "definition": "server/src/http/downloads.ts:535"
+    },
+    {
+      "verb": "GET",
+      "path": "/download/:platform",
+      "definition": "server/src/http/downloads.ts:549"
+    },
+    {
+      "verb": "GET",
+      "path": "/download/${channel}/:file",
+      "definition": "server/src/http/downloads.ts:581"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/device-authorizations",
+      "definition": "server/src/http/enrollment.ts:127"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/device-authorizations/poll",
+      "definition": "server/src/http/enrollment.ts:166"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/trial",
+      "definition": "server/src/http/enrollment.ts:203"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/machines/enroll",
+      "definition": "server/src/http/enrollment.ts:300"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/machines/:daemonId/claim-link",
+      "definition": "server/src/http/enrollment.ts:417"
+    },
+    {
+      "verb": "GET",
+      "path": "/api/machines/:daemonId/directory",
+      "definition": "server/src/http/enrollment.ts:473"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/machines/:daemonId/tickets",
+      "definition": "server/src/http/enrollment.ts:496"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/machines/:daemonId/preview-shares",
+      "definition": "server/src/http/enrollment.ts:533"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/preview-shares/redeem",
+      "definition": "server/src/http/enrollment.ts:549"
+    },
+    {
+      "verb": "DELETE",
+      "path": "/api/machines/:daemonId",
+      "definition": "server/src/http/enrollment.ts:564"
+    },
+    {
+      "verb": "GET",
+      "path": "/setup",
+      "definition": "server/src/http/pages.ts:154"
+    },
+    {
+      "verb": "GET",
+      "path": "/activate",
+      "definition": "server/src/http/pages.ts:235"
+    },
+    {
+      "verb": "POST",
+      "path": "/activate",
+      "definition": "server/src/http/pages.ts:299"
+    },
+    {
+      "verb": "GET",
+      "path": "/link/:token",
+      "definition": "server/src/http/pages.ts:418"
+    },
+    {
+      "verb": "POST",
+      "path": "/link/:token",
+      "definition": "server/src/http/pages.ts:451"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/fabric/v2/peer-admissions/check",
+      "definition": "server/src/http/peer-admission.ts:83"
+    },
+    {
+      "verb": "GET",
+      "path": "/api/rtc/config",
+      "definition": "server/src/http/rtc.ts:52"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/rtc/credentials",
+      "definition": "server/src/http/rtc.ts:62"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/fabric/v2/endpoints",
+      "definition": "server/src/http/workspace-catalog.ts:101"
+    },
+    {
+      "verb": "PUT",
+      "path": "/api/fabric/v2/workspace-catalog",
+      "definition": "server/src/http/workspace-catalog.ts:137"
+    },
+    {
+      "verb": "POST",
+      "path": "/api/fabric/v2/routes",
+      "definition": "server/src/http/workspace-catalog.ts:248"
+    },
+    {
+      "verb": "GET",
+      "path": "/app/workspaces",
+      "definition": "server/src/http/workspaces.ts:46"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/fabric/endpoints",
+      "definition": "server/src/http/workspaces.ts:62"
+    },
+    {
+      "verb": "POST",
+      "path": "/app/fabric/routes",
+      "definition": "server/src/http/workspaces.ts:118"
+    },
+    {
+      "verb": "GET",
+      "path": "/api/health",
+      "definition": "server/src/main.ts:166"
+    }
+  ],
+  "cliSourceFiles": [
+    {
+      "path": "apps/cli/src/control.rs",
+      "lines": 970,
+      "sha256": "ab9c662ffc5f42c81fa23033fc7fa4d1d24a198f760a6f7376f509a783c588b3"
+    },
+    {
+      "path": "apps/cli/src/control/supervisor.rs",
+      "lines": 456,
+      "sha256": "d7635740740f17f637309bef7c222cb63e2a023938539712d9a0743478a0522d"
+    },
+    {
+      "path": "apps/cli/src/control/supervisor/pressure.rs",
+      "lines": 169,
+      "sha256": "1aec2e390172dfb2e3f09f8759e7781116ed050b1f3efb5f6bed311c1553beb1"
+    },
+    {
+      "path": "apps/cli/src/invoke.rs",
+      "lines": 423,
+      "sha256": "e230d34475a3f594013720c75f7900b04714d21dee4561cdc08893722b14bbe6"
+    },
+    {
+      "path": "apps/cli/src/main.rs",
+      "lines": 294,
+      "sha256": "6a0f53fbf1bbc8ab8f4e377afe348092bada61d38f82e23e50f1c839ea905edf"
+    },
+    {
+      "path": "apps/cli/src/update.rs",
+      "lines": 518,
+      "sha256": "3c061aaacddb30994d060fdcea67e1da242eec0672da5f1c01f2e2b78705a8e9"
+    },
+    {
+      "path": "apps/cli/src/update/install.rs",
+      "lines": 310,
+      "sha256": "5f039d8646a245aaeb9d437c99a03b86d3cb60d57816613a1b032b16c10a1fa3"
+    },
+    {
+      "path": "apps/cli/src/update/supervisor.rs",
+      "lines": 301,
+      "sha256": "0dae1da7cae87dde2bc9502796213678a0007115637672b7839b4dfbb8a91396"
+    },
+    {
+      "path": "apps/cli/src/update/worker.rs",
+      "lines": 262,
+      "sha256": "2e98e0a73211ba9526fbc7101a9d7164c8114905f0461b34702964474dec9aea"
+    },
+    {
+      "path": "apps/cli/src/wasm.rs",
+      "lines": 297,
+      "sha256": "e5001b32b6a9e7be0a8f26c3d634423172ca5f29f4dd31b8a9ce1dddb71a7e21"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/client.rs",
+      "lines": 101,
+      "sha256": "3360fcd9ae8ca3d900a67d465562f803e60390809af50ee9ee99f2827aef247d"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/converse.rs",
+      "lines": 2006,
+      "sha256": "d372623fef4f48c61a2ea88a866073c5708248e09d0793cf0ea3d94cb80e824f"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/desktop.rs",
+      "lines": 253,
+      "sha256": "283496bf2d138d0936c1f44fd4bdf02c05b99db11c15ad478bcd9f1def6193d1"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/file.rs",
+      "lines": 907,
+      "sha256": "cb9ac60567431387897abc58f8afe2cfba1e8d4545fef4415fcb6326404d70b4"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/hook.rs",
+      "lines": 81,
+      "sha256": "13e00ac9b5b28295ffa853af62ea6d689f5bcf859bd0dbead66f4a0d89c6cdd0"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/hub.rs",
+      "lines": 418,
+      "sha256": "904c5c02530235ad03a4a2b3e100879af537edcf43f4b59c47abc543215a97f0"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/machine.rs",
+      "lines": 559,
+      "sha256": "15fc0234305537ce833d7f88c7af6a66f42d53ed2b7483833856b609bcc8954d"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/machines.rs",
+      "lines": 225,
+      "sha256": "0d0595363cf7bd96d73042e8fad69973f91b6fe2b629b6b399dceaaf9bb6e5cb"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/mod.rs",
+      "lines": 247,
+      "sha256": "145df6d593d1aa55aeec02cc70d05da3de6088fefe1249f9c3c35d25fd2d7b95"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/output.rs",
+      "lines": 23,
+      "sha256": "e8dd548371d5cfd98eeac710216b66e10a075ec0721a3abf89025473f395d4f5"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/place.rs",
+      "lines": 224,
+      "sha256": "493ca230188ad37ebcd897345c51495916e4ed1677a42c7b05d5eeae539c214a"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/process.rs",
+      "lines": 244,
+      "sha256": "6de9ebd93e138d26b0e3c192c22bd4f19724a1a565676ce16cfb9a99f45a88e6"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/project.rs",
+      "lines": 62,
+      "sha256": "69fd6edd9c007619322bb564e27ed710f87e658e20574d73827aaffeaff5a90b"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/provider.rs",
+      "lines": 228,
+      "sha256": "6aed215f1c326b33d47302de711dc683852bbb65ea14af94bdb1b98eb7519561"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/query.rs",
+      "lines": 2677,
+      "sha256": "02e91023d5b3d1f291c8f2da2c3729a5831a2980d9fc90804104578027fcc285"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/rpc.rs",
+      "lines": 427,
+      "sha256": "d5e766ef9ff9a1528dbc193cfd33557288b738254bdc2e090ce422f02062f774"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/rpc_wire.rs",
+      "lines": 938,
+      "sha256": "6260a066b013ce2559f10a6cc4dbc76519e066dec2714b6fa1f0b721460a6325"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/shell.rs",
+      "lines": 512,
+      "sha256": "10e5f879860d2bc5cce80ebcb59d56e64e21b898699c6337a0ff47ed53bb8288"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/space.rs",
+      "lines": 509,
+      "sha256": "45bbe130cbdad9c3dd5f15ed92bf13ab5fe45ad5b6e24ffaedd35cb5efc5225c"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/speech.rs",
+      "lines": 176,
+      "sha256": "40a42118c369860feb87ac7a19a1f3cd81adef8b661e6c7bb431a170a8baf30e"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/target.rs",
+      "lines": 360,
+      "sha256": "776cb92f831210159c74cc5f788d53192027eacc3158b8791fc50240ac90e9c4"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/update.rs",
+      "lines": 51,
+      "sha256": "18e02b652c5c43129e25d03aebddb1a1b2852574041da7db44789e4500413e98"
+    },
+    {
+      "path": "packages/frontdoor/src/channel.rs",
+      "lines": 60,
+      "sha256": "87767763f01fdcd029b219eb56f799328c5ad60b8ac168468900cac66a33405d"
+    },
+    {
+      "path": "packages/frontdoor/src/envelope.rs",
+      "lines": 176,
+      "sha256": "4bba6c578787280e247c73853543a532be19eeb03dc0d1dc156b9e5d24d6acae"
+    },
+    {
+      "path": "packages/frontdoor/src/fs_lock.rs",
+      "lines": 90,
+      "sha256": "eae57908ad7ffdb8b9e4b23ae67b827abb663233e45ce8117864df390535a493"
+    },
+    {
+      "path": "packages/frontdoor/src/launch_env.rs",
+      "lines": 27,
+      "sha256": "221e2fcf17e3f688dee0a830c2e229ff9d9eca1b1d54bdd9a282014a49a59dd5"
+    },
+    {
+      "path": "packages/frontdoor/src/lib.rs",
+      "lines": 41,
+      "sha256": "17caf9facd9a01e7a906631e50b1761ce4e2c2138e37f0658f1e02a236d4d865"
+    },
+    {
+      "path": "packages/frontdoor/src/lifecycle.rs",
+      "lines": 175,
+      "sha256": "89150f387aa1c27792759666e8bedcacdc5f9322935e8d9dfdbdb759a9584ebb"
+    },
+    {
+      "path": "packages/frontdoor/src/managed_update.rs",
+      "lines": 178,
+      "sha256": "08f0228979afc290c4cc8f574f02b350e0114f3a3d8a7d28373f84e7d7c54a05"
+    },
+    {
+      "path": "packages/frontdoor/src/paths.rs",
+      "lines": 252,
+      "sha256": "7402f114068765524fe102b6a807a87020b1a1c4488df34a9cfb70c1f9011f29"
+    },
+    {
+      "path": "packages/frontdoor/src/perms.rs",
+      "lines": 523,
+      "sha256": "6c9c91ca79fc67bf117b66fc2880c5210bcf7c215b529914f5b517183069812f"
+    },
+    {
+      "path": "packages/frontdoor/src/proof.rs",
+      "lines": 435,
+      "sha256": "94ddff434de7a1e4a9efa936dd6381a8158d25ca10be6609c643d673cf7db69f"
+    },
+    {
+      "path": "packages/frontdoor/src/selectors.rs",
+      "lines": 245,
+      "sha256": "8b88de03d373203a5ed405990003c5ed7f3fdf54ccc5dbe09bcc6d108c6cfb57"
+    },
+    {
+      "path": "packages/frontdoor/src/version.rs",
+      "lines": 182,
+      "sha256": "44648ce5be877b5f91929d0ff950395e900f6211f6a24b1d2e3ee93921be635d"
+    }
+  ],
+  "advertisedCliCommands": [
+    {
+      "name": "schema",
+      "declaredMutates": false
+    },
+    {
+      "name": "status",
+      "declaredMutates": false
+    },
+    {
+      "name": "daemon.status",
+      "declaredMutates": false
+    },
+    {
+      "name": "context",
+      "declaredMutates": false
+    },
+    {
+      "name": "capabilities",
+      "declaredMutates": false
+    },
+    {
+      "name": "update.check",
+      "declaredMutates": false
+    },
+    {
+      "name": "update.live",
+      "declaredMutates": true
+    },
+    {
+      "name": "update.app",
+      "declaredMutates": true
+    },
+    {
+      "name": "update.status",
+      "declaredMutates": false
+    },
+    {
+      "name": "provider.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "provider.configure",
+      "declaredMutates": true
+    },
+    {
+      "name": "provider.get",
+      "declaredMutates": false
+    },
+    {
+      "name": "provider.verify",
+      "declaredMutates": true
+    },
+    {
+      "name": "shell",
+      "declaredMutates": true
+    },
+    {
+      "name": "file.download",
+      "declaredMutates": true
+    },
+    {
+      "name": "file.transfer.status",
+      "declaredMutates": false
+    },
+    {
+      "name": "file.transfer.cancel",
+      "declaredMutates": true
+    },
+    {
+      "name": "process.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "hook.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "process.kill",
+      "declaredMutates": true
+    },
+    {
+      "name": "process.killAll",
+      "declaredMutates": true
+    },
+    {
+      "name": "file-access.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "file-access.configure",
+      "declaredMutates": false
+    },
+    {
+      "name": "workspace.open",
+      "declaredMutates": false
+    },
+    {
+      "name": "workspace.add-root",
+      "declaredMutates": false
+    },
+    {
+      "name": "workspace.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "workspace.show",
+      "declaredMutates": false
+    },
+    {
+      "name": "workspace.remove",
+      "declaredMutates": true
+    },
+    {
+      "name": "space.open",
+      "declaredMutates": true
+    },
+    {
+      "name": "preview.feedback",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.get",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.components",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.inspect",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.narrative",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.rounds",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.trunks",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.trunk",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.blob",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.context",
+      "declaredMutates": false
+    },
+    {
+      "name": "agent.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "agent.run",
+      "declaredMutates": true
+    },
+    {
+      "name": "agent.show",
+      "declaredMutates": false
+    },
+    {
+      "name": "agent.action",
+      "declaredMutates": true
+    },
+    {
+      "name": "agent.reload",
+      "declaredMutates": true
+    },
+    {
+      "name": "agent.reset",
+      "declaredMutates": true
+    },
+    {
+      "name": "agent.test",
+      "declaredMutates": false
+    },
+    {
+      "name": "agent.logs",
+      "declaredMutates": false
+    },
+    {
+      "name": "session.send",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.ask",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.respond",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.interrupt",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.close",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.archive",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.label",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.describe",
+      "declaredMutates": true
+    },
+    {
+      "name": "session.model",
+      "declaredMutates": true
+    },
+    {
+      "name": "machine.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "machine.show",
+      "declaredMutates": false
+    },
+    {
+      "name": "machine.pair",
+      "declaredMutates": true
+    },
+    {
+      "name": "machine.forget",
+      "declaredMutates": true
+    },
+    {
+      "name": "device.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "device.invite",
+      "declaredMutates": true
+    },
+    {
+      "name": "device.revoke",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.list",
+      "declaredMutates": false
+    },
+    {
+      "name": "client.attach",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.status",
+      "declaredMutates": false
+    },
+    {
+      "name": "client.result",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.inspect",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.eval",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.act",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.events",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.screenshot",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.reload",
+      "declaredMutates": true
+    },
+    {
+      "name": "client.revoke",
+      "declaredMutates": true
+    },
+    {
+      "name": "speech.runtime.status",
+      "declaredMutates": false
+    },
+    {
+      "name": "speech.runtime.probe",
+      "declaredMutates": false
+    },
+    {
+      "name": "speech.runtime.register",
+      "declaredMutates": true
+    },
+    {
+      "name": "speech.runtime.unregister",
+      "declaredMutates": true
+    }
+  ],
+  "streamMethods": [
+    {
+      "wire": "events",
+      "variant": "Events"
+    },
+    {
+      "wire": "asset.preview",
+      "variant": "AssetPreview"
+    },
+    {
+      "wire": "service.preview",
+      "variant": "ServicePreview"
+    },
+    {
+      "wire": "shell.run",
+      "variant": "ShellRun"
+    },
+    {
+      "wire": "file.read",
+      "variant": "FileRead"
+    },
+    {
+      "wire": "rtc.negotiate",
+      "variant": "RtcNegotiate"
+    },
+    {
+      "wire": "rtc.config",
+      "variant": "RtcConfig"
+    }
+  ],
+  "streamConstantMethods": [
+    {
+      "constant": "PROTOCOL_IDENTITY_METHOD",
+      "variant": "ProtocolIdentity"
+    },
+    {
+      "constant": "SPEECH_TRANSCRIBE_METHOD",
+      "variant": "SpeechTranscribe"
+    }
+  ],
+  "nestedOperations": [
+    {
+      "enum": "ClientDebugRequest",
+      "definition": "packages/proto/src/client_debug.rs:8",
+      "variants": [
+        "Register",
+        "List",
+        "Poll",
+        "Decide",
+        "Complete",
+        "Attach",
+        "Status",
+        "Execute",
+        "Result",
+        "Revoke"
+      ]
+    },
+    {
+      "enum": "ClientDebugAction",
+      "definition": "packages/proto/src/client_debug.rs:62",
+      "variants": [
+        "Inspect",
+        "Eval",
+        "Screenshot",
+        "Act",
+        "Events",
+        "Reload"
+      ]
+    },
+    {
+      "enum": "ProviderOperationCommand",
+      "definition": "packages/proto/src/provider_control.rs:25",
+      "variants": [
+        "Prepare",
+        "Get",
+        "Submit",
+        "Verify"
+      ]
+    },
+    {
+      "enum": "PreviewFeedbackOperation",
+      "definition": "packages/proto/src/preview_feedback.rs:37",
+      "variants": [
+        "Source",
+        "Share",
+        "Revoke",
+        "Open",
+        "Draft",
+        "Upsert",
+        "Remove",
+        "BeginArtifact",
+        "Chunk",
+        "FinishArtifact",
+        "AbortArtifact",
+        "Submit",
+        "Read"
+      ]
+    },
+    {
+      "enum": "AgentSpaceOperation",
+      "definition": "packages/proto/src/rpc.rs:1161",
+      "variants": [
+        "SetComponent",
+        "RemoveComponent",
+        "SetParent",
+        "SetLifecycle"
+      ]
+    }
+  ],
+  "limitations": [
+    "Static references are candidates, not proof of runtime reachability or line-by-line review.",
+    "Literal HTTP routes omit constant-derived route names; transport contracts require separate review.",
+    "Generated bindings and test sources intentionally excluded from consumer counts."
+  ]
+}

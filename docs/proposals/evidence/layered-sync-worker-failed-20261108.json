@@ -1,0 +1,87 @@
+{
+  "schema": "genehub.sync-experiment-evidence.v1",
+  "runId": "261108-1512-layered-sync-worker-preflight-880a",
+  "status": "failed",
+  "open": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub",
+    "sha": "8543ae412a987a03451db05c8e3c8d1320657139",
+    "branch": "fix/daemon-resource-pressure-20261107",
+    "dirty": true,
+    "dirtyDigest": "a1039ee7c45581f494e9ba09fd1170fdc66815a7ca3e398c4dc2812c7a27b6a7"
+  },
+  "cloud": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub-cloud",
+    "sha": "e7dd53ea04bbddefcb6bf4622cc206b3312c7efc",
+    "branch": "fix/daemon-resource-pressure-20261107",
+    "dirty": false,
+    "dirtyDigest": "51355576c78ee82a6859402c9b73c75d895473523a18a3d92d1d5097ac0a0a19"
+  },
+  "artifact": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub/target/iterate/genet-local",
+    "hash": "5b7b9cc1d97068e3ab9f1b89a7dc0b8af33078c5c7f0684edd03bbd4b05c0d76",
+    "kind": "genet-local"
+  },
+  "artifactBundleHash": "e29467f44e191db54d52b01c58bb56dd34325825d17bc55e46c5b3c1ceec9394",
+  "inputDrift": false,
+  "inputObservation": {
+    "changed": false,
+    "complete": true,
+    "errors": [],
+    "changedPaths": []
+  },
+  "qualification": {
+    "gate": "dev-feedback",
+    "scope": "feedback",
+    "policyVersion": "gates.v3",
+    "qualified": false,
+    "reasons": [
+      "failed cases present"
+    ]
+  },
+  "counts": {
+    "passed": 12,
+    "failed": 2,
+    "blocked": 0,
+    "unstable": 0,
+    "interrupted": 0,
+    "not-applicable": 0,
+    "total": 14
+  },
+  "governanceDigest": "858b019bf276806b7903cd7029fd40560c790116f1bc9a4632edca8ca41550bd",
+  "results": [
+    {
+      "caseId": "specialty.contracts.layered-sync-adapters",
+      "status": "failed",
+      "durationMs": 265,
+      "message": "node not introduced by this snapshot; worker terminated abnormally: exit=1 signal=null",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    },
+    {
+      "caseId": "specialty.contracts.layered-sync-cache",
+      "status": "failed",
+      "durationMs": 404,
+      "message": "node not introduced by this snapshot; worker terminated abnormally: exit=1 signal=null",
+      "cleanup": {
+        "before": {
+          "processes": 0,
+          "ports": 0
+        },
+        "after": {
+          "processes": 0,
+          "ports": 0
+        },
+        "scope": "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets"
+      }
+    }
+  ]
+}

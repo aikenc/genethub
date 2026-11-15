@@ -1,0 +1,68 @@
+{
+  "schema": "genehub.design-review.v1",
+  "date": "2026-11-08",
+  "scope": "documentation and source review only; no runtime or product tests executed",
+  "proposal": {
+    "path": "docs/layered-file-hash-sync-proposal-20261108.md",
+    "sha256": "7154f1fdc96455e7c3360756b9a6940b28df34d6f385b4cd402719bbead9c679",
+    "bytes": 72491
+  },
+  "localLinksChecked": 526,
+  "sourceFactChecks": {
+    "idbExists": true,
+    "cacheBounds": true,
+    "sourceCompleteGatesWrite": true,
+    "pageContinuationDropped": true,
+    "networkRosterBeforeHydrate": true,
+    "wholeSourceChecksumAndPut": true,
+    "perBatchEmitAndRepair": true,
+    "cliReadsEveryPage": true,
+    "cliLocalInProcess": true,
+    "knownSetProjection": true,
+    "singleMetadataTable": true
+  },
+  "sources": {
+    "browserCache": {
+      "path": "packages/workbench/src/protocol/summary-directory-cache.ts",
+      "sha256": "b9d91f5346cc7f5a2fd6c6070fa4f9608b54bdcbf9288acc617d2597b869c359"
+    },
+    "directory": {
+      "path": "packages/workbench/src/protocol/summary-directory.ts",
+      "sha256": "c050b6503027e8f4a8d71b91722e3026ab229c809420513ea15f93ddee0d7dbe"
+    },
+    "cliQuery": {
+      "path": "apps/daemon/src/cli_front/query.rs",
+      "sha256": "02e91023d5b3d1f291c8f2da2c3729a5831a2980d9fc90804104578027fcc285"
+    },
+    "cliRpc": {
+      "path": "apps/daemon/src/cli_front/rpc.rs",
+      "sha256": "d5e766ef9ff9a1528dbc193cfd33557288b738254bdc2e090ce422f02062f774"
+    },
+    "catalog": {
+      "path": "apps/daemon/src/session/catalog.rs",
+      "sha256": "133fb06bed4b9e362ad712009decb00b19d4f5990532083ecd52820cbab0a15b"
+    },
+    "metadataIndex": {
+      "path": "apps/daemon/src/session/store.rs",
+      "sha256": "82c4743af222b386e15270d476ceedf028a36a5d3849bbe1b74974120ec7721d"
+    }
+  },
+  "repositories": {
+    "open": {
+      "sha": "432e507fcba1007a7d8653fda197ecbf54a0b72c",
+      "dirty": false
+    },
+    "cloud": {
+      "sha": "e7dd53ea04bbddefcb6bf4622cc206b3312c7efc",
+      "dirty": false
+    }
+  },
+  "runtimeTestsExecuted": false,
+  "productionImplementationChanged": false,
+  "unverified": [
+    "real browser offline roster startup and unit persistence",
+    "per-unit rendering and initial-stream handoff",
+    "real daemon 1/20/100 CLI mixed with browser",
+    "cross-tab current-reference conflict and quota/eviction recovery"
+  ]
+}

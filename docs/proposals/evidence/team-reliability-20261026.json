@@ -1,0 +1,211 @@
+{
+  "schema": "team-reliability-proposal-evidence.v1",
+  "capturedAt": "2026-10-25T16:29:43.203484+00:00",
+  "kind": "read-only historical retrieval and source inspection; no fault injection",
+  "slot": "dev-3",
+  "openRevision": "8434f3c88a3d02c1610ea12f38754cde6a04927e",
+  "cloudRevision": "4a6d5a52a87fc99de449b0fad8b2aa321e758577",
+  "historicalFrontendRounds": {
+    "nextCursor": "before:39",
+    "rounds": [
+      {
+        "endedAtMs": 1792861776155,
+        "outcome": "superseded",
+        "roundId": "r_9251380fa8ec47039f7f38728836e04b",
+        "startedAtMs": 1792861722302,
+        "trunkCount": 1,
+        "userItemId": "u_694b43b70f544ab9aa83ea5c32e441b0"
+      },
+      {
+        "endedAtMs": 0,
+        "outcome": "failed",
+        "roundId": "r_ca6973845672426d8e89ce9d69806c9f",
+        "startedAtMs": 1792861776153,
+        "trunkCount": 0,
+        "userItemId": "u_80e3c28eb9804833a0c741c244ce6cb2"
+      }
+    ],
+    "source": {
+      "digest": "sha256:82d5aad215cce5cf881f4363927d797ff1d6d2bed32b5ababea14dd9092283bb",
+      "sessionId": "s_da9a3bd1dbe8469f9e1af22e50b2d6cf",
+      "throughRoundId": "r_ca6973845672426d8e89ce9d69806c9f",
+      "untrusted": true
+    }
+  },
+  "v6MacQa": {
+    "source": {
+      "digest": "sha256:0b424eef492cdc30b39a500cf8dc7d6564c022e5dec9ccd724b2dc19d7bddb80",
+      "sessionId": "s_9969c06bec6b4caa94557c9a08286d88",
+      "throughRoundId": "r_ab4a7d45c1d64a53a1a8f2719f15e801",
+      "untrusted": true
+    },
+    "itemId": "msg_012e1966a5095e28016ade26004058819a8c255a9fcc11e7c9",
+    "ghref": "ghref:item:s_9969c06bec6b4caa94557c9a08286d88:msg_012e1966a5095e28016ade26004058819a8c255a9fcc11e7c9",
+    "verdict": "FAIL",
+    "meanFps": 28.12,
+    "onePercentLowFps": 4.26,
+    "note": "historical QA report, not a new runtime measurement"
+  },
+  "teamHealthSnapshot": {
+    "at": "2026-10-26 00:16:52",
+    "atMs": 1792945012000,
+    "metrics": {
+      "runningSessions": 3,
+      "posts": 10,
+      "activationRate": 0.3,
+      "activationTarget": 0.3,
+      "activationOk": true,
+      "findings": {
+        "raised": 25,
+        "closed": 21,
+        "open": 4,
+        "overdue": 0,
+        "landingRate": 0.84,
+        "mechanismRate": 1.0,
+        "closedTextOnly": [],
+        "missingEvidencePaths": [
+          {
+            "id": "f_338f1e5501",
+            "path": "datas/assets/mofeng-v3/DELIVERY.md"
+          }
+        ],
+        "overdueItems": [],
+        "openItems": [
+          {
+            "id": "f_03190eadbb",
+            "title": "ab2×dc1 合并（rebase1）→ v6 构建 → 两段验收 → 发布",
+            "owner": "dev",
+            "dueAtMs": 1792948413581
+          },
+          {
+            "id": "f_44b6d13365",
+            "title": "v6 两段验收当天出放行/回退结论",
+            "owner": "qa",
+            "dueAtMs": 1792948372240
+          },
+          {
+            "id": "f_3aca628440",
+            "title": "发布/验收回执必须带 release_gate 结论",
+            "owner": "leader",
+            "dueAtMs": 1792950172279
+          },
+          {
+            "id": "f_e4f3e33e27",
+            "title": "远端实机段前必须有包：push_release 上线并接入下次发布",
+            "owner": "leader",
+            "dueAtMs": 1792950659800
+          }
+        ]
+      },
+      "mechanismRate": 1.0,
+      "memoryMechanisms": {
+        "rules": 18,
+        "withMechanism": 14,
+        "advisory": 4,
+        "untagged": [],
+        "coverage": 0.78
+      },
+      "idleRoles": 7,
+      "idleExplained": 7,
+      "idleUnexplained": 0,
+      "dispatchLandingRate": 1.0,
+      "dispatchSamples": 9,
+      "complaintToFixSeconds": {
+        "last": 192,
+        "median": 428,
+        "max": 692,
+        "samples": 5,
+        "unresolved": 0,
+        "unresolvedOldestSeconds": 0
+      },
+      "batchBarrierSeconds": {
+        "last": 4407,
+        "max": 4407,
+        "openBarrier": 0,
+        "samples": 2
+      }
+    },
+    "blockers": [
+      {
+        "kind": "证据指向不存在的文件",
+        "detail": "f_338f1e5501 的闭合证据引用了 datas/assets/mofeng-v3/DELIVERY.md，本机没有这个文件（证据是编的或路径写错）"
+      }
+    ],
+    "note": "team-maintained derived metrics; may omit remote observations; not platform acceptance"
+  },
+  "teamLedgerErrors": [
+    {
+      "sessionId": "s_4ca7f52618c84f92a8b4322b2d776575",
+      "machine": "mch_LlDArLOhiG3E",
+      "lastReconcileError": "回复在对账后发生变化"
+    },
+    {
+      "sessionId": "s_1c60eb5c348b465da0dd4174ba603bde",
+      "stopAfterSeconds": 300,
+      "stopReason": "timeout"
+    },
+    {
+      "sessionId": "s_0ac57b2760994579b68055db1524038a",
+      "stopAfterSeconds": 90,
+      "stopReason": "timeout"
+    },
+    {
+      "sessionId": "s_4960f66dc6d54aa68cde7850f04f6404",
+      "machine": "mch_LlDArLOhiG3E",
+      "lastReconcileError": "genet session get 失败: mch_LlDArLOhiG3E no longer accepts this installation's credential (that machine would not accept this credential); pair again with a fresh invite",
+      "lastReconcileErrorAtMs": 1792935397964
+    },
+    {
+      "sessionId": "s_b1adfffe267842538e25490892a274f1",
+      "machine": "mch_LlDArLOhiG3E",
+      "lastReconcileError": "genet session get 失败: mch_LlDArLOhiG3E no longer accepts this installation's credential (that machine would not accept this credential); pair again with a fresh invite",
+      "lastReconcileErrorAtMs": 1792944472041
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "docs/teams.md",
+      "sha256": "e5cda8af19803e8c1f1a7e9277734e6aafb498bed516f60a919d9cc7cdca6f3e"
+    },
+    {
+      "path": "apps/daemon/src/session/inbox.rs",
+      "sha256": "fb2f9deef4ece5adcc26031acc8dadaa79bafd569eb945dd56516fdd36cddeb6"
+    },
+    {
+      "path": "apps/daemon/src/session/manager.rs",
+      "sha256": "14ff1fe53fe82cf64ba21ded789dfc55f9efff65eae06cf286d6a64d4c9eb0cd"
+    },
+    {
+      "path": "apps/daemon/src/adapter/mod.rs",
+      "sha256": "604d3e7136c772ed63af3167dfd0d6081d7044df9e27e2ae8a51322bcdf9d4af"
+    },
+    {
+      "path": "apps/daemon/src/cli_front/file.rs",
+      "sha256": "0d14881c1ce878cdb81ef1d4dfa018ef3dc0be20d41de69423e4225beaa459f5"
+    },
+    {
+      "path": "apps/daemon/src/transfer.rs",
+      "sha256": "7979dfd5b43f3187ca1125eaf5f38e1feab295432bf8d84d1e76a8ab138815ae"
+    },
+    {
+      "path": "apps/daemon/builtin-agents/sdk/genehub_agent/claude_family/session.py",
+      "sha256": "522489fba58668239ffa2630debb749ebbaa2cb7df4ce426c3886d1ada2fa678"
+    },
+    {
+      "path": "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py",
+      "sha256": "37dd826c2318c49d2c8da9b6b0dd54e3b4c89ede701cb19574b34610c7e4312b"
+    },
+    {
+      "path": "apps/daemon/builtin-skills/genehub/references/team-template/skills/team-reflect/SKILL.md",
+      "sha256": "c901ded6054d80f8805413b2bc831da95297a1308e931f3022362be8a53bf307"
+    },
+    {
+      "path": "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py",
+      "sha256": "05a27d0080647f8167a80778aac7ecdbdddd9b6259c9a05c36bfb94fc4be7316"
+    }
+  ],
+  "historicalNotes": {
+    "localPlatformIssuesSha256": "4bd01562e52a09d47624f8ad309fbeb8caf59239842f1fa39832d8ce4ea623e2",
+    "note": "historical team-authored diagnoses are leads; credential rejection does not prove expiry; no authority or credential material retained"
+  }
+}

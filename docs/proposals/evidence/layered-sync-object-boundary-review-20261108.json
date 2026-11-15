@@ -1,0 +1,55 @@
+{
+  "schema": "genehub.design-review.v1",
+  "date": "2026-11-08",
+  "scope": "source and primary-document review; no new implementation or runtime experiment",
+  "proposal": {
+    "path": "docs/layered-file-hash-sync-proposal-20261108.md",
+    "sha256": "bdda212a5256233c486f28c5b15d5222e2c213c24f807f5df80999a86c3602a9",
+    "bytes": 77775
+  },
+  "localLinksChecked": 527,
+  "jsonExamplesParsed": 2,
+  "documentContractsChecked": [
+    "不实现独立业务同步单元管理器",
+    "不可变对象没有",
+    "图完整",
+    "查询完整",
+    "状态最新",
+    "Object={format, refs:[hash...], payload:bytes}",
+    "不再复制一份业务覆盖表",
+    "不能仅凭 summary 名称断定业务耦合",
+    "本轮未执行这些新增实验"
+  ],
+  "sourceReview": {
+    "path": "prototypes/layered-file-hash-sync/prototype.mjs",
+    "sha256": "05589d69369ab5c732659e5e90a57486f6383c1132b1415646b5bfaf3d99f6d0",
+    "structuralLeafTag": "summary",
+    "replicaInterpretsBusinessFields": false,
+    "consumerDecodesPayload": true,
+    "conclusion": "fixed structural types are not proof of business coupling; two descriptors do not certify the proposed production interface"
+  },
+  "references": [
+    "https://git-scm.com/book/en/v2/Git-Internals-Git-Objects",
+    "https://git-scm.com/docs/git-update-ref",
+    "https://git-scm.com/docs/partial-clone"
+  ],
+  "repositories": {
+    "open": {
+      "sha": "432e507fcba1007a7d8653fda197ecbf54a0b72c",
+      "dirty": false
+    },
+    "cloud": {
+      "sha": "e7dd53ea04bbddefcb6bf4622cc206b3312c7efc",
+      "dirty": false
+    }
+  },
+  "runtimeTestsExecuted": false,
+  "productionChanged": false,
+  "pendingProductionEvidence": [
+    "opaque-payload graph engine with no business branches",
+    "shared-node retrieval and missing descendant handling",
+    "independent source roots and summary/body separation",
+    "pin/eviction/restart closure validity",
+    "real source adapters, browser persistence and high-volume CLI"
+  ]
+}
