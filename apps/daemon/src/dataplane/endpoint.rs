@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -472,6 +472,73 @@ impl From<ServerFrame> for QueuedEvent {
     }
 }
 
+/// Written into each terminal a peer was showing when it fell behind.
+const TERMINAL_GAP_NOTICE: &str = "\r\n[终端输出过快，部分输出没有送达本窗口]\r\n";
+/// Terminals are capped per machine; this only bounds ids whose close was lost.
+const MAX_GAP_TRACKED_TERMINALS: usize = 64;
+
+/// Forwards what the machine volunteers to one full peer.
+///
+/// Machine state and terminal output come from separate broadcasts. A missed
+/// machine frame is a fact the client cannot tell it lacks, so losing one still
+/// ends the endpoint and the reconnect reads everything again. Falling behind
+/// terminal output only costs this peer some bytes: it keeps its connection,
+/// and every terminal it was showing gets a visible gap notice instead.
+async fn forward_fanout(
+    mut machine: broadcast::Receiver<ServerFrame>,
+    mut terminals: Option<broadcast::Receiver<ServerFrame>>,
+    events: mpsc::Sender<QueuedEvent>,
+    on_terminal_gap: impl Fn(u64),
+) {
+    let mut shown = BTreeSet::new();
+    loop {
+        let frame = tokio::select! {
+            received = machine.recv() => match received {
+                Ok(frame) => frame,
+                Err(_) => return,
+            },
+            received = async { terminals.as_mut().unwrap().recv().await }, if terminals.is_some() => {
+                match received {
+                    Ok(frame) => {
+                        match &frame {
+                            ServerFrame::PtyOutput { pty_id, .. }
+                                if shown.len() < MAX_GAP_TRACKED_TERMINALS =>
+                            {
+                                shown.insert(pty_id.clone());
+                            }
+                            ServerFrame::PtyClosed { pty_id, .. } => {
+                                shown.remove(pty_id);
+                            }
+                            _ => {}
+                        }
+                        frame
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        on_terminal_gap(missed);
+                        for pty_id in &shown {
+                            let notice = ServerFrame::PtyOutput {
+                                pty_id: pty_id.clone(),
+                                data: TERMINAL_GAP_NOTICE.to_owned(),
+                            };
+                            if events.send(notice.into()).await.is_err() {
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        terminals = None;
+                        continue;
+                    }
+                }
+            }
+        };
+        if events.send(frame.into()).await.is_err() {
+            return;
+        }
+    }
+}
+
 pub(crate) struct PeerServices {
     pub(crate) state: Shared,
     pub(crate) access: PeerAccess,
@@ -580,27 +647,21 @@ pub(crate) async fn serve_streams(
         "online",
         Some(carrier_kind.as_str()),
     );
-    let fanout_task = state
-        .fanout
-        .get()
-        .filter(|_| watcher.is_full())
-        .map(|fanout| {
-            let mut receiver = fanout.subscribe();
-            let events = services.event_sender.clone();
-            tokio::spawn(async move {
-                loop {
-                    match receiver.recv().await {
-                        Ok(frame) => {
-                            if events.send(frame.into()).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => return,
-                        Err(broadcast::error::RecvError::Lagged(_)) => return,
-                    }
-                }
-            })
-        });
+    let fanout_task = watcher.is_full().then(|| {
+        let machine = state.machine_events.subscribe();
+        let terminals = state.fanout.get().map(|fanout| fanout.subscribe());
+        let events = services.event_sender.clone();
+        let diagnostics = state.diagnostics.clone();
+        let carrier = carrier_kind.as_str();
+        tokio::spawn(forward_fanout(machine, terminals, events, move |missed| {
+            diagnostics.record("dataplane", "terminal.fanout", "lagged", Some(carrier));
+            tracing::warn!(
+                missed,
+                carrier,
+                "a peer fell behind terminal output; it keeps its connection and sees a gap notice"
+            );
+        }))
+    });
 
     if let Some(device_id) = &access.device_id {
         state.devices.mark_connected(device_id);
@@ -640,7 +701,7 @@ pub(crate) async fn serve_streams(
                 }
                 _ = peer.handlers.join_next(), if !peer.handlers.is_empty() => {}
                 _ = async { peer.fanout_task.as_mut().unwrap().await }, if peer.fanout_task.is_some() => {
-                    break Err(anyhow!("event fanout closed or lost its delivery position"));
+                    break Err(anyhow!("machine event fanout closed or lost its delivery position"));
                 }
                 command = commands.recv() => {
                     match command {
@@ -1689,5 +1750,192 @@ mod tests {
             diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
             None
         );
+    }
+
+    fn terminal(pty_id: &str, data: &str) -> ServerFrame {
+        ServerFrame::PtyOutput {
+            pty_id: pty_id.into(),
+            data: data.into(),
+        }
+    }
+
+    fn terminal_text(event: QueuedEvent) -> (String, String) {
+        match event.frame {
+            ServerFrame::PtyOutput { pty_id, data } => (pty_id, data),
+            _ => panic!("expected terminal output"),
+        }
+    }
+
+    /// Lets the spawned forwarder run until it is parked again.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_behind_terminal_output_keeps_its_connection_and_sees_a_gap() {
+        let (machine_tx, machine_rx) = broadcast::channel(8);
+        let (terminal_tx, terminal_rx) = broadcast::channel(4);
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let missed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = missed.clone();
+        let forwarder = tokio::spawn(forward_fanout(
+            machine_rx,
+            Some(terminal_rx),
+            events_tx,
+            move |count| {
+                counted.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+            },
+        ));
+
+        terminal_tx.send(terminal("pty_a", "first")).unwrap();
+        settle().await;
+        // The single-slot queue holds `first`; `second` parks the forwarder on
+        // a full peer queue, so the flood below outruns this peer.
+        terminal_tx.send(terminal("pty_a", "second")).unwrap();
+        settle().await;
+        for index in 0..10 {
+            terminal_tx
+                .send(terminal("pty_a", &format!("flood-{index}")))
+                .unwrap();
+        }
+
+        let mut received = Vec::new();
+        while received.len() < 7 {
+            received.push(terminal_text(events_rx.recv().await.unwrap()));
+        }
+        let data: Vec<&str> = received.iter().map(|(_, data)| data.as_str()).collect();
+        assert_eq!(
+            data,
+            [
+                "first",
+                "second",
+                TERMINAL_GAP_NOTICE,
+                "flood-6",
+                "flood-7",
+                "flood-8",
+                "flood-9"
+            ]
+        );
+        assert!(received.iter().all(|(pty_id, _)| pty_id == "pty_a"));
+        assert_eq!(missed.load(std::sync::atomic::Ordering::SeqCst), 6);
+
+        // Still forwarding: machine state and later output keep arriving.
+        machine_tx
+            .send(ServerFrame::Notice {
+                level: genehub_proto::NoticeLevel::Info,
+                message: "still here".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            events_rx.recv().await.unwrap().frame,
+            ServerFrame::Notice { .. }
+        ));
+        terminal_tx.send(terminal("pty_a", "after")).unwrap();
+        assert_eq!(terminal_text(events_rx.recv().await.unwrap()).1, "after");
+        assert!(!forwarder.is_finished());
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_closed_terminal_gets_no_gap_notice() {
+        let (_machine_tx, machine_rx) = broadcast::channel(8);
+        let (terminal_tx, terminal_rx) = broadcast::channel(2);
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let forwarder = tokio::spawn(forward_fanout(
+            machine_rx,
+            Some(terminal_rx),
+            events_tx,
+            |_| {},
+        ));
+        terminal_tx.send(terminal("pty_gone", "bye")).unwrap();
+        terminal_tx
+            .send(ServerFrame::PtyClosed {
+                pty_id: "pty_gone".into(),
+                exit_code: Some(0),
+            })
+            .unwrap();
+        settle().await;
+        assert_eq!(terminal_text(events_rx.recv().await.unwrap()).1, "bye");
+        settle().await;
+        // The close now occupies the peer queue; `x` parks the forwarder
+        // behind it, so the flood below outruns this peer.
+        terminal_tx.send(terminal("pty_live", "x")).unwrap();
+        settle().await;
+        for index in 0..6 {
+            terminal_tx
+                .send(terminal("pty_live", &format!("y{index}")))
+                .unwrap();
+        }
+        assert!(matches!(
+            events_rx.recv().await.unwrap().frame,
+            ServerFrame::PtyClosed { .. }
+        ));
+        let mut rest = Vec::new();
+        while rest.len() < 4 {
+            rest.push(terminal_text(events_rx.recv().await.unwrap()));
+        }
+        assert_eq!(
+            rest,
+            [
+                ("pty_live".to_owned(), "x".to_owned()),
+                ("pty_live".to_owned(), TERMINAL_GAP_NOTICE.to_owned()),
+                ("pty_live".to_owned(), "y4".to_owned()),
+                ("pty_live".to_owned(), "y5".to_owned()),
+            ]
+        );
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_behind_machine_state_still_ends_for_a_full_reread() {
+        let (machine_tx, machine_rx) = broadcast::channel(2);
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let forwarder = tokio::spawn(forward_fanout(machine_rx, None, events_tx, |_| {}));
+        let notice = || ServerFrame::Notice {
+            level: genehub_proto::NoticeLevel::Info,
+            message: "state".into(),
+        };
+        machine_tx.send(notice()).unwrap();
+        settle().await;
+        machine_tx.send(notice()).unwrap();
+        settle().await;
+        for _ in 0..5 {
+            machine_tx.send(notice()).unwrap();
+        }
+        while events_rx.recv().await.is_some() {}
+        tokio::time::timeout(std::time::Duration::from_secs(5), forwarder)
+            .await
+            .expect("a lost machine frame must end the forwarder")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_output_cannot_evict_machine_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let (terminal_tx, mut terminal_rx) = broadcast::channel(2);
+        let _ = state.fanout.set(terminal_tx.clone());
+        let mut machine = state.machine_events.subscribe();
+        state.push(ServerFrame::Notice {
+            level: genehub_proto::NoticeLevel::Info,
+            message: "download".into(),
+        });
+        for index in 0..8 {
+            terminal_tx
+                .send(terminal("pty_a", &index.to_string()))
+                .unwrap();
+        }
+        assert!(matches!(machine.try_recv(), Ok(ServerFrame::Notice { .. })));
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        while let Ok(frame) = terminal_rx.try_recv() {
+            assert!(matches!(frame, ServerFrame::PtyOutput { .. }));
+        }
     }
 }
