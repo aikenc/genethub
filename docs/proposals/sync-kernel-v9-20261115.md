@@ -290,6 +290,13 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 
 ## 8. 全量迁移清单（主干 `158d7351`）
 
+> **明细与修正：** 逐个方法、帧、特性字符串、文件和函数的位置、动作和阶段，见[明细清单](sync-kernel-inventory-20261115.md)。明细清单对本节有三处修正：
+> - 方法共 131 个，本节漏掉了 `subscribe/unsubscribe`；
+> - 32 个状态读取细分为 26 个可订阅、6 个按需计算；
+> - 第 8.5 节的删除估计修正为约 5,250–6,550 行（`client.ts` 约 330 行，`router.rs` 的读取分支约 340 行）。
+>
+> 数字以明细清单为准。
+
 ### 8.1 RPC（共 129 个）
 
 | 类别 | 数量 | 方法 | v9 去向 |
