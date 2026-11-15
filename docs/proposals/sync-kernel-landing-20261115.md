@@ -153,13 +153,13 @@
 | 阶段 | 内容（见 v9 第 10 节） | 推进方式 | 依赖 | 完成定义 |
 | --- | --- | --- | --- | --- |
 | E0 环境 | dev-3 的 `dev.env`、parity 环境、自己的 Hub；两台以上 dev-3 机器（开发机和至少一台真机）；资源配额；第 1.7 节的核验脚本 | 按 dev-development Skill | 无 | `devctl check/serve/smoke/liveness` 通过；跨机 `file download` 和 `shell --machine` 在 dev-3 机器之间可用；隔离核验通过 |
-| P0 规范与覆盖检查 | 帧、错误码、schema 描述；数据源、应用子树、`change` hook、汇聚转发的合同；用五族做覆盖检查；architecture.md 修订；按族生效的门禁；状态面盘点脚本 | 设计评审 | v9 评审通过 | 五族都能用三原语表达；盘点脚本在 dev-3 上给出主干基线数字；门禁只对清单内的族生效 |
+| P0 规范与覆盖检查 | 帧、错误码、schema 描述；数据源、应用子树、`change` hook、汇聚转发的合同；用五族做覆盖检查；architecture.md 修订；按族生效的门禁；状态面盘点脚本 | 设计评审 | v9 评审通过 | 五族都能用两个原语（加补充流）表达；盘点脚本在 dev-3 上给出主干基线数字；门禁只对清单内的族生效 |
 | P1 内核、副本端、CLI | Rust 内核、TS 副本端、`genet sync` 系列命令 | 属性测试、合同测试、假端口；预算门槛 | P0 | v9 第 9.4 节的预算都满足；CPU 门槛实测通过 |
 | E1 测试团队 | 用 dev-3 当时的团队模板建立测试团队（第 5 节） | 在旧路径上先跑出基线 | E0 | 第 5.3 节的基线数据齐全 |
 | P2 团队跨机协作 | 机器间链路、应用子树、`change` hook；团队模板改为请求节点、认领节点加订阅 | **打磨循环**：试点、对照、双记分 | P1、E1 | 第 3.1 节 |
 | P3 会话目录与汇聚 | 摘要、草稿、批注节点；最近会话视图；汇聚转发 | 打磨循环，加 testctl 规模用例（`scale-fleet`、`team-scale`、`fs-change-discovery-scale` 已有可用的框架） | P2 | 第 3.2 节 |
 | P4 低频族 | 机器状态、设置、设备、Agent、进程、更新、通知 | 打磨循环（主要看警告线） | P3 | 6 种推送帧和对应的读取 RPC 进入兼容窗口 |
-| P5 文件、Git、会话正文 | 观察型节点；追加日志节点 | 打磨循环，加流式输出专项 | P4；文件监听依赖 R1 | `Event` 和 `Desync` 进入兼容窗口 |
+| P5 文件、Git、会话正文、终端 | 观察型节点；轮次节点（运行中可变，封存后不可变，含内联缩略图）；有人观看时的 `live` 流；每个终端一条 `pty` 流 | 打磨循环，加流式输出和终端洪泛专项 | P4；文件监听依赖 R1 | `Event`、`Desync`、`PtyOutput`、`PtyClosed` 和 `round.trunk.*` 进入兼容窗口 |
 | R1 host 能力 | `fs-watch`、进程事件 | 在 dev-3 的 parity 环境里做 App 安装验证 | 无，可并行 | 新旧 host 和 guest 的四种组合都通过合同测试 |
 | R2 执行分区 | 只在满足 v9 第 7 节的触发条件时立项 | — | P3 的实测 | — |
 | M 最终合入 | 按第 1.1 节第 4 条 | 主仓检出合入 | P5 | 第 1.1 节第 4 条的全部条件 |
@@ -220,7 +220,7 @@
 ```text
 业务层     exchange 方法 8 个：protocol.identity / rpc / events / asset.preview /
              shell.run / rtc.negotiate / service.preview / file.read
-           rpc 内：Request 129 种变体与 Reply 枚举
+           rpc 内：Request 131 种变体与 Reply 枚举
            events 内：11 种 ServerFrame，用 seq 重放，Desync 处理失步
            协商：WEB_PROTOCOL_VERSION=4、DATA_PLANE_VERSION=4、protocol.identity 和
              connection.identity、21 个特性字符串（router.rs:497），工作台在 48 处判断其中 15 个
@@ -243,17 +243,18 @@ hello   连接时交换：数据面版本 + 每族的 schema 描述（schema 哈
 sync    一条长流：get/watch/ops/unknown（v7 第 10.2 节的帧）
 call    一种信封：{key, name, args, ifToken, opId} → 结果或错误
         错误码只有 conflict/budget/tooLarge/unknownKey/handler/forbidden
-字节流  pty（每个终端一条流）· asset.preview · file.read · shell.run · service.preview
+补充流  live（有人观看时的逐字输出）· pty（每个终端一条）· shell.run ·
+        asset.preview / file.read / blob.get（大内容）· service.preview（隧道与媒体）
 连接    rtc.negotiate
 ```
 
 | 维度 | 现在 | 目标 |
 | --- | --- | --- |
-| 业务入口 | `rpc` 129 种变体，加 `events` 11 种帧 | `sync` 加 `call`；77 种写操作变成各族 schema 里声明的意图名 |
+| 业务入口 | `rpc` 131 种变体，加 `events` 11 种帧 | `sync` 加 `call`；77 种写操作变成各族 schema 里声明的意图名 |
 | 能力协商 | 2 个版本号、2 次身份确认、21 个特性字符串 | 数据面版本加每族的 schema 描述；已迁移族的特性字符串删除 |
-| 推送 | 共用一条事件流 | 状态走 `sync`；每个终端一条独立的流 |
+| 推送 | 共用一条事件流 | 状态和小的不可变内容走 `sync`；逐字输出只在有人观看时走 `live`；每个终端一条 `pty` 流（v9 第 4.3 节） |
 | 类型来源 | Rust 枚举生成 TS，CLI schema 手写 | 一份 schema 同时生成 Rust、TS 和 CLI 的输入输出 |
-| 逻辑连接续传 | 约 60 秒内接回流表和订阅 | 订阅靠令牌续接，写入靠 `opId`。P5 之后评估：只剩字节流需要它时，改为按流续接 |
+| 逻辑连接续传 | 约 60 秒内接回流表和订阅 | 订阅靠令牌续接，写入靠 `opId`；`live` 断开后重新 `get` 即可，不需要续传。P5 之后评估：只剩终端和大内容读取需要它时，改为按流续接 |
 
 新旧形态在兼容窗口内并存：旧客户端继续用 `rpc` 和 `events`，新客户端按族协商。所以最终合入之后，没有升级的调用方不受影响（第 1.1 节）。
 
@@ -266,7 +267,7 @@ call    一种信封：{key, name, args, ifToken, opId} → 结果或错误
 | P2 | 应用子树的 schema 描述 | 团队流程不再依赖 `shell.run` 接单（进入兼容窗口） |
 | P3 | 会话目录族的 schema | `catalog.sync`、`session.page`、`session.changes`、`session.list` 的 `since`；特性字符串 `catalog.sync.v1`、`session.page.v1`、`session.active-page.v1`、`session.changes.v1`、`session.summary.v1` |
 | P4 | 低频族的 schema | 6 种推送帧；对应的读取 RPC；`access.status.v1`、`process.services.v1` 等读形状开关 |
-| P5 | 每个终端独立的 `pty` 流；正文日志节点 | `events` 中的 `Event`、`Desync`、`PtyOutput`、`PtyClosed` |
+| P5 | 每个终端独立的 `pty` 流；轮次节点与 `live` 流 | `events` 中的 `Event`、`Desync`、`PtyOutput`、`PtyClosed`；`round.trunk.*` |
 | 收尾 | — | `rpc` 和 `events` 两个方法本身；`protocol.identity` 并入 `hello`（兼容窗口关闭之后） |
 
 ### 4.4 需要更正的文档

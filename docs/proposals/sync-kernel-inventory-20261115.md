@@ -27,13 +27,20 @@
   - 26 个状态读取改为节点或视图订阅；
   - 2 个会话订阅控制（`subscribe/unsubscribe`）并入 `sync` 流；
   - 6 个按需计算的读取保留为只读调用；
-  - 8 个历史和内容读取中，1 个改为日志节点，7 个保留；
+  - 8 个历史和内容读取中：`session.narrative` 改为轮次节点加实时流；`round.trunk.*` 3 个改为不可变节点（含内联缩略图，有大小上限）；`blob.*`、`git.diff`、`session.forkExport` 4 个保留，不走同步；
   - 10 个流式方法中，PTY 的 4 个合并为 1 条流，上传的 4 个可选合并为 1 条流，2 个保留；
   - 2 个连接方法中，1 个并入 `hello`；
   - 77 个写操作改为意图。其中有 18 个名字可以合并（第 1.7 节），合并后约 59 个意图。
 - 11 种推送帧：9 种删除（其中 `Notice` 是现在就可以删的死代码），2 种（PTY 输出）改为独立流。
-- 8 个 exchange 方法：删除 3 个（`rpc`、`events`、`protocol.identity`），新增 3 个（`hello`、`sync`、`call`），PTY 改为独立方法。
+- 8 个 exchange 方法：删除 3 个（`rpc`、`events`、`protocol.identity`），新增 5 个（`hello`、`sync`、`call`、`live`，以及每个终端一条的 `pty` 流）。方法数从 8 个变为 10 个，但每个方法只做一件事：原来挤在 `events` 一条流里的会话增量和终端输出各自独立。业务语义只剩 `sync` 和 `call` 两个入口。
 - 21 个特性字符串：14 个删除，进入 schema 的读形状和意图名单；7 个保留为流能力或传输能力，移进 `hello`。
+
+**框架边界（v9 第 4.3 节，2026-11-15 Human 决定）：**
+- 同步框架只承载会收敛的状态和小的不可变内容；
+- 流式输出是框架之上的补充，只在有人观看时推送；
+- 大文件、高清图片和视频、终端、shell 都不走同步，也不为它们做续传。
+
+本清单按这个边界给出每一项的去向。
 
 **修正 v9 第 8 节：**
 - v9 写的是 129 个方法，漏掉了 `subscribe` 和 `unsubscribe`（`rpc.rs` 里没有带点号的名字），实际是 131 个。
@@ -43,7 +50,7 @@
 - 工作台 `protocol/client.ts`：v9 估计删除 600–900 行。实测这个文件没有按 RPC 写的包装（调用方直接 `client.call({type})`），可删除的部分是目录订阅 143 行、事件流 151 行、协议身份 32 行，**约 330 行**。
 - daemon `router.rs` 读取分支：实测 **约 340 行**，v9 估计是 300–600 行。这些分支很薄，读取逻辑在 `session/manager.rs` 等处，迁移时是搬进数据源，不是删除。
 
-修正后，v9 第 8.5 节的合计删除估计从 4,400–6,900 行调整为**约 5,250–6,550 行**（第 3 节）。
+修正后，v9 第 8.5 节的合计删除估计从 4,400–6,900 行调整为**约 5,330–6,630 行**（第 3 节）。
 
 **另外两项发现：**
 - `Notice` 推送帧在生产代码里没有任何发送点，只在测试里构造（`endpoint.rs` 的测试模块从 1696 行开始），工作台却一直在监听（`client.ts:1577`）。它是死代码，可以在 P0 直接删除。
@@ -57,7 +64,8 @@
 | --- | --- | --- | --- |
 | `protocol.identity` | `handle_protocol_identity` 1147–1180 | 删除，并入 `hello` | 收尾 |
 | `rpc` | `handle_rpc` 1181–1322；业务分发在 `router.rs` 466–2701（195 个分支） | 删除。写入改走 `call`，读取改走 `sync` | 收尾（各族先进入兼容窗口） |
-| `events` | `handle_events` 1568–1609；副作用 `apply_side_effect` 1456–1567（目录订阅、失步） | 删除，改走 `sync` | P5 |
+| `events` | `handle_events` 1568–1609；副作用 `apply_side_effect` 1456–1567（目录订阅、失步） | 删除：状态改走 `sync`，逐字增量改走 `live` | P5 |
+| 新增 `live` | — | 实时补充流：有人观看某个会话时打开，只推 `ItemDelta`；不保证可靠，断开或有缺口时重新 `get` 轮次节点 | P5 |
 | `asset.preview`、`file.read`、`shell.run`、`service.preview` | 方法分发 `serve_stream` 1096–1146；诊断用的方法名表 `support_stream_operation` 1351–1361 | 保留 | — |
 | `rtc.negotiate` | 同上 | 保留 | — |
 | 新增 `hello` | — | 数据面版本、每族的 schema 描述、流能力 | P0 定义，P1 实现 |
@@ -114,19 +122,19 @@
 
 | 方法 | 目标 | 阶段 | daemon 处理 | 工作台调用方 | CLI |
 | --- | --- | --- | --- | --- | --- |
-| `subscribe` | `sync` 流上对 `m/<机器>/ws/<工作区>/session/<会话>/…` 的 `watch` | P5 | `router.rs:536` | `protocol/client.ts`×2 | `converse.rs` |
-| `unsubscribe` | `sync` 流上的 `drop` | P5 | `router.rs:564` | `protocol/client.ts`×1 | — |
+| `subscribe` | `sync` 上 `watch` 轮次节点；正在观看时另开 `live` 流 | P5 | `router.rs:536` | `protocol/client.ts`×2 | `converse.rs` |
+| `unsubscribe` | `sync` 上的 `drop`，同时关闭 `live` 流 | P5 | `router.rs:564` | `protocol/client.ts`×1 | — |
 
 ### 1.5 历史、内容与流（20 个）
 
 | 方法 | 目标 | 阶段 | daemon 处理 | 工作台调用方 | CLI |
 | --- | --- | --- | --- | --- | --- |
-| `session.narrative` | 追加日志节点 `m/<机器>/ws/<工作区>/session/<会话>/log` | P5 | `router.rs:951` | `session/store.ts`×2 | `query.rs` |
-| `round.trunk.list` | 保留：不可变历史的按需读取 | — | `router.rs:1010` | `session/ForwardDialog.tsx`×1、`session/store.ts`×2 | `query.rs` |
-| `round.trunk.get` | 同上 | — | `router.rs:1026` | `session/store.ts`×2 | `query.rs` |
-| `round.trunk.batchGet` | 同上 | — | `router.rs:1048` | `session/store.ts`×1 | — |
-| `blob.get` | 同上 | — | `router.rs:1041` | `session/store.ts`×2 | `query.rs` |
-| `blob.batchGet` | 同上 | — | `router.rs:1055` | `session/store.ts`×1 | — |
+| `session.narrative` | 轮次节点 `m/<机器>/ws/<工作区>/session/<会话>/turn/<轮次>`（运行中可变，封存后不可变），加 `live` 流 | P5 | `router.rs:951` | `session/store.ts`×2 | `query.rs` |
+| `round.trunk.list` | 不可变节点的视图 `m/<机器>/ws/<工作区>/session/<会话>/turn/<轮次>/trunk/` | P5 | `router.rs:1010` | `session/ForwardDialog.tsx`×1、`session/store.ts`×2 | `query.rs` |
+| `round.trunk.get` | 不可变节点 `…/trunk/<n>`（含内联缩略图，有大小上限，令牌就是内容 id） | P5 | `router.rs:1026` | `session/store.ts`×2 | `query.rs` |
+| `round.trunk.batchGet` | 一次 `get` 多个键 | P5 | `router.rs:1048` | `session/store.ts`×1 | — |
+| `blob.get` | 保留：全文读取，不走同步；节点里只放 `BlobRef` | — | `router.rs:1041` | `session/store.ts`×2 | `query.rs` |
+| `blob.batchGet` | 保留，同上 | — | `router.rs:1055` | `session/store.ts`×1 | — |
 | `git.diff` | 保留：内容读取 | — | `router.rs:2502` | `changes/ChangesPanel.tsx`×1、`session/store.ts`×1 | — |
 | `session.forkExport` | 保留：导出内容 | — | `router.rs:1365` | `app/WorkbenchApp.tsx`×1 | — |
 | `pty.open` | 合并为每个终端一条双向 `pty` 流（4 → 1） | P5 | `router.rs:2528` | `terminal/TerminalPanel.tsx`×1 | — |
@@ -181,7 +189,7 @@
 | 帧（线上名） | daemon 发送位置 | 工作台接收位置 | 动作 | 阶段 |
 | --- | --- | --- | --- | --- |
 | `Catalog`（`catalog`） | `endpoint.rs:1476`（`apply_side_effect`） | `client.ts:1558` → `receiveCatalog` 944–1017 | 删除，改为视图订阅 | P3 |
-| `Event`（`event`） | 构造函数 `rpc.rs:1478`，经 `handle_events` 发出 | `client.ts:1559` → `receiveEvent` 1556–1602、`fillGap` 1608–1649 | 删除，改为日志节点 | P5 |
+| `Event`（`event`） | 构造函数 `rpc.rs:1478`，经 `handle_events` 发出 | `client.ts:1559` → `receiveEvent` 1556–1602、`fillGap` 1608–1649 | 删除：已完成的条目进轮次节点，逐字增量走 `live` 流；`fillGap` 不再需要 | P5 |
 | `Desync`（`desync`） | `endpoint.rs:1551` | `client.ts:1597` | 删除，由令牌续接处理 | P5 |
 | `AgentsChanged`（`agents`） | `lib.rs:305` | `client.ts:1587` | 删除，改为 Agent 节点 | P4 |
 | `AgentRequestOpened`（`agentRequest`） | `lib.rs:263`、`279` | `client.ts:1590` | 删除，改为请求节点 | P4 |
@@ -245,6 +253,19 @@
 | 内置 Skill `apps/daemon/builtin-skills/genehub/references/multi-machine.md` | 提到 `session.summary.v1` | P3 时更新说明 |
 | `testing/` 下的 journey 和 specialty | 直接调用 RPC 名 | 随族迁移；兼容窗口内同时覆盖新旧两条路径 |
 
+### 1.12 补充流的合同
+
+| 流 | 用途 | 合同 |
+| --- | --- | --- |
+| `live` | 有人观看会话时的逐字输出 | 无人观看不推送；不保证可靠；断开或有缺口时重新 `get` 轮次节点；`ItemDelta` 契约不变 |
+| `pty` | 终端的输入、输出、窗口大小 | 每个终端一条，用 credit 做背压；慢的观看者只拖慢自己的流；终端是否存在、是否已退出的状态作为节点 |
+| `shell.run` | 一次性命令 | 保持现状 |
+| `asset.preview`、`file.read`、`blob.get` | 大内容读取：预览、下载、工具输出全文 | 保持现状，不做续传扩展；不走同步 |
+| `service.preview` | 本地服务的 HTTP/WS 隧道，实时音视频 | 保持现状 |
+| `agent.logs`、`log.tail` | 日志尾部 | 保持现状 |
+
+**统一规则：** 流只负责实时性和大块内容，不承担正确性。需要知道"现在是什么状态"时，一律读节点。
+
 ## 2. 模块
 
 ### 2.1 工作台（`packages/workbench/src`）
@@ -256,7 +277,7 @@
 | `protocol/session-pages.ts` | 全文件 | 54 | 删除 | P3 | 视图窗口 |
 | `protocol/machine-connections.ts` | `retain` 109–180 | 72 | 删除（目录来源保留连接的规则） | P3 | 订阅持有链路；连接池只管直连 |
 | `protocol/client.ts` | `followCatalog` 875–893、`repairCatalog` 899–943、`receiveCatalog` 944–1017 | 143 | 删除 | P3 | `sync` |
-|  | `runEvents` 1499–1555、`receiveEvent` 1556–1602、`fillGap` 1608–1649 | 151 | 删除 | P5 | `sync` 与日志节点 |
+|  | `runEvents` 1499–1555、`receiveEvent` 1556–1602、`fillGap` 1608–1649 | 151 | 删除 | P5 | 轮次节点与 `live` 流 |
 |  | `protocolIdentityOn` 1467–1498 | 32 | 删除 | 收尾 | `hello` |
 |  | 拨号、握手、心跳、RTC、重连（1031–2060） | — | 保留 | — | — |
 | `session/store.ts` | `refreshCatalog` 3195–3242、`loadWorkspaces` 3244–3283、`loadSessions` 3721–3775、`readSessionPages` 3779–3872、epoch 记录 3715–3720 | 243 | 删除 | P3 | `useView` |
@@ -266,14 +287,16 @@
 |  | `attach` 924–1091 | 168 | 替换（只留连接切换，状态重置交给副本端） | P3 | 副本端 |
 |  | `refreshAgents` 2859–2866、`refreshAgentRequests` 2894–2921、`loadSettings` 2712–2719、`checkUpdate` 2730–2743、`checkUpdates` 2744–2760、`refreshHub` 3008–3012、`refreshDevices` 3043–3047、`refreshBackgroundProcesses` 3059–3068 | 95 | 删除 | P4 | `useNode` |
 |  | `loadTree` 2655–2667、`refreshGit` 2668–2677 | 23 | 删除 | P5 | 观察型节点 |
-|  | `polledTurnFinished` 694–716、`refreshRound` 804–839、`scheduleRoundRefresh` 840–859 | 79 | 删除 | P5 | 日志节点 |
+|  | `polledTurnFinished` 694–716、`refreshRound` 804–839、`scheduleRoundRefresh` 840–859 | 79 | 删除 | P5 | 轮次节点 |
+|  | `trunkReads`、`oneAtATime` 782–803，`loadRound` 1610–1662，`loadOlderTrunks` 1663–1689，`loadTrunk` 1690–1715，`fetchTrunkDetails` 2230–2264 | 163 | 替换为不可变节点读取，专用的去重和缓存删除（按一半计入） | P5 | `useNode`、副本缓存 |
+|  | `loadBlob` 1716–1732、`fetchBlobPayloads` 2265–2295 | 48 | 保留（全文读取不走同步） | — | — |
 |  | 时间线、编辑器、标签页、发送、预表现 | — | 保留 | — | — |
 | `app/MachineDirectoryLists.tsx` | 30 秒刷新与前台刷新 105–110 | 6 | 删除 | P3 | 订阅 |
 | `app/WorkbenchApp.tsx` | 配对期间每 2 秒刷新 Hub，533–539 | 7 | 删除 | P4 | Hub 节点 |
 | 15 个特性字符串的 48 处判断 | 见第 1.9 节 | — | 删除 14 个特性对应的判断 | 随族 | schema 协商 |
 | `protocol/versions/v4.ts` | 全文件 | 26 | 删除 | 收尾 | — |
 
-**工作台合计：** 删除约 1,950 行，实测函数行数之和。`attach` 的替换按一半计入；48 处特性判断不计入。
+**工作台合计：** 删除约 2,030 行，实测函数行数之和。`attach` 的替换按一半计入；48 处特性判断不计入。
 
 ### 2.2 daemon（`apps/daemon/src`）
 
@@ -334,12 +357,12 @@
 
 | 区域 | v9 第 8.5 节的估计 | 本文实测或修正后 |
 | --- | --- | --- |
-| 工作台 | 2,050–2,620 | 约 1,950 |
+| 工作台 | 2,050–2,620 | 约 2,030 |
 | daemon（不含 CLI） | 880–1,620 | 约 1,600–2,000（加上 `session/catalog.rs` 全文件和 endpoint 的事件与目录部分） |
 | CLI | 400–800 | 400–800（生成代码到位后再统计） |
 | 协议包 | 400–700 | 500–700 |
 | 团队模板 | 800–1,200 | 800–1,100 |
-| **合计删除** | **4,400–6,900** | **约 5,250–6,550** |
+| **合计删除** | **4,400–6,900** | **约 5,330–6,630** |
 | 搬移 | 1,500–2,500 | 约 1,300（daemon）加团队模板中被替换的业务判断 |
 
 新增代码的预算不变，仍是 v9 第 9.4 节的约 9,400 行上限。所以 v9 第 9.5 节的结论不变：前期行数大致持平，收益主要在机制数（第 0 节）。

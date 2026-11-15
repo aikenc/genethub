@@ -10,7 +10,7 @@
 - v9 取代 [v8](sync-kernel-v8-20261115.md) 的目标、范围、拓扑、迁移顺序和验收。
 - 继续有效的部分：
   - v8 第 4 节：数据源层与可靠性合同 C1–C6、WIT `fs-watch` 草案；
-  - v8 第 5 节：首期内核的沿用与删减，以及会话正文的追加日志节点；
+  - v8 第 5 节：首期内核的沿用与删减（会话正文的处理以本文第 4.3 节为准，不再使用追加日志节点）；
   - v8 第 7.2–7.3 节：存活方向，以及与逻辑连接续传的分工；
   - v8 第 11.2 节：借鉴来源；
   - [v7](sync-kernel-v7-20261108.md) 第 2、3、10、11 节：键路径树、令牌、协议帧与错误码、不放进内核的东西；
@@ -37,12 +37,12 @@
 
   再加一种协作形态，又要再造一套。
 
-**怎么解决（全部待实施）。** 平台的状态面只保留**一条规则、三个原语**：
+**怎么解决（全部待实施）。** 平台的状态面只保留**一条规则、两个原语**，其余交给框架之外的补充流：
 - **规则：** 每台机器是自己子树 `m/<机器>/…` 的唯一权威，其他地方拿到的都是副本；权威不可达时，副本显示为"未知"。
-- **三个原语：**
+- **两个原语和补充流：**
   - 订阅子树或视图：先给快照，之后只推变化，靠令牌续接；
   - 意图：发给权威端，用 `ifToken` 做条件写；
-  - 字节流：PTY、音视频、文件内容。
+  - 流：实时输出、终端、shell、大内容读取、隧道和媒体，作为同步框架之外的补充（第 4.3 节）。
 
 工作台、CLI、团队脚本和其他机器的 daemon 都使用这同一套原语。在此之上增加三项能力，专门为规模服务：
 1. **机器间订阅与汇聚转发（第 5 节）：** 任何 daemon 都可以把它订阅到的其他机器的副本转发给设备。手机只需连一台机器就能看到全部机器。
@@ -106,7 +106,7 @@
 
 ### 2.3 状态面机制清单
 
-- **读取 RPC：** 129 个方法中有 32 个是状态读取（第 8.1 节）。
+- **读取 RPC：** 131 个方法中有 32 个是状态读取（第 8.1 节；明细清单细分为 26 个可订阅、6 个按需计算）。
 - **推送帧：** `ServerFrame` 有 11 种（`rpc.rs:1396`），由 6 个 daemon 源文件构造。
 - **"版本"概念 9 种：**
   - 目录按行 ETag；
@@ -143,15 +143,15 @@
 
 ### 3.3 不做
 
-- 不改会话存储格式、写锁、inbox、执行围栏，也不改 `TimelineItem/ItemDelta` 契约（v8 第 5.3 节）。
-- 字节流不进节点。
+- 不改会话存储格式、写锁、inbox、执行围栏，也不改 `TimelineItem/ItemDelta` 契约（第 4.3 节：条目进节点，增量走实时流）。
+- 流式输出、终端、shell、大文件和高清媒体都不进节点（第 4.3 节）。
 - 不做 CRDT，不做多人同时编辑文本。
 - 不做 Hub 权威端。Cloud 的 `generation/revision` 保持不变。
 - 不引入外部同步引擎或数据库。
 - 内核不认识团队语义：任务、岗位、档位路由都留在团队脚本里（B1，[teams.md](../teams.md) 的 L0/L1 分层）。
 - 不新增任何权限层。按产品权限契约（Spaces 仓 `genethub-agent-workflow/references/product-authority.md`），已认证的完整连接拥有目标 OS 用户的权限；仅展示的分享保持现有的受限边界。
 
-## 4. 架构：一条规则、三个原语
+## 4. 架构：一条规则、两个原语，加框架之外的补充流
 
 ### 4.1 权威规则
 
@@ -160,7 +160,7 @@
 - 权威端不可达时，它的子树标为 `unknown`，并附原因（`offline`、`via:<汇聚机器>`、`budget`、`error`），不显示过期数据冒充最新。
 - 跨机写入是发给权威端的意图，没有分布式事务。锁、认领、派单，都是权威端上的一次 `ifToken` 条件写。
 
-### 4.2 三个原语（拟议接口）
+### 4.2 两个原语（拟议接口）
 
 ```ts
 // 工作台：读副本，界面状态 = 副本 ⊕ 预表现（v5 第 8 节）
@@ -177,10 +177,42 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 ```
 
 - 帧和错误码沿用 v7 第 10 节（`open/get/drop/call/ops/error`；`conflict/budget/tooLarge/unknownKey/handler`）。
-- 字节流沿用现有的 PTY、blob、artifact 通道。
+- 流和大内容沿用或改进现有通道，划分见第 4.3 节。
 - 为 Agent 设计的 CLI 动词（`session list` 等）保留，改为视图上的薄封装。CLI 的形态不因为迁移而变差。
 
-### 4.3 消费方都一样
+### 4.3 同步框架的边界：节点、补充流与内容读取（2026-11-15 Human 决定）
+
+同步框架只负责**会收敛的状态**和**小的不可变内容**。下面三类不进同步框架：
+
+**1. 流式输出：作为框架之上的补充。**
+- 会话正文按"轮次"和"已完成的条目"进节点。正在运行的轮次是可变节点，每完成一个条目更新一次；封存之后变为不可变节点。
+- Agent 逐字输出的增量（`ItemDelta`）**只在有人观看时**通过实时流推送。用户没有打开页面时不推送，团队脚本和摘要只看节点。
+- **实时流的合同：** 不保证可靠，不做 `seq` 重放，也不做失步处理。流断开或出现缺口时，客户端重新 `get` 对应的节点就能收敛。正确性靠节点，实时流只负责让人看得更快。
+- `TimelineItem/ItemDelta` 契约不变（[architecture.md](../architecture.md) §4）：节点里放 `TimelineItem`，实时流里放 `ItemDelta`。
+- 内核因此**不需要追加日志节点**，节点只有一种 JSON 值，外加"可变或不可变"这一个属性。
+
+**2. 不可变内容只包括内联的小对象。**
+- 已封存的轮次和 trunk（包括里面内联的缩略图 `ImageThumb`，64/128 px）作为不可变节点：令牌就是内容 id，只 `get` 不 `watch`，副本命中缓存后零往返，汇聚机器可以放进内存缓存。
+- 单个节点有大小上限（P0 定数字），超出时按现有的 trunk 拆分规则拆开。**不支持大文件，不支持续传。**
+- 工具输出全文（`blob.get`）、高清图片和视频、工作区文件的预览与下载（`asset.preview`、`file.read`），都不走同步框架，保留现有的读取方式。节点里只放 `BlobRef` 和概要。
+
+**3. 终端和 shell 保持成熟的流式协议。**
+- 终端：从共用的事件流里拆出来，每个终端一条独立的双向流，承载输入、输出和窗口大小变化，用流控（credit）做背压，做法和 SSH 通道一致。慢的观看者只会拖慢自己那条流，不影响别的连接。
+- `shell.run`：保持现状。
+- 终端是否存在、是否已退出这类**状态**，仍然作为节点。
+
+**最终的分层：**
+
+```text
+传输层   carrier / E2EE / DataEndpoint + hello + rtc.negotiate
+同步框架 sync：会收敛的状态 + 小的不可变内容（含内联缩略图）
+         call：所有动作
+补充流   实时输出（有人观看时）· 终端 · shell.run · 内容读取（blob、预览、下载）· 隧道与媒体（service.preview）
+```
+
+判断标准：**状态和小内容进同步；"现在正在发生的"和"大块内容"走流。** 流只追求实时，正确性回到节点上核对。
+
+### 4.4 消费方都一样
 
 | 消费方 | 现在 | v9 |
 | --- | --- | --- |
@@ -297,13 +329,13 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 >
 > 数字以明细清单为准。
 
-### 8.1 RPC（共 129 个）
+### 8.1 RPC（共 131 个，本表漏列了 `subscribe/unsubscribe`，见明细清单）
 
 | 类别 | 数量 | 方法 | v9 去向 |
 | --- | --- | --- | --- |
 | 状态读取 | 32 | `access.list` `agent.list` `agent.requests` `agentSpace.children` `caller.authority` `catalog.sync` `device.list` `diagnostics.snapshot` `directory.list` `fileAccess.list` `file.tree` `git.status` `hub.machines` `hub.status` `process.list` `process.workspaceList` `provider.list` `session.changes` `session.components` `session.context` `session.drafts` `session.get` `session.importList` `session.inspect` `session.list` `session.page` `session.previewAnnotations.get` `session.rounds` `settings.get` `speech.capabilities` `update.downloadState` `workspace.list` | 节点或视图订阅。迁移期间进入兼容窗口，然后删除。`catalog.sync`、`session.page`、`session.changes` 的游标被令牌替代 |
-| 历史与内容读取 | 8 | `session.narrative` `round.trunk.get/list/batchGet` `blob.get/batchGet` `git.diff` `session.forkExport` | `session.narrative` 改为追加日志节点（v8 第 5.3 节）。其余是不可变的历史内容，保留按需读取 |
-| 字节流 | 10 | `pty.open/write/resize/close` `agent.logs` `log.tail` `session.artifact.begin/chunk/finish/abort` | 保留 |
+| 历史与内容读取 | 8 | `session.narrative` `round.trunk.get/list/batchGet` `blob.get/batchGet` `git.diff` `session.forkExport` | `session.narrative` 改为轮次节点加实时流；`round.trunk.*` 改为不可变节点；`blob.*`、`git.diff`、`session.forkExport` 保留（第 4.3 节） |
+| 流 | 10 | `pty.open/write/resize/close` `agent.logs` `log.tail` `session.artifact.begin/chunk/finish/abort` | 终端合并为每个终端一条独立流；其余保留 |
 | 连接 | 2 | `connection.identity` `client.debug` | 保留 |
 | 写入与动作 | 77 | 会话 27 个、Agent 与 Space 8 个、工作区 7 个、文件/目录/Git 7 个、设备 5 个、Hub 5 个、设置与 Provider 4 个、更新 4 个、语音 4 个、进程 3 个、其他 3 个 | 统一成意图信封：本机和远程同路，`ifToken` 替代 `expected_revision`。处理器逻辑不变。会话的 9 个属性写（`setModel/Mode/Effort/Fast/RuntimeAxis`、`rename`、`label`、`describe`、`archive`）是否合并命名，P0 再定 |
 
@@ -312,18 +344,18 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 | 帧 | v9 去向 |
 | --- | --- |
 | `Catalog` | 会话摘要节点和视图（P3） |
-| `Event` | 会话正文追加日志节点（P5） |
+| `Event` | 轮次节点加实时流（P5） |
 | `AgentsChanged`、`AgentRequestOpened`、`AgentRequestClosed`、`BackgroundProcesses`、`UpdateDownloadChanged` | 普通节点（P4） |
 | `Notice` | 机器级的通知节点，带过期时间（P4） |
 | `Desync` | 删除：失步由令牌续接自然处理 |
-| `PtyOutput`、`PtyClosed` | 保留：字节流 |
+| `PtyOutput`、`PtyClosed` | 移到每个终端的独立流 |
 
 ### 8.3 版本概念（9 种，不含 Cloud）
 
 | 现在 | v9 |
 | --- | --- |
 | 目录 ETag、`expected_revision`、`plan_digest`、`context_revision`、`cursor`、浏览器 `checksum`、`since` 游标 | 节点令牌，条件写用 `ifToken` |
-| 事件 `seq` | 追加日志节点的 `(epoch, 长度)`，日志内部仍用 `seq` |
+| 事件 `seq` | 删除：轮次节点用令牌；实时流不需要序号 |
 | Cloud `generation/revision` | 不变（不在范围） |
 
 ### 8.4 周期性机制（至少 13 处）
@@ -337,7 +369,7 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 | 工作台目录刷新 | `app/MachineDirectoryLists.tsx:108` | 30 秒 | 视图订阅 |
 | 来源超时与退避 | `protocol/summary-directory.ts:84-87` | 45 秒；60/120/300 秒 | 由链路存活给出 `unknown` |
 | 配对期间 Hub 刷新 | `app/WorkbenchApp.tsx:534` | 2 秒 | 节点订阅 |
-| 轮次刷新调度 | `session/store.ts` `scheduleRoundRefresh` | 按事件 | 日志节点（P5） |
+| 轮次刷新调度 | `session/store.ts` `scheduleRoundRefresh` | 按事件 | 轮次节点（P5） |
 | 团队对账 | `team.py` `reconcile`（302 行） | timer | `change` hook 加低频兜底 |
 | 团队 leader watchdog | `team.py` `leader_watchdog`（110 行） | timer | 同上 |
 | 任务对账与 watchdog | `tasks.py` `_reconcile_control`、`reconcile_resources`、`watchdog`（207 行） | timer | 同上 |
@@ -393,7 +425,8 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 | 键路径和节点 | 统一的寻址 | v7 第 2.4 节的键规范 |
 | 节点令牌 | 统一的版本 | 只在权威端计算；副本端把它当不透明值（v8 第 5.2 节） |
 | 视图 | 列表、排序和分页 | 首期只做子节点视图，集合索引由数据源提供 |
-| 追加日志节点 | 会话正文 | 沿用 `seq` 和 `ItemDelta`，不改契约 |
+| 可变/不可变属性 | 会话轮次、历史和缩略图 | 不可变节点的令牌就是内容 id，只 `get`，有大小上限 |
+| 实时补充流 | 有人观看时的逐字输出 | 不保证可靠；正确性靠节点；无人观看时不推送 |
 | 意图与 `ifToken` | 统一的写入和互斥 | 处理器沿用现有逻辑 |
 | `unknown` | 统一的不确定状态 | 原因限定为固定枚举 |
 | 数据源合同 C1–C6 | 可靠地发现变化 | 合同测试，`source.drift` 指标 |
@@ -440,12 +473,12 @@ genet sync call  m/b/app/team-x/team/locks/qa put @lock.json --if-token absent
 
 | 阶段 | 交付 | 删除或进入兼容窗口 | 通过门槛 | 发布模式 |
 | --- | --- | --- | --- | --- |
-| P0 规范与覆盖检查 | `packages/proto/src/sync/` 帧与错误码；数据源合同；应用子树、`change` hook、汇聚转发的合同；用最难的五族做覆盖检查：会话目录（分页、排序、搜索）、会话正文（日志）、进程（观察者）、远端不可达（`unknown`）、团队互斥（`ifToken`）；修订 architecture.md，增加"可观察状态只通过节点订阅暴露"并冻结旧机制 | — | 五族都能用三原语表达，否则先补内核；architecture.md 修订合入；静态门禁生效 | 高频 |
+| P0 规范与覆盖检查 | `packages/proto/src/sync/` 帧与错误码；数据源合同；应用子树、`change` hook、汇聚转发的合同；用最难的五族做覆盖检查：会话目录（分页、排序、搜索）、会话正文（轮次节点加实时流）、进程（观察者）、远端不可达（`unknown`）、团队互斥（`ifToken`）；修订 architecture.md，增加"可观察状态只通过节点订阅暴露"并冻结旧机制 | — | 五族都能用两个原语（加补充流）表达，否则先补内核；architecture.md 修订合入；静态门禁生效 | 高频 |
 | P1 内核、副本端、CLI | Rust 内核；TS 副本端；`genet sync get/ls/watch/call` | — | 只用假端口跑完全部测试；内存和 CPU 预算实测；与 Rust 权威端互通；第 9.4 节的预算 | 高频 |
 | P2 第二个消费方：团队跨机协作 | 机器间链路池与副本；应用子树；`change` hook；团队模板改为请求节点、认领节点加订阅（第 6.2 节） | `_sync_*` 删除；`reconcile` 和 watchdog 中的远端轮询读取删除；团队流程里的 `shell` 接单进入兼容窗口 | 跨机派单端到端不轮询；空闲时 20 个团队零请求；重复派单是幂等的；**期间不允许修改内核** | 高频 |
 | P3 会话目录与汇聚转发 | 会话摘要、草稿、批注节点；最近会话视图；汇聚转发；工作台目录改为订阅 | `catalog.sync`；`summary-directory*`；30 秒刷新；连接池的目录保留规则；IndexedDB 整份缓存；全局 sweep；`session.list/page/changes` 和 `since` 游标进入兼容窗口 | 手机 1 条连接看到 15 台机器；离线期间只变 1 个会话时只重发 1 个节点；规模用例下单项目读取 P95 < 1 秒 | 高频（不依赖 R1） |
 | P4 低频族 | 机器状态、设置、设备、Agent 与请求、进程、更新下载、通知、工作区 `meta`、Space 配置 | 6 种推送帧；对应的读取 RPC 进入兼容窗口；`expected_revision` 改为 `ifToken` | 跨窗口 1 秒内一致；静态门禁覆盖这些族 | 高频 |
-| P5 文件、Git、会话正文 | 观察型节点（v8 第 4.6 节）；追加日志节点（v8 第 5.3 节） | 面板里手工的 `git.status`、`file.tree` 刷新；工作台直接读取 `session.narrative`；`Event` 帧和 `Desync` | 外部修改在去抖周期内反映；流式输出只推尾部；重连只发缺口 | 高频；文件监听依赖 R1，之前用预算轮询 |
+| P5 文件、Git、会话正文、终端 | 观察型节点（v8 第 4.6 节）；轮次节点（运行中可变、封存后不可变）加实时流；每个终端一条独立流 | 面板里手工的 `git.status`、`file.tree` 刷新；工作台直接读取 `session.narrative`、`round.trunk.*`；`Event`、`Desync`、`PtyOutput`、`PtyClosed` 帧 | 外部修改在去抖周期内反映；无人观看时零推送；实时流断开后重新 `get` 即收敛；终端洪泛只影响自己的流 | 高频；文件监听依赖 R1，之前用预算轮询 |
 | R1 运行时：host 能力 | `fs-watch`、进程事件（v8 第 4.3、4.5 节） | — | 新旧 host 和 guest 的四种组合都能通过合同测试 | **完整** |
 | R2 运行时：执行分区 | 只在满足第 7 节的触发条件时立项 | 控制线程上的后台工作 | v8 第 9.1 节的对应条目 | 依赖 R1 |
 
