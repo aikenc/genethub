@@ -7,13 +7,15 @@
 - 架构以 v9 为准；
 - 执行以落地方案为准。
 
+**修订记录（2026-11-15，第二轮 Human 决定）：** 不做兼容，"删除"指该阶段结束时代码已不存在；阶段按 v9 新的划分重排（会话目录从 P3 提前到 P2，P3 只做汇聚转发；原"收尾"的项目并入 P1 或 P5）；团队模板不改，第 2.4 节改为团队模板依赖的 CLI 接口清单；`hooks/mod.rs` 不新增 `change` 事件；修正特性字符串的计数（删除 16 个、移进 `hello` 5 个）。
+
 **基线：** Open 主干 `158d7351`。所有位置都用 `git show origin/main:<文件>` 读取，行号是该版本的行号；不含测试代码。
 
 **口径：**
 
 | 写法 | 含义 |
 | --- | --- |
-| 删除 | 迁移完成并且兼容窗口关闭之后，代码不再存在 |
+| 删除 | 该阶段结束时，代码不再存在（不做兼容，没有兼容窗口） |
 | 替换 | 由新原语承担，原位置留下很薄的调用 |
 | 搬移 | 逻辑保留，挪进数据源或意图处理器 |
 | 保留 | 不变 |
@@ -29,11 +31,11 @@
   - 6 个按需计算的读取保留为只读调用；
   - 8 个历史和内容读取中：`session.narrative` 改为轮次节点加实时流；`round.trunk.*` 3 个改为不可变节点（含内联缩略图，有大小上限）；`blob.*`、`git.diff`、`session.forkExport` 4 个保留，不走同步；
   - 10 个流式方法中，PTY 的 4 个合并为 1 条流，上传的 4 个可选合并为 1 条流，2 个保留；
-  - 2 个连接方法中，1 个并入 `hello`；
-  - 77 个写操作改为意图。其中有 18 个名字可以合并（第 1.7 节），合并后约 59 个意图。
+  - 2 个连接方法中，`connection.identity` 在 P1 并入 `hello`；
+  - 77 个写操作改为意图。其中有 18 个名字可以合并（第 1.7 节），不做兼容，P0 直接定下合并后的约 59 个意图名。
 - 11 种推送帧：9 种删除（其中 `Notice` 是现在就可以删的死代码），2 种（PTY 输出）改为独立流。
-- 8 个 exchange 方法：删除 3 个（`rpc`、`events`、`protocol.identity`），新增 5 个（`hello`、`sync`、`call`、`live`，以及每个终端一条的 `pty` 流）。方法数从 8 个变为 10 个，但每个方法只做一件事：原来挤在 `events` 一条流里的会话增量和终端输出各自独立。业务语义只剩 `sync` 和 `call` 两个入口。
-- 21 个特性字符串：14 个删除，进入 schema 的读形状和意图名单；7 个保留为流能力或传输能力，移进 `hello`。
+- 8 个 exchange 方法：删除 3 个（`protocol.identity` 在 P1，`events` 在 P5，`rpc` 在 P5 只剩写操作后并入 `call`），新增 5 个（`hello`、`sync`、`call`、`live`，以及每个终端一条的 `pty` 流）。方法数从 8 个变为 10 个，但每个方法只做一件事：原来挤在 `events` 一条流里的会话增量和终端输出各自独立。业务语义只剩 `sync` 和 `call` 两个入口。
+- 21 个特性字符串：16 个删除，进入 schema 的读形状和意图名单；5 个是流能力或传输能力，在 P1 移进 `hello`。团队模板依赖的 `session.create-id.v1`、`session.prepare.v1` 由 CLI 继续在 `genet context` 里报告（第 1.9 节）。
 
 **框架边界（v9 第 4.3 节，2026-11-15 Human 决定）：**
 - 同步框架只承载会收敛的状态和小的不可变内容；
@@ -42,15 +44,16 @@
 
 本清单按这个边界给出每一项的去向。
 
-**修正 v9 第 8 节：**
-- v9 写的是 129 个方法，漏掉了 `subscribe` 和 `unsubscribe`（`rpc.rs` 里没有带点号的名字），实际是 131 个。
-- v9 第 8.1 节的"32 个状态读取"，细分为 26 个可订阅，加 6 个按需计算。
+**修正 v9 第 8 节（早先版本）：**
+- 方法共 131 个，早先版本漏掉了 `subscribe` 和 `unsubscribe`（`rpc.rs` 里没有带点号的名字）。
+- "32 个状态读取"细分为 26 个可订阅，加 6 个按需计算。
+- 特性字符串早先写的是"删除 14 个、保留 7 个"，逐项核对第 1.9 节的表是删除 16 个、移进 `hello` 5 个。
 
-**模块：** 第 2 节逐文件、逐函数列出动作和行号。v9 第 8.5 节的两处估计要修正：
-- 工作台 `protocol/client.ts`：v9 估计删除 600–900 行。实测这个文件没有按 RPC 写的包装（调用方直接 `client.call({type})`），可删除的部分是目录订阅 143 行、事件流 151 行、协议身份 32 行，**约 330 行**。
-- daemon `router.rs` 读取分支：实测 **约 340 行**，v9 估计是 300–600 行。这些分支很薄，读取逻辑在 `session/manager.rs` 等处，迁移时是搬进数据源，不是删除。
+**模块：** 第 2 节逐文件、逐函数列出动作和行号。两处早先的估计已修正：
+- 工作台 `protocol/client.ts`：早先估计删除 600–900 行。实测这个文件没有按 RPC 写的包装（调用方直接 `client.call({type})`），可删除的部分是目录订阅 143 行、事件流 151 行、协议身份 32 行，**约 330 行**。
+- daemon `router.rs` 读取分支：实测 **约 340 行**。这些分支很薄，读取逻辑在 `session/manager.rs` 等处，迁移时是搬进数据源，不是删除。
 
-修正后，v9 第 8.5 节的合计删除估计从 4,400–6,900 行调整为**约 5,330–6,630 行**（第 3 节）。
+团队模板不改之后，合计删除估计为**约 4,530–5,530 行**（第 3 节），v9 第 8.5 节已同步。
 
 **另外两项发现：**
 - `Notice` 推送帧在生产代码里没有任何发送点，只在测试里构造（`endpoint.rs` 的测试模块从 1696 行开始），工作台却一直在监听（`client.ts:1577`）。它是死代码，可以在 P0 直接删除。
@@ -62,8 +65,8 @@
 
 | 方法 | 处理位置 | 动作 | 阶段 |
 | --- | --- | --- | --- |
-| `protocol.identity` | `handle_protocol_identity` 1147–1180 | 删除，并入 `hello` | 收尾 |
-| `rpc` | `handle_rpc` 1181–1322；业务分发在 `router.rs` 466–2701（195 个分支） | 删除。写入改走 `call`，读取改走 `sync` | 收尾（各族先进入兼容窗口） |
+| `protocol.identity` | `handle_protocol_identity` 1147–1180 | 删除，并入 `hello` | P1 |
+| `rpc` | `handle_rpc` 1181–1322；业务分发在 `router.rs` 466–2701（195 个分支） | 删除。读取随族改走 `sync`；P5 时只剩写操作，并入 `call` | 随族，P5 结束 |
 | `events` | `handle_events` 1568–1609；副作用 `apply_side_effect` 1456–1567（目录订阅、失步） | 删除：状态改走 `sync`，逐字增量改走 `live` | P5 |
 | 新增 `live` | — | 实时补充流：有人观看某个会话时打开，只推 `ItemDelta`；不保证可靠，断开或有缺口时重新 `get` 轮次节点 | P5 |
 | `asset.preview`、`file.read`、`shell.run`、`service.preview` | 方法分发 `serve_stream` 1096–1146；诊断用的方法名表 `support_stream_operation` 1351–1361 | 保留 | — |
@@ -78,14 +81,14 @@
 
 | 方法 | 目标 | 阶段 | daemon 处理 | 工作台调用方 | CLI |
 | --- | --- | --- | --- | --- | --- |
-| `workspace.list` | 视图 `m/<机器>/ws/`（子节点 `ws/<id>/meta`） | P3 | `router.rs:2188` | `app/WorkbenchApp.tsx`×1、`preview/AssetPreviewPage.tsx`×1、`protocol/summary-directory.ts`×1、`session/store.ts`×2 | `query.rs` |
-| `session.list` | 视图 `sessions.recent` 与 `m/<机器>/ws/<id>/session/` | P3 | `router.rs:796` | `session/store.ts`×1、`workspace/AgentDetails.tsx`×1 | `query.rs` |
-| `session.page` | 同上（有界窗口取代分页） | P3 | `router.rs:813` | `protocol/session-pages.ts`×1、`session/store.ts`×2 | `query.rs` |
-| `session.changes` | 同上（令牌续接取代 `since` 游标） | P3 | `router.rs:831` | — | `query.rs` |
-| `catalog.sync` | 同上（订阅取代目录同步） | P3 | `router.rs:525` | `protocol/client.ts`×2 | — |
-| `session.get` | `m/<机器>/ws/<工作区>/session/<会话>/summary`、`…/state` | P3 | `router.rs:843` | `session/store.ts`×1 | `converse.rs`、`query.rs` |
-| `session.drafts` | `m/<机器>/ws/<工作区>/session/<会话>/drafts` | P3 | `router.rs:874` | `session/store.ts`×2 | — |
-| `session.previewAnnotations.get` | `m/<机器>/ws/<工作区>/session/<会话>/annotations` | P3 | `router.rs:888` | `preview/PreviewAnnotation.tsx`×1、`session/store.ts`×1 | — |
+| `workspace.list` | 视图 `m/<机器>/ws/`（子节点 `ws/<id>/meta`） | P2 | `router.rs:2188` | `app/WorkbenchApp.tsx`×1、`preview/AssetPreviewPage.tsx`×1、`protocol/summary-directory.ts`×1、`session/store.ts`×2 | `query.rs` |
+| `session.list` | 视图 `sessions.recent` 与 `m/<机器>/ws/<id>/session/` | P2 | `router.rs:796` | `session/store.ts`×1、`workspace/AgentDetails.tsx`×1 | `query.rs` |
+| `session.page` | 同上（有界窗口取代分页） | P2 | `router.rs:813` | `protocol/session-pages.ts`×1、`session/store.ts`×2 | `query.rs` |
+| `session.changes` | 同上（令牌续接取代 `since` 游标） | P2 | `router.rs:831` | — | `query.rs` |
+| `catalog.sync` | 同上（订阅取代目录同步） | P2 | `router.rs:525` | `protocol/client.ts`×2 | — |
+| `session.get` | `m/<机器>/ws/<工作区>/session/<会话>/summary`、`…/state` | P2 | `router.rs:843` | `session/store.ts`×1 | `converse.rs`、`query.rs` |
+| `session.drafts` | `m/<机器>/ws/<工作区>/session/<会话>/drafts` | P2 | `router.rs:874` | `session/store.ts`×2 | — |
+| `session.previewAnnotations.get` | `m/<机器>/ws/<工作区>/session/<会话>/annotations` | P2 | `router.rs:888` | `preview/PreviewAnnotation.tsx`×1、`session/store.ts`×1 | — |
 | `agentSpace.children` | `m/<机器>/ws/<id>/children` | P4 | `router.rs:2267` | — | `space.rs` |
 | `agent.list` | `m/<机器>/agent/<id>` | P4 | `router.rs:571` | `app/WorkbenchApp.tsx`×1、`session/store.ts`×2 | `converse.rs` |
 | `agent.requests` | `m/<机器>/agent/<id>/request/<请求>` | P4 | `router.rs:628` | `session/store.ts`×1 | — |
@@ -147,7 +150,7 @@
 | `session.artifact.abort` | 同上 | P0 定 | `router.rs:1236` | `preview/sessionArtifactUpload.ts`×1 | — |
 | `agent.logs` | 保留 | — | `router.rs:617` | `session/store.ts`×1 | `converse.rs` |
 | `log.tail` | 保留 | — | `router.rs:1931` | `session/store.ts`×1 | — |
-| `connection.identity` | 并入 `hello` | 收尾 | `router.rs:481` | `protocol/client.ts`×3 | `rpc_wire.rs` |
+| `connection.identity` | 并入 `hello` | P1 | `router.rs:481` | `protocol/client.ts`×3 | `rpc_wire.rs` |
 | `client.debug` | 保留 | — | `router.rs:472` | `client-debug/index.ts`×2 | `client.rs` |
 
 ### 1.6 写操作 → 意图（77 个）
@@ -159,9 +162,9 @@
 
 | 族 | 方法 | 数量 | 阶段 |
 | --- | --- | --- | --- |
-| 会话属性（改为对 `m/<机器>/ws/<工作区>/session/<会话>` 的意图，`ifToken` 取会话摘要令牌） | `session.setModel`、`session.setMode`、`session.setEffort`、`session.setFast`、`session.setRuntimeAxis`、`session.rename`、`session.label`、`session.describe`、`session.archive`、`session.delete`、`session.drafts.replace`、`session.previewAnnotations.upsert`、`session.previewAnnotations.remove` | 13 | P3（属性与草稿、批注） |
+| 会话属性（改为对 `m/<机器>/ws/<工作区>/session/<会话>` 的意图，`ifToken` 取会话摘要令牌） | `session.setModel`、`session.setMode`、`session.setEffort`、`session.setFast`、`session.setRuntimeAxis`、`session.rename`、`session.label`、`session.describe`、`session.archive`、`session.delete`、`session.drafts.replace`、`session.previewAnnotations.upsert`、`session.previewAnnotations.remove` | 13 | P2（属性与草稿、批注） |
 | 会话执行 | `session.create`、`session.createRouted`、`session.send`、`session.interrupt`、`session.close`、`session.respondPermission`、`session.ask`、`session.switchAgent`、`session.route`、`session.fork`、`session.forkRouted`、`session.forkImport`、`session.forkImportRouted`、`session.import` | 14 | P5 |
-| 工作区与 Space | `workspace.open`、`workspace.addRoot`、`workspace.create`、`workspace.rename`、`workspace.remove`、`workspace.terminate`、`workspace.resume`、`agentSpace.configure`、`agentSpace.changePlan`、`directory.mkdir` | 10 | P3（工作区）、P4（Space 配置） |
+| 工作区与 Space | `workspace.open`、`workspace.addRoot`、`workspace.create`、`workspace.rename`、`workspace.remove`、`workspace.terminate`、`workspace.resume`、`agentSpace.configure`、`agentSpace.changePlan`、`directory.mkdir` | 10 | P2（工作区）、P4（Space 配置） |
 | Agent 与 Provider | `agent.refresh`、`agent.action`、`agent.reload`、`agent.reset`、`agent.test`、`agent.requestAnswer`、`provider.operation`、`settings.setProvider`、`settings.setAgentPreferences`、`settings.forgetProvider` | 10 | P4 |
 | 机器、设备、Hub、权限 | `device.invite`、`device.claim`、`device.revoke`、`device.remoteAttach`、`device.remoteDetach`、`hub.pair`、`hub.trial`、`hub.claimLink`、`hub.connect`、`hub.unpair`、`access.request`、`fileAccess.configure` | 12 | P4 |
 | 更新、语音、进程、反馈 | `update.check`、`update.appCheck`、`update.download`、`update.dismiss`、`speech.runtime.probe`、`speech.runtime.configure`、`speech.context.preview`、`speech.feedback.record`、`process.kill`、`process.killAll`、`process.serviceStop`、`preview.feedback` | 12 | P4 |
@@ -188,7 +191,7 @@
 
 | 帧（线上名） | daemon 发送位置 | 工作台接收位置 | 动作 | 阶段 |
 | --- | --- | --- | --- | --- |
-| `Catalog`（`catalog`） | `endpoint.rs:1476`（`apply_side_effect`） | `client.ts:1558` → `receiveCatalog` 944–1017 | 删除，改为视图订阅 | P3 |
+| `Catalog`（`catalog`） | `endpoint.rs:1476`（`apply_side_effect`） | `client.ts:1558` → `receiveCatalog` 944–1017 | 删除，改为视图订阅 | P2 |
 | `Event`（`event`） | 构造函数 `rpc.rs:1478`，经 `handle_events` 发出 | `client.ts:1559` → `receiveEvent` 1556–1602、`fillGap` 1608–1649 | 删除：已完成的条目进轮次节点，逐字增量走 `live` 流；`fillGap` 不再需要 | P5 |
 | `Desync`（`desync`） | `endpoint.rs:1551` | `client.ts:1597` | 删除，由令牌续接处理 | P5 |
 | `AgentsChanged`（`agents`） | `lib.rs:305` | `client.ts:1587` | 删除，改为 Agent 节点 | P4 |
@@ -206,13 +209,13 @@
 
 | 特性 | 工作台判断次数 | 其他使用方 | 动作 | 阶段 |
 | --- | --- | --- | --- | --- |
-| `catalog.sync.v1` | 11 | — | 删除 | P3 |
-| `session.page.v1` | 8 | — | 删除 | P3 |
-| `session.active-page.v1` | 3 | — | 删除 | P3 |
-| `session.changes.v1` | 0 | `cli_front/query.rs` | 删除 | P3 |
-| `session.summary.v1` | 0 | `cli_front/query.rs`；内置 Skill `multi-machine.md` | 删除 | P3 |
-| `session.previewAnnotations.v1` | 0 | `preview/reviewDraft.ts` | 删除，进入会话族 schema | P3 |
-| `workspace.terminate.v1` | 4 | `cli_front` | 删除，进入意图名单 | P3 |
+| `catalog.sync.v1` | 11 | — | 删除 | P2 |
+| `session.page.v1` | 8 | — | 删除 | P2 |
+| `session.active-page.v1` | 3 | — | 删除 | P2 |
+| `session.changes.v1` | 0 | `cli_front/query.rs` | 删除 | P2 |
+| `session.summary.v1` | 0 | `cli_front/query.rs`；内置 Skill `multi-machine.md` | 删除 | P2 |
+| `session.previewAnnotations.v1` | 0 | `preview/reviewDraft.ts` | 删除，进入会话族 schema | P2 |
+| `workspace.terminate.v1` | 4 | `cli_front` | 删除，进入意图名单 | P2 |
 | `process.services.v1` | 1 | — | 删除，进入进程族 schema | P4 |
 | `access.status.v1` | 1 | — | 删除，进入权限族 schema | P4 |
 | `provider.configuration.v1` | 0 | `cli_front/query.rs` | 删除，进入意图名单 | P4 |
@@ -222,24 +225,26 @@
 | `session.prepare.v1` | 0 | 团队模板 `tasks.py`、`team.py`；`cli_front/query.rs` | 删除，进入意图名单 | P5 |
 | `session.switch-agent.v1` | 0 | — | 删除，进入意图名单 | P5 |
 | `agent-tag-routing.v1` | 1 | — | 删除，进入意图名单 | P5 |
-| `fabric.channels.v1` | 1 | — | 保留，移进 `hello` 的传输能力 | 收尾 |
-| `asset.preview.image.v1` | 3 | — | 保留，移进 `hello` 的流能力 | 收尾 |
-| `asset.preview.machine-file.v1` | 4 | — | 同上 | 收尾 |
-| `service.preview.v1` | 1 | — | 同上 | 收尾 |
+| `fabric.channels.v1` | 1 | — | 保留，移进 `hello` 的传输能力 | P1 |
+| `asset.preview.image.v1` | 3 | — | 保留，移进 `hello` 的流能力 | P1 |
+| `asset.preview.machine-file.v1` | 4 | — | 同上 | P1 |
+| `service.preview.v1` | 1 | — | 同上 | P1 |
 | `session.file-upload.v1` | 2 | — | 同上，随上传流是否合并一起决定 | P0 定 |
 
-删除 14 个，保留并移动 7 个。团队模板依赖 `session.create-id.v1` 和 `session.prepare.v1`：P5 之前，这两项在兼容窗口内同时出现在特性列表和意图名单里，团队模板按意图名单判断。
+删除 16 个，移进 `hello` 5 个（`session.file-upload.v1` 随上传流是否合并一起决定）。
+
+团队模板通过 `genet context` 的 `daemon.features` 判断 `session.create-id.v1` 和 `session.prepare.v1`（`tasks.py:106-108`、`team.py:724-726`、`team.py:1248-1252`）。P5 删除 daemon 的特性表之后，CLI 从会话族的意图名单推导出这两个名字，继续放在 `daemon.features` 里，团队模板不用改（v9 第 4.5 节）。
 
 ### 1.10 版本与握手
 
 | 项 | 位置 | 动作 | 阶段 |
 | --- | --- | --- | --- |
-| `WEB_PROTOCOL_VERSION = 4` | `packages/identity/src/lib.rs:26` | 删除，按族协商取代 | 收尾 |
-| `DATA_PLANE_VERSION = 4` | 同上 `:32` | 保留 | — |
-| `protocol.identity` 方法 | 同上 `:36`；`endpoint.rs:1147` | 并入 `hello` | 收尾 |
-| `connection.identity` 请求 | `router.rs:481` | 并入 `hello` | 收尾 |
+| `WEB_PROTOCOL_VERSION = 4` | `packages/identity/src/lib.rs:26` | 删除，由 `hello` 的数据面版本取代 | P1 |
+| `DATA_PLANE_VERSION = 4` | 同上 `:32` | 保留；每个改变线上协议的阶段提升一次，版本不同就显示"需升级"（v9 第 12 节） | 随阶段 |
+| `protocol.identity` 方法 | 同上 `:36`；`endpoint.rs:1147` | 并入 `hello` | P1 |
+| `connection.identity` 请求 | `router.rs:481` | 并入 `hello` | P1 |
 | `HelloResult.features` | `packages/proto/src/domain.rs:1612` | 改为 schema 描述加流能力 | P0 |
-| 工作台版本适配器 | `protocol/versions/v4.ts`（26 行） | 删除，按族协商后不再需要整体版本适配 | 收尾 |
+| 工作台版本适配器 | `protocol/versions/v4.ts`（26 行） | 删除；不做兼容，不需要版本适配 | P1 |
 
 ### 1.11 跨仓库与生成物的依赖
 
@@ -249,9 +254,9 @@
 | --- | --- | --- |
 | Cloud `server/src/http/app-api.ts` 934–993 `SAFE_MACHINE_OPERATIONS` | 反馈诊断中允许记录的方法名，共 58 项 | 和意图名单同步；最好改为从 schema 生成 |
 | `packages/proto/bindings/index.ts` | 由 Rust 类型生成的 TS 类型，其中第 1518 行是 `ServerFrame` | 随 schema 重新生成 |
-| 团队模板 `tasks.py`、`team.py` | 判断 `session.create-id.v1`、`session.prepare.v1` | 见第 1.9 节的兼容说明 |
-| 内置 Skill `apps/daemon/builtin-skills/genehub/references/multi-machine.md` | 提到 `session.summary.v1` | P3 时更新说明 |
-| `testing/` 下的 journey 和 specialty | 直接调用 RPC 名 | 随族迁移；兼容窗口内同时覆盖新旧两条路径 |
+| 团队模板 `tasks.py`、`team.py` | 通过 `genet context` 判断 `session.create-id.v1`、`session.prepare.v1` | 不改团队模板；CLI 继续报告这两个名字（第 1.9 节、第 2.4 节） |
+| 内置 Skill `apps/daemon/builtin-skills/genehub/references/multi-machine.md` | 提到 `session.summary.v1` | P2 时更新说明 |
+| `testing/` 下的 journey 和 specialty | 直接调用 RPC 名 | 随族迁移，同阶段改为新原语 |
 
 ### 1.12 补充流的合同
 
@@ -272,29 +277,29 @@
 
 | 文件 | 区域（行） | 行数 | 动作 | 阶段 | 替代 |
 | --- | --- | --- | --- | --- | --- |
-| `protocol/summary-directory.ts` | 全文件 | 654 | 删除 | P3 | `useView("sessions.recent")` |
-| `protocol/summary-directory-cache.ts` | 全文件 | 142 | 删除 | P3 | 副本端的节点缓存 |
-| `protocol/session-pages.ts` | 全文件 | 54 | 删除 | P3 | 视图窗口 |
+| `protocol/summary-directory.ts` | 全文件 | 654 | 删除 | P2 | `useView("sessions.recent")` |
+| `protocol/summary-directory-cache.ts` | 全文件 | 142 | 删除 | P2 | 副本端的节点缓存 |
+| `protocol/session-pages.ts` | 全文件 | 54 | 删除 | P2 | 视图窗口 |
 | `protocol/machine-connections.ts` | `retain` 109–180 | 72 | 删除（目录来源保留连接的规则） | P3 | 订阅持有链路；连接池只管直连 |
-| `protocol/client.ts` | `followCatalog` 875–893、`repairCatalog` 899–943、`receiveCatalog` 944–1017 | 143 | 删除 | P3 | `sync` |
+| `protocol/client.ts` | `followCatalog` 875–893、`repairCatalog` 899–943、`receiveCatalog` 944–1017 | 143 | 删除 | P2 | `sync` |
 |  | `runEvents` 1499–1555、`receiveEvent` 1556–1602、`fillGap` 1608–1649 | 151 | 删除 | P5 | 轮次节点与 `live` 流 |
-|  | `protocolIdentityOn` 1467–1498 | 32 | 删除 | 收尾 | `hello` |
+|  | `protocolIdentityOn` 1467–1498 | 32 | 删除 | P1 | `hello` |
 |  | 拨号、握手、心跳、RTC、重连（1031–2060） | — | 保留 | — | — |
-| `session/store.ts` | `refreshCatalog` 3195–3242、`loadWorkspaces` 3244–3283、`loadSessions` 3721–3775、`readSessionPages` 3779–3872、epoch 记录 3715–3720 | 243 | 删除 | P3 | `useView` |
-|  | `refreshSessions` 1128–1143、`refreshWorkspaces` 1144–1149、`loadMoreSessions` 1111–1116、`loadMoreSessionList` 1117–1127 | 39 | 删除 | P3 | 视图窗口 |
-|  | `refreshSessionDrafts` 647–660、`refreshPreviewReview` 661–682 | 36 | 删除 | P3 | `useNode` |
-|  | `withSnapshotStatus`、`reconcileObservedActivity`、`adoptSnapshotStatus`、`applySessionStatus`（3914–3998） | 68 | 删除 | P3 | 摘要节点即状态 |
-|  | `attach` 924–1091 | 168 | 替换（只留连接切换，状态重置交给副本端） | P3 | 副本端 |
+| `session/store.ts` | `refreshCatalog` 3195–3242、`loadWorkspaces` 3244–3283、`loadSessions` 3721–3775、`readSessionPages` 3779–3872、epoch 记录 3715–3720 | 243 | 删除 | P2 | `useView` |
+|  | `refreshSessions` 1128–1143、`refreshWorkspaces` 1144–1149、`loadMoreSessions` 1111–1116、`loadMoreSessionList` 1117–1127 | 39 | 删除 | P2 | 视图窗口 |
+|  | `refreshSessionDrafts` 647–660、`refreshPreviewReview` 661–682 | 36 | 删除 | P2 | `useNode` |
+|  | `withSnapshotStatus`、`reconcileObservedActivity`、`adoptSnapshotStatus`、`applySessionStatus`（3914–3998） | 68 | 删除 | P2 | 摘要节点即状态 |
+|  | `attach` 924–1091 | 168 | 替换（只留连接切换，状态重置交给副本端） | P2 | 副本端 |
 |  | `refreshAgents` 2859–2866、`refreshAgentRequests` 2894–2921、`loadSettings` 2712–2719、`checkUpdate` 2730–2743、`checkUpdates` 2744–2760、`refreshHub` 3008–3012、`refreshDevices` 3043–3047、`refreshBackgroundProcesses` 3059–3068 | 95 | 删除 | P4 | `useNode` |
 |  | `loadTree` 2655–2667、`refreshGit` 2668–2677 | 23 | 删除 | P5 | 观察型节点 |
 |  | `polledTurnFinished` 694–716、`refreshRound` 804–839、`scheduleRoundRefresh` 840–859 | 79 | 删除 | P5 | 轮次节点 |
 |  | `trunkReads`、`oneAtATime` 782–803，`loadRound` 1610–1662，`loadOlderTrunks` 1663–1689，`loadTrunk` 1690–1715，`fetchTrunkDetails` 2230–2264 | 163 | 替换为不可变节点读取，专用的去重和缓存删除（按一半计入） | P5 | `useNode`、副本缓存 |
 |  | `loadBlob` 1716–1732、`fetchBlobPayloads` 2265–2295 | 48 | 保留（全文读取不走同步） | — | — |
 |  | 时间线、编辑器、标签页、发送、预表现 | — | 保留 | — | — |
-| `app/MachineDirectoryLists.tsx` | 30 秒刷新与前台刷新 105–110 | 6 | 删除 | P3 | 订阅 |
+| `app/MachineDirectoryLists.tsx` | 30 秒刷新与前台刷新 105–110 | 6 | 删除 | P2 | 订阅 |
 | `app/WorkbenchApp.tsx` | 配对期间每 2 秒刷新 Hub，533–539 | 7 | 删除 | P4 | Hub 节点 |
 | 15 个特性字符串的 48 处判断 | 见第 1.9 节 | — | 删除 14 个特性对应的判断 | 随族 | schema 协商 |
-| `protocol/versions/v4.ts` | 全文件 | 26 | 删除 | 收尾 | — |
+| `protocol/versions/v4.ts` | 全文件 | 26 | 删除 | P1 | — |
 
 **工作台合计：** 删除约 2,030 行，实测函数行数之和。`attach` 的替换按一半计入；48 处特性判断不计入。
 
@@ -304,20 +309,21 @@
 | --- | --- | --- | --- | --- | --- |
 | `router.rs` | 26 个状态读取和 2 个订阅控制的分支（第 1.2、1.4 节的行号） | 约 340 | 删除 | 随族 | 数据源和视图 |
 |  | 77 个写分支 | — | 替换，改为意图处理器注册 | 随族 | `call` |
-| `dataplane/endpoint.rs` | `apply_side_effect` 1456–1567 | 112 | 删除 | P3/P5 | `sync` 订阅表 |
+| `dataplane/endpoint.rs` | `apply_side_effect` 1456–1567 | 112 | 删除 | P2/P5 | `sync` 订阅表 |
 |  | `handle_events` 1568–1609 | 42 | 删除 | P5 | `sync` |
-|  | `handle_rpc` 1181–1322、`handle_protocol_identity` 1147–1180 | 176 | 删除 | 收尾 | `call`、`hello` |
+|  | `handle_protocol_identity` 1147–1180 | 34 | 删除 | P1 | `hello` |
+|  | `handle_rpc` 1181–1322 | 142 | 删除 | P5 | `call` |
 |  | `forward_fanout` 487–591 | 105 | 替换：终端部分改为 `pty` 流，机器状态部分删除 | P4/P5 | `pty` 流、节点 |
 | `lib.rs` | Agent 帧推送循环 251–310 | 约 60 | 删除 | P4 | Agent 数据源 |
 | `processes.rs` | 推送 123 附近；按请求收集 | — | 搬移为观察者数据源 | P4 | 进程节点 |
 | `updates.rs` | 推送 686 附近 | — | 搬移为数据源 | P4 | 更新节点 |
-| `session/catalog.rs` | 全文件（目录投影、订阅总线） | 392 | 删除 | P3 | 会话目录数据源加视图 |
-| `session/store.rs` | `catalog_changes` 2261–2336（`since` 游标） | 76 | 删除 | P3 | 令牌 |
-|  | `sweep_catalog` 2637–2900、`sweep_home` 2901–3053、`reconcile_catalog` 2415–2461 | 465 | 删除全局 sweep，按 home 的有界重列搬进数据源 | P3 | C2 重列 |
-|  | `scan_metadata` 3108–3243、`load_catalog` 2503–2636、指纹相关 | 约 270 | 搬移 | P3 | 文件型数据源的 C4 降级实现 |
-| `session/coordination.rs` | 全文件 | 156 | 替换为节点投影，删除两秒缓存和过期判定 | P2 | 应用子树 |
-| `workspace.rs` | `scan_spaces` 341 起、`scan_tree` 519、`scanned_workspace` 545–623、`refresh_descriptor` 744–785 | 约 520 | 搬移为 Space 数据源 | P3/P4 | 监听加有界重列 |
-| `hooks/mod.rs` | `tick_project` 219–284、`registered_hooks` 285–333、`run_timer` 922–953 | 约 150 | 替换：登记扫描改为监听；新增 `change` 事件 | P2 | 数据源加 `change` hook |
+| `session/catalog.rs` | 全文件（目录投影、订阅总线） | 392 | 删除 | P2 | 会话目录数据源加视图 |
+| `session/store.rs` | `catalog_changes` 2261–2336（`since` 游标） | 76 | 删除 | P2 | 令牌 |
+|  | `sweep_catalog` 2637–2900、`sweep_home` 2901–3053、`reconcile_catalog` 2415–2461 | 465 | 删除全局 sweep，按 home 的有界重列搬进数据源 | P2 | C2 重列 |
+|  | `scan_metadata` 3108–3243、`load_catalog` 2503–2636、指纹相关 | 约 270 | 搬移 | P2 | 文件型数据源的 C4 降级实现 |
+| `session/coordination.rs` | 全文件 | 156 | 替换为会话族的节点投影，删除两秒缓存和过期判定 | P2 | 会话摘要节点 |
+| `workspace.rs` | `scan_spaces` 341 起、`scan_tree` 519、`scanned_workspace` 545–623、`refresh_descriptor` 744–785 | 约 520 | 搬移为 Space 数据源 | P2/P4 | 监听加有界重列 |
+| `hooks/mod.rs` | `tick_project` 219–284、`registered_hooks` 285–333、`run_timer` 922–953 | 约 150 | 替换：登记扫描搬进文件型数据源；hook 仍然只有 `timer` 事件 | P4 | 文件型数据源 |
 | `cli_front/query.rs` | `parse_session` 477–747、`execute` 837–1408 中的读取分支、`command_schema` 1711–2382 | 约 1,500 涉及 | 替换：读命令改为视图上的薄封装；schema 由 schema 定义生成 | P1 起随族 | 生成的 CLI |
 | `cli_front/rpc_wire.rs` | 事件流消费（363 附近） | — | 替换为 `sync` | P5 | — |
 | `cli_front/target.rs`、`rpc.rs` | 每次调用建立远端链路 | — | 替换：复用 daemon 的机器间链路池 | P2 | 链路池 |
@@ -332,40 +338,40 @@
 | `Request` 枚举 33–997 中的 26 个读取和 2 个订阅控制变体 | 删除 | 随族 |
 | `Request` 其余变体 | 替换为 schema 生成的意图参数类型 | 随族 |
 | `Reply` 枚举 998–1101 中的读取回复 | 删除 | 随族 |
-| 目录类型：`SessionPageRequest` 1102 到 `CatalogBatch` 1205–1230 | 删除 | P3 |
-| `ServerFrame` 1396–1480 | 删除（PTY 改为流） | P3–P5 |
+| 目录类型：`SessionPageRequest` 1102 到 `CatalogBatch` 1205–1230 | 删除 | P2 |
+| `ServerFrame` 1396–1480 | 删除（PTY 改为流） | P2–P5 |
 | `ErrorCode` 1366、`ProtocolError` 1384 | 保留，增加 v7 的 6 个码 | P0 |
 
 **合计：** 删除约 500–700 行；新增 sync 帧和 schema 描述，计入 v9 第 9.4 节的预算。
 
-### 2.4 团队模板（`apps/daemon/builtin-skills/genehub/references/team-template/tools`，主干 7,988 行）
+### 2.4 团队模板：不改，只核对它依赖的 CLI 接口
 
-| 文件 | 区域（行） | 行数 | 动作 | 阶段 |
+团队模板（`apps/daemon/builtin-skills/genehub/references/team-template/tools`，主干 7,988 行）一行不改。它只通过 `genet` CLI 使用平台，下表是它依赖的接口，也是 v9 第 11.3 节 CLI 合同测试的最小清单。
+
+| 团队模板的调用 | 位置 | 依赖的输出 | 背后的变化 | 阶段 |
 | --- | --- | --- | --- | --- |
-| `genet_builtin/team.py` | `_sync_pull`、`_sync_state`、`_sync_used`、`_sync_machine`、`_sync_remember`、`_synced`（810–951） | 137 | 删除 | P2 |
-|  | `reconcile` 4247–4548 | 302 | 替换：删除远端轮询读取，改为读本机副本；业务判断保留 | P2 |
-|  | `leader_watchdog` 4137–4246 | 110 | 替换：改为 `change` hook 触发 | P2 |
-|  | `remote_receive` 472–503、`dispatch_remote` 504–528、`cmd_receive` 与 `_cmd_receive`（529 起） | 约 300 | 替换：写请求节点，加执行端的 `change` hook | P2 |
-|  | 收件箱 `inbox_lock`、`_read_inbox`、`_write_inbox`、`push_session_inbox`、`flush_session_inbox_if_idle` 等（1308–1585） | 188 | 替换：锁改为 `ifToken` 认领，读取改为订阅 | P2 |
-|  | `sessions_of`、`live_sessions`、`session_summary`、`session_history`（987–1052） | 66 | 替换为读副本 | P2 |
-| `genet_builtin/tasks.py` | `_reconcile_control` 449–584、`reconcile_resources` 647–671、`watchdog` 719–756 | 207 | 替换：变化触发，加低频兜底 | P2 |
-| `genet_builtin/board.py` | `query_daemon_spaces_and_sessions` 610–621、`_query_daemon_spaces_and_sessions_uncached` 622–681、`build_board_live_data` 682–888 | 279 | 替换为 `watch` | P2 |
+| `session list --workspace … --machine M --since <cursor\|start>` | `team.py:817-849` `_sync_pull` | `sessions`（每行含 `id`、`workspaceId`、`status`）、`removed`、`cursor`、`reset`、`complete` | 读本机的 M 副本；`cursor` 是视图令牌的不透明编码；无法识别的旧游标返回 `reset: true` | P2 |
+| `session get/rounds/narrative --machine M` | `team.py` `session_summary`、`session_history` 等 | 现有字段 | 摘要读副本（P2）；轮次和正文读不可变节点（P5） | P2、P5 |
+| `context --machine M` 的 `daemon.features` | `team.py:724-726`、`team.py:1248-1252`、`tasks.py:106-108` | 包含 `session.create-id.v1`、`session.prepare.v1` | 由 CLI 从意图名单推导 | P1 起 |
+| `shell --machine M --workspace W -- …` | `team.py:477`、`install_remote.py:56` | 现有帧和退出码 | 复用机器间长链路 | P2 |
+| `session send/interrupt/describe/archive`、`space open`、`workspace open/remove` | 多处 | 现有字段和退出码 | 改走 `call` 意图 | 随族 |
+| `agent list`、`workspace list`、`process list`、`machine show`、`hook list` | 多处 | 现有字段 | 读副本 | P2、P4 |
 
-**团队模板合计：** 删除约 800–1,100 行。dev-3 合并主干时，团队模板如果有变化，按落地方案第 2.2 节重新测量。
+`_sync_*`、`reconcile`、watchdog、收件箱、看板查询都保持原样；它们背后的 CLI 读取变成本机副本读取。团队以后是否删掉自造的增量同步，由团队自己决定。dev-3 合并主干时，团队模板如果有变化，按落地方案第 3.3 节重新核对本表。
 
-## 3. 修正后的合计
+## 3. 合计
 
-| 区域 | v9 第 8.5 节的估计 | 本文实测或修正后 |
+| 区域 | 早先的估计 | 本文实测或修正后 |
 | --- | --- | --- |
 | 工作台 | 2,050–2,620 | 约 2,030 |
 | daemon（不含 CLI） | 880–1,620 | 约 1,600–2,000（加上 `session/catalog.rs` 全文件和 endpoint 的事件与目录部分） |
 | CLI | 400–800 | 400–800（生成代码到位后再统计） |
 | 协议包 | 400–700 | 500–700 |
-| 团队模板 | 800–1,200 | 800–1,100 |
-| **合计删除** | **4,400–6,900** | **约 5,330–6,630** |
-| 搬移 | 1,500–2,500 | 约 1,300（daemon）加团队模板中被替换的业务判断 |
+| 团队模板 | 800–1,200 | 0（不改） |
+| **合计删除** | **4,400–6,900** | **约 4,530–5,530** |
+| 搬移 | 1,500–2,500 | 约 1,300（daemon） |
 
-新增代码的预算不变，仍是 v9 第 9.4 节的约 9,400 行上限。所以 v9 第 9.5 节的结论不变：前期行数大致持平，收益主要在机制数（第 0 节）。
+新增代码的预算见 v9 第 9.4 节，去掉应用子树和变化触发 hook 之后上限约 8,600 行。v9 第 9.5 节的结论不变：行数大致持平，收益主要在机制数（第 0 节）；不做兼容之后，每个阶段结束时该族的旧代码已经删除。
 
 ## 4. 重现方法
 
@@ -375,4 +381,4 @@
 - 工作台调用方：`git grep -n 'type: "<方法名>"' origin/main -- packages/workbench/src`；
 - 函数行号：按函数声明的起始行，到下一个同级声明的前一行。
 
-P0 的状态面盘点脚本（落地方案第 6.7 节）会把这些规则固化下来。之后以脚本输出为准，替代本文的人工表格。
+P0 的状态面盘点脚本（落地方案第 8 节）会把这些规则固化下来。之后以脚本输出为准，替代本文的人工表格。
