@@ -192,7 +192,7 @@ defineSpecialty(
   async (t) => {
     if (process.platform !== "linux") return;
     const tools = path.join(t.env.root, "service-tools");
-    const unit = path.join(t.env.env.XDG_CONFIG_HOME, "systemd/user/genehub-local.service");
+    const unit = path.join(t.env.home, ".config/systemd/user/genehub-local.service");
     const calls = path.join(tools, "calls");
     const captured = path.join(tools, "definition");
     mkdirSync(tools);

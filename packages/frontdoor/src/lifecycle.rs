@@ -80,14 +80,30 @@ pub fn pid_alive(pid: u32) -> bool {
         || unsafe { libc_kill(pid as i32, 0) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
-    // The same probe the desktop shell uses: asking the OS to open the
-    // process is the cheap "is it there" on Windows.
-    let _ = pid;
-    // Without a cheap probe in this crate, assume alive only when the
-    // endpoint also answers — callers pair this with a health check, the
-    // same way `daemon.rs` in the shell does.
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            // Access denied is inconclusive. Do not report a protected
+            // process as stopped simply because we cannot observe it.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        !exited
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn pid_alive(_pid: u32) -> bool {
     true
 }
 
@@ -135,6 +151,19 @@ unsafe fn libc_kill(pid: i32, signal: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn process_probe_reports_exit_with_an_open_child_handle() {
+        assert!(pid_alive(std::process::id()));
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        assert!(!pid_alive(pid));
+    }
 
     #[test]
     fn a_dead_lock_loses_its_endpoint_and_legacy_wasm_cache() {
