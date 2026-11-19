@@ -10,6 +10,10 @@ pub(super) async fn preflight(cli: &Path, from: &RuntimeIdentity) -> Result<()> 
         "desktop App installation is not supported by this CLI package updater"
     );
     let parent = cli.parent().context("CLI has no installation directory")?;
+    anyhow::ensure!(
+        !records::installer_transaction(parent).try_exists()?,
+        "the shell installer is still running or its recovery is pending"
+    );
     let probe = parent.join(format!(".update-write-{}", uuid::Uuid::new_v4().simple()));
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -35,7 +39,7 @@ fn verify_manager(service: &Service, pid: u32) -> Result<()> {
             ])
             .output()?,
         Manager::Launchd => Command::new("/bin/launchctl")
-            .args(["print", &launchd_target(&service.name)?])
+            .args(["print", &service.launchd_target()?])
             .output()?,
     };
     anyhow::ensure!(
@@ -56,15 +60,6 @@ fn verify_manager(service: &Service, pid: u32) -> Result<()> {
         "supervisorMismatch: installed service does not own the selected daemon PID"
     );
     Ok(())
-}
-fn launchd_target(name: &str) -> Result<String> {
-    let out = Command::new("/usr/bin/id").arg("-u").output()?;
-    anyhow::ensure!(out.status.success(), "cannot determine launchd user");
-    Ok(format!(
-        "gui/{}/{}",
-        String::from_utf8(out.stdout)?.trim(),
-        name
-    ))
 }
 pub(super) async fn prepare(paths: &Paths, request: &Request) -> Result<()> {
     let app = request.app.as_ref().context("missing pinned App target")?;
@@ -230,7 +225,7 @@ pub(super) async fn stop(paths: &Paths, request: &Request) -> Result<()> {
                 .args(["--user", "stop", &service.name])
                 .output()?,
             Manager::Launchd => Command::new("/bin/launchctl")
-                .args(["bootout", &launchd_target(&service.name)?])
+                .args(["bootout", &service.launchd_target()?])
                 .output()?,
         };
         anyhow::ensure!(
@@ -290,7 +285,7 @@ pub(super) fn start(paths: &Paths, request: &Request) -> Result<()> {
                 .args(["--user", "start", &service.name])
                 .output()?,
             Manager::Launchd => {
-                let target = launchd_target(&service.name)?;
+                let target = service.launchd_target()?;
                 let domain = target.rsplit_once('/').context("launchd target")?.0;
                 Command::new("/bin/launchctl")
                     .arg("bootstrap")

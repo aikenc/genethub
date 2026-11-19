@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   createLease, defineSpecialty, genetEnv, locateGenet, parseJson, releaseLease,
@@ -59,21 +59,35 @@ defineSpecialty(meta("legacy-independent-owner", "Legacy unsupervised independen
   const cli = locateGenet(t.openRoot), env = genetEnv(t.openRoot, legacy.env);
   const call = (args: string[]) => runGenetAsync(cli, args, env);
   const parentStatus = async () => parseJson((await runGenetAsync(cli, ["daemon", "status"], opened.daemon.env)).stdout);
+  const detachedPidFile = path.join(legacy.root, "detached.pid");
   try {
     // The Host artifact is unchanged by the supervisor work. This actual
     // foreground entry recreates old manual start's unsupervised OS topology,
     // without pretending a newer CLI is a historical release binary.
     const launched = await t.flows.main.runShell(opened.client, {
       workspaceId: opened.workspaceId,
-      argv: ["/bin/sh", "-c", 'setsid "$@" </dev/null >/dev/null 2>&1 &', "legacy", cli, "daemon", "run"],
+      argv: ["/bin/sh", "-c", `
+        pidfile=$1
+        shift
+        setsid /bin/sh -c 'printf "%s\\n" "$$" > "$1"; shift; exec "$@"' legacy "$pidfile" "$@" </dev/null >/dev/null 2>&1 &
+        # Wait until setsid has detached before the enclosing shell exits.
+        attempt=0
+        while [ ! -s "$pidfile" ] && [ "$attempt" -lt 100 ]; do
+          attempt=$((attempt + 1))
+          sleep .05
+        done
+        test -s "$pidfile"
+      `, "launch-legacy", detachedPidFile, cli, "daemon", "run"],
       env: { ...legacy.env, GENEHUB_ALLOW_FOREGROUND_IN_SESSION: "1" }, timeoutMs: 10_000,
     });
-    t.assertions.assert(t.flows.main.shellExit(launched.frames)?.code === 0, "legacy Host launch failed");
+    t.assertions.assert(t.flows.main.shellExit(launched.frames)?.code === 0, "legacy Host did not create an independent OS session");
+    const detachedPid = Number(readFileSync(detachedPidFile, "utf8"));
     let old = {} as Record<string, unknown>;
     await t.tools.waitUntil(async () => {
       old = parseJson((await call(["daemon", "status"])).stdout);
       return old.running === true && typeof old.port === "number";
     }, 45_000);
+    t.assertions.assert(old.pid === detachedPid, "legacy Host did not keep the PID of the detached foreground process");
     t.assertions.assert(!existsSync(path.join(legacy.data, "daemon-supervisor.lock")), "legacy fixture unexpectedly acquired a supervisor lease");
     const parentPid = Number((await parentStatus()).pid);
     opened.client.close(); process.kill(parentPid, "SIGKILL");
@@ -161,3 +175,70 @@ defineSpecialty(meta("restart-headroom", "Recovery waits for memory headroom and
     t.note(`memoryWait=true replacementCount=0 stopCancelledWait=true reserveMb=${reserveMb} physicalMb=${Math.floor(physicalKb / 1024)} physicalAvailableMb=${Math.floor(physicalAvailableKb / 1024)}`);
   } finally { await cli(["daemon", "stop"]); }
 });
+
+defineSpecialty(
+  {
+    id: "specialty.cli.supervisor.service-activation-rollback",
+    title: "The CLI restores its service definition after systemd rejects activation",
+    oracle: "A fresh daemon start fails truthfully, removes the abandoned unit and disables its restart policy. Reinstalling an explicitly stopped service does not activate it.",
+    catches: ["failed installation leaves an enabled unit", "install restarts an intentionally stopped daemon"],
+    tags: ["core", "daemon-control", "supervisor-hardening"],
+    llm: { default: "none" },
+    expectedDurationMs: 3_000,
+    timeoutMs: 20_000,
+    surfaces: ["genet-cli", "filesystem", "os-process"],
+    requiredArtifacts: ["genet"],
+  },
+  async (t) => {
+    if (process.platform !== "linux") return;
+    const tools = path.join(t.env.root, "service-tools");
+    const unit = path.join(t.env.env.XDG_CONFIG_HOME, "systemd/user/genehub-local.service");
+    const calls = path.join(tools, "calls");
+    const captured = path.join(tools, "definition");
+    mkdirSync(tools);
+    const systemctl = path.join(tools, "systemctl");
+    // Substitute the external systemd command to inject an activation error.
+    // The CLI's lifecycle logic, unit writes and process lock are real.
+    writeFileSync(systemctl, `#!/bin/sh
+set -eu
+[ "$1" = --user ]
+shift
+printf '%s\\n' "$*" >> "$SERVICE_TEST_CALLS"
+case "$1" in
+  show-environment|daemon-reload|enable|disable) ;;
+  show) printf 'LoadState=not-found\\nMainPID=0\\n' ;;
+  start)
+    cp "$SERVICE_TEST_UNIT" "$SERVICE_TEST_CAPTURE"
+    echo 'activation rejected by fixture' >&2
+    exit 1 ;;
+  *) exit 78 ;;
+esac
+`);
+    chmodSync(systemctl, 0o700);
+    const env = genetEnv(t.openRoot, {
+      ...t.env.env,
+      PATH: `${tools}:${process.env.PATH ?? ""}`,
+      SERVICE_TEST_CALLS: calls,
+      SERVICE_TEST_UNIT: unit,
+      SERVICE_TEST_CAPTURE: captured,
+    });
+    delete env.GENEHUB_LOCAL_DATA_DIR;
+    const cli = locateGenet(t.openRoot);
+    const failed = await runGenetAsync(cli, ["daemon", "start"], env);
+    t.assertions.assert(failed.code !== 0 && failed.stderr.includes("activation rejected by fixture"), failed.stderr);
+    t.assertions.assert(!existsSync(unit), "failed activation left a persistent service definition");
+    const actions = readFileSync(calls, "utf8");
+    t.assertions.assert(actions.includes("disable --now genehub-local.service"), "failed activation left restart enabled");
+    const definition = readFileSync(captured, "utf8");
+    t.assertions.assert(definition.includes(" daemon run") && definition.includes("Restart=always"), definition);
+
+    writeFileSync(unit, definition);
+    const stopped = await runGenetAsync(cli, ["daemon", "stop"], env);
+    t.assertions.assert(stopped.code === 0, stopped.stderr);
+    const beforeInstall = readFileSync(calls, "utf8");
+    const install = await runGenetAsync(cli, ["daemon", "__install", "--refresh"], env);
+    t.assertions.assert(install.code === 0 && parseJson(install.stdout).desiredState === "stopped", install.stdout);
+    const extra = readFileSync(calls, "utf8").slice(beforeInstall.length);
+    t.assertions.assert(!/^(?:start|restart|enable) /m.test(extra), extra);
+  },
+);

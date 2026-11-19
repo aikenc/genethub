@@ -133,9 +133,11 @@ mv "$root/python.json.tmp" "$root/python.json"
 
 # Only the pinned build stays. A Python that is still running from an older
 # build is not a reason to keep it: an upgrade restarts everything that uses it.
-for old in "$root"/python-*; do
-  [ -e "$old" ] || continue
-  [ "$old" = "$target" ] || rm -rf "$old"
-done
+if [ "${GENEHUB_KEEP_PYTHON_VERSIONS:-}" != 1 ]; then
+  for old in "$root"/python-*; do
+    [ -e "$old" ] || continue
+    [ "$old" = "$target" ] || rm -rf "$old"
+  done
+fi
 
 say "Python $version ready: $python"

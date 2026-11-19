@@ -268,6 +268,14 @@ async fn wait_receipt(data: &Path, id: &str, wait: bool) -> Result<Value> {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+pub(crate) fn check_installer_can_proceed(paths: &Paths) -> Result<()> {
+    let lock = records::root(&paths.root).join("execution.lock");
+    if lock.try_exists()? {
+        let _lease = exclusive(&lock).context("an App update is already running")?;
+    }
+    Ok(())
+}
+
 pub(super) fn exclusive(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         genet_frontdoor::perms::ensure_real_directory(parent)?;

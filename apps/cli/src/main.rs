@@ -244,16 +244,15 @@ fn print_usage() {
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead
   genet daemon run                  run the daemon in the foreground
-  genet daemon start                start the daemon in the background
+  genet daemon start                start the daemon using the platform service when available
   genet daemon stop                 stop the verified local daemon instance
-  genet daemon restart              restart a manually started local daemon
-                                    managed daemon: use its existing manager
+  genet daemon restart              restart the local daemon using its existing manager
                                     daemon-dependent session: verify independent
                                     SSH/console recovery before restarting
                                     do not wrap restart in a transient task
                                     SOP: built-in genehub skill, references/daemon-restart.md
                                     use the channel-bound GENEHUB_CLI
-  genet daemon status               whether the daemon is running
+  genet daemon status               local daemon, platform service and Hub status
   genet daemon endpoint             one-use local wsUrl and process facts
   genet hub status                  Hub pairing state
   genet hub login [--hub <url>] [--name <display>] [--wait]

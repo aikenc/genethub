@@ -31,18 +31,15 @@ fn domain() -> Result<String> {
     let uid = Command::new("/usr/bin/id").arg("-u").output()?;
     anyhow::ensure!(uid.status.success(), "could not determine launchd user");
     let uid = String::from_utf8(uid.stdout)?.trim().to_string();
-    let gui = format!("gui/{uid}");
-    if Command::new("/bin/launchctl")
-        .args(["print", &gui])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?
-        .success()
-    {
-        Ok(gui)
-    } else {
-        Ok(format!("user/{uid}"))
-    }
+    let user = format!("user/{uid}");
+    let output = Command::new("/bin/launchctl")
+        .args(["print", &user])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "the launchd user domain is unavailable"
+    );
+    Ok(user)
 }
 #[cfg(target_os = "macos")]
 fn xml(s: &str) -> String {
@@ -103,7 +100,7 @@ fn launchd(
         .iter()
         .map(|(k, v)| format!("<key>{}</key><string>{}</string>", xml(k), xml(v)))
         .collect::<String>();
-    std::fs::write(plist,format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array>{strings}</array><key>EnvironmentVariables</key><dict>{env}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><false/><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",xml(name),xml(&log.to_string_lossy()),xml(&log.to_string_lossy())))?;
+    std::fs::write(plist,format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array>{strings}</array><key>EnvironmentVariables</key><dict>{env}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><false/><key>LimitLoadToSessionType</key><string>Background</string><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",xml(name),xml(&log.to_string_lossy()),xml(&log.to_string_lossy())))?;
     genet_frontdoor::perms::restrict_to_owner(plist)?;
     let target = format!("{}/{}", domain()?, name);
     let prior = Command::new("/bin/launchctl")

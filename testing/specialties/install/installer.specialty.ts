@@ -83,14 +83,19 @@ const LOCAL_RELEASE: ReleaseNames = {
 
 /** `pythonInstaller`: the body of the `python-runtime/install-python.sh` the
  * release carries next to its binaries, when it carries one. */
-function fakeRelease(names: ReleaseNames = LOCAL_RELEASE, pythonInstaller?: string): string {
+function fakeRelease(
+  names: ReleaseNames = LOCAL_RELEASE,
+  pythonInstaller?: string,
+  cliResponse = "echo ok",
+): string {
   const dir = mkdtempSync(path.join(tmpdir(), "genehub-install-release-"));
   const staged = path.join(dir, "staged");
   mkdirSync(staged, { recursive: true });
   const binary = path.join(staged, names.cli);
   writeFileSync(
     binary,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n",
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\n" +
+      cliResponse + "\n",
   );
   chmodSync(binary, 0o755);
   const host = path.join(staged, names.host);
@@ -478,71 +483,123 @@ defineSpecialty(
   },
 );
 
-// systemctl/loginctl stand-ins: record every call, and report a usable user
-// manager so the installer takes its service path.
-function writeServiceShims(tools: string, calls: string): void {
-  for (const tool of ["systemctl", "loginctl"]) {
-    const shim = path.join(tools, tool);
-    writeFileSync(
-      shim,
-      `#!/bin/sh\nprintf '%s %s\\n' ${tool} "$*" >> "${calls}"\n` +
-        (tool === "loginctl" ? `[ "$1" = show-user ] && echo yes\n` : "") +
-        "exit 0\n",
-    );
-    chmodSync(shim, 0o755);
-  }
-}
-
 defineSpecialty(
   {
     id: "specialty.install.user-service",
-    title: "Where systemd is usable, the daemon is installed as a per-channel user service",
+    title: "The installer delegates the service lifecycle to the installed CLI",
     oracle:
-      "install.sh writes genehub-local.service running `<cli> daemon run` with Restart=always and the caller's PATH, enables it and restarts it --no-block through systemctl, never through `daemon restart`",
-    catches: ["daemon left hand-run and dying with the shell", "service without agents on PATH", "upgrade restarting beside the service"],
+      "The real installer asks the downloaded CLI to activate its platform service, requests refresh only for changed artifacts, and preserves a service that was intentionally stopped.",
+    catches: ["parallel installer-owned service", "restarts on unchanged downloads", "reinstall revives a stopped service"],
     tags: ["core", "install"],
     expectedDurationMs: 8_000,
     timeoutMs: 30_000,
     surfaces: ["install"],
   },
   async (t) => {
-    if (installerUnsupported() || process.platform !== "linux") return;
-    const release = fakeRelease();
+    if (installerUnsupported()) return;
+    // This is the installer-to-CLI boundary. The OS service manager never
+    // runs in this case, so it cannot modify a user's real installation.
+    const release = fakeRelease(LOCAL_RELEASE, undefined, `case "$*" in
+  "daemon __service-capabilities") echo genehub-service-v1 ;;
+  "daemon __install --refresh") echo '{"service":{"manager":"systemd"},"running":true}' ;;
+  "daemon __install") echo '{"service":{"manager":"systemd"},"desiredState":"stopped"}' ;;
+  *) exit 77 ;;
+esac`);
     const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
-    const tools = mkdtempSync(path.join(tmpdir(), "genehub-install-service-tools-"));
     const bin = path.join(home, "bin");
     const calls = path.join(home, "calls");
-    writeServiceShims(tools, calls);
+    const env = { GENEHUB_NO_SERVICE: "", HOME: home, GENEHUB_TEST_CALLS: calls };
     try {
-      const output = runInstall(t.openRoot, release, bin, {
-        GENEHUB_NO_SERVICE: "",
-        HOME: home,
-        XDG_CONFIG_HOME: path.join(home, ".config"),
-        XDG_RUNTIME_DIR: home,
-        PATH: `${tools}:${process.env.PATH ?? ""}`,
-        GENEHUB_TEST_CALLS: calls,
-      });
-      t.assertions.assert(output.status === 0, `install failed: ${output.stderr}`);
-      const unit = readFileSync(path.join(home, ".config/systemd/user/genehub-local.service"), "utf8");
-      t.assertions.assert(
-        unit.includes(`ExecStart="${path.join(bin, "genet-local")}" daemon run`),
-        `unit does not run the installed CLI:\n${unit}`,
-      );
-      t.assertions.assert(unit.includes("Restart=always"), "unit does not restart the daemon");
-      t.assertions.assert(/^Environment="PATH=.*/m.test(unit) && unit.includes(`:${tools}:`), "unit drops the caller's PATH");
-      const made = readFileSync(calls, "utf8");
-      t.assertions.assert(made.includes("systemctl --user enable genehub-local.service"), made);
-      t.assertions.assert(made.includes("systemctl --user restart --no-block genehub-local.service"), made);
-      t.assertions.assert(!made.includes("daemon restart"), `restarted beside the service:\n${made}`);
-      t.assertions.assert(
-        output.stdout.includes("systemctl --user status genehub-local.service"),
-        `did not say how to reach the service:\n${output.stdout}`,
-      );
+      const initial = runInstall(t.openRoot, release, bin, env);
+      t.assertions.assert(initial.status === 0, `install failed: ${initial.stderr}`);
+      t.assertions.assert(initial.stdout.includes("genet-local daemon status"), initial.stdout);
+      const again = runInstall(t.openRoot, release, bin, env);
+      t.assertions.assert(again.status === 0, `reinstall failed: ${again.stderr}`);
+      t.assertions.assert(again.stdout.includes("The daemon service remains stopped"), again.stdout);
+      const made = readFileSync(calls, "utf8").trim().split("\n");
+      t.assertions.assert(made.join("|") ===
+        "daemon __service-capabilities|daemon __install --refresh|daemon __service-capabilities|daemon __install",
+      `unexpected service actions: ${made.join(", ")}`);
+      t.assertions.assert(!existsSync(path.join(home, ".config/systemd/user")), "installer wrote a separate unit");
+      t.assertions.assert(!existsSync(path.join(home, "Library/LaunchAgents")), "installer wrote a separate plist");
     } finally {
       rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
-      rmSync(tools, { recursive: true, force: true });
     }
+  },
+);
+
+
+defineSpecialty(
+  {
+    id: "specialty.install.failed-activation-recovers-release",
+    title: "An install failure restores the previous release until startup accesses its data",
+    oracle: "Failed activation restores all previous artifacts and Python pointer, then verifies the prior machine through the service manager. Once the Host reports startup, the installer retains both releases for recovery.",
+    catches: ["service rolls back against replaced files", "automatic downgrade after data is opened"],
+    tags: ["core", "install"], expectedDurationMs: 6_000, timeoutMs: 30_000,
+    surfaces: ["install", "filesystem"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const release = fakeRelease(LOCAL_RELEASE, `#!/bin/sh
+set -eu
+mkdir -p "$1"
+printf '%s\\n' new-python > "$1/python.json"
+`, `case "$*" in
+  "daemon __service-capabilities") echo genehub-service-v1 ;;
+  "daemon __install-state") echo "m_test_machine 12345" ;;
+  "daemon __install --refresh")
+    if [ "$TEST_INSTALL_FAILURE" = after-start ]; then
+      touch "$TEST_BIN/.genehub-local-install/startup-observed"
+    fi
+    echo 'injected activation failure' >&2
+    exit 1 ;;
+  "daemon __restore-service m_test_machine 12345")
+    test "$(cat "$TEST_BIN/genet-local")" = old-cli
+    test "$(cat "$TEST_BIN/genehub-host-local")" = old-host
+    test "$(cat "$TEST_BIN/genehub_guest.wasm")" = old-component
+    test "$(cat "$TEST_PYTHON_POINTER")" = old-python
+    echo recovered > "$TEST_BIN/verified"
+    ;;
+  *) exit 77 ;;
+esac`);
+    try {
+      for (const failure of ["before-start", "after-start"]) {
+        const root = path.join(t.env.root, failure);
+        const bin = path.join(root, "bin");
+        const runtime = path.join(root, "data", "agents", "runtime");
+        const pointer = path.join(runtime, "python.json");
+        const transaction = path.join(bin, ".genehub-local-install");
+        mkdirSync(bin, { recursive: true });
+        mkdirSync(runtime, { recursive: true });
+        const previous = {
+          "genet-local": "old-cli", "genehub-host-local": "old-host",
+          "genehub_guest.wasm": "old-component",
+        };
+        for (const [file, contents] of Object.entries(previous)) {
+          writeFileSync(path.join(bin, file), contents, { mode: 0o755 });
+        }
+        writeFileSync(pointer, "old-python");
+        const result = runInstall(t.openRoot, release, bin, {
+          GENEHUB_NO_SERVICE: "", GENEHUB_LOCAL_DATA_DIR: path.join(root, "data"),
+          TEST_BIN: bin, TEST_PYTHON_POINTER: pointer, TEST_INSTALL_FAILURE: failure,
+        });
+        t.assertions.assert(result.status !== 0 && result.stderr.includes("injected activation failure"), result.stderr);
+        if (failure === "before-start") {
+          t.assertions.assert(result.stderr.includes("Previous daemon instance verified"), result.stderr);
+          t.assertions.assert(existsSync(path.join(bin, "verified")), "old identity recovery was never verified");
+          t.assertions.assert(!existsSync(transaction), "successful recovery left installation locked");
+          for (const [file, contents] of Object.entries(previous)) {
+            t.assertions.assert(readFileSync(path.join(bin, file), "utf8") === contents, file);
+          }
+        } else {
+          t.assertions.assert(result.stderr.includes("Automatic downgrade was stopped"), result.stderr);
+          t.assertions.assert(!existsSync(path.join(bin, "verified")), "attempted to restart old release after startup");
+          t.assertions.assert(readFileSync(path.join(transaction, "old", "genet-local"), "utf8") === "old-cli", "lost old release backup");
+          t.assertions.assert(readFileSync(path.join(bin, "genet-local"), "utf8") !== "old-cli", "downgraded the active release");
+        }
+      }
+    } finally { rmSync(release, { recursive: true, force: true }); }
   },
 );
 

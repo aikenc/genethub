@@ -105,6 +105,10 @@ pub fn valid_id(id: &str) -> Result<()> {
     }
     Ok(())
 }
+pub fn installer_transaction(install_dir: &Path) -> PathBuf {
+    install_dir.join(format!(".genehub-{}-install", crate::channel::CHANNEL))
+}
+
 pub fn root(data: &Path) -> PathBuf {
     data.join("updates")
 }

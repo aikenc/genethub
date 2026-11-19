@@ -17,6 +17,8 @@ use genet_frontdoor::Paths;
 
 use crate::{fail, ok, EXIT_FAILED, EXIT_UNREACHABLE};
 
+mod service;
+
 #[cfg(target_os = "linux")]
 mod supervisor;
 
@@ -92,14 +94,51 @@ pub async fn daemon(args: &[String]) -> i32 {
             daemon_report().await
         }
         "endpoint" => no_extra(rest, endpoint),
-        "start" | "stop" | "restart" if rest.is_empty() => {
-            if let Some(service) = installed_service() {
-                fail("managedByService", &service.refusal(verb), EXIT_FAILED);
+        "__service-capabilities" if rest.is_empty() => {
+            println!("genehub-service-v1");
+            0
+        }
+        "__install-state" if rest.is_empty() => {
+            let paths = paths();
+            if let Err(error) = crate::update::check_installer_can_proceed(&paths) {
+                fail("installerBusy", &format!("{error:#}"), EXIT_FAILED);
             }
-            match verb {
-                "start" => start(),
-                "stop" => stop(),
-                _ => restart(),
+            if let Some(endpoint) = read_endpoint(&paths)
+                .filter(|endpoint| live_pid(&paths) == Some(endpoint.pid) && health(endpoint))
+            {
+                println!("{} {}", endpoint.machine_id, endpoint.pid);
+            }
+            0
+        }
+        "__restore-service" if rest.len() == 2 => {
+            let Ok(pid) = rest[1].parse::<u32>() else {
+                return crate::usage();
+            };
+            match service::restore(&paths(), &rest[0], pid) {
+                Ok(value) => ok(value),
+                Err(error) => fail("serviceRecoveryFailed", &format!("{error:#}"), EXIT_FAILED),
+            }
+        }
+        "start" | "stop" | "restart" | "__install"
+            if rest.is_empty() || (verb == "__install" && rest == ["--refresh"]) =>
+        {
+            let action = match verb {
+                "start" => service::Action::Start,
+                "stop" => service::Action::Stop,
+                "restart" => service::Action::Restart,
+                _ => service::Action::Install {
+                    refresh: !rest.is_empty(),
+                },
+            };
+            match service::apply(&paths(), action) {
+                Ok(Some(value)) => ok(value),
+                Err(error) => fail("serviceLifecycleFailed", &format!("{error:#}"), EXIT_FAILED),
+                Ok(None) => match action {
+                    service::Action::Start => start(),
+                    service::Action::Stop => stop(),
+                    service::Action::Restart => restart(),
+                    service::Action::Install { .. } => ok(serde_json::json!({"service": null})),
+                },
             }
         }
         _ => crate::usage(),
@@ -113,13 +152,7 @@ pub async fn status(args: &[String]) -> i32 {
     overview().await
 }
 
-/// A per-channel user service the installer registered for this daemon.
-///
-/// While one exists it owns the lifecycle. Starting or stopping beside it
-/// races its restart policy, and a daemon started from a remote shell dies
-/// with that shell — so these verbs name the manager's command instead of
-/// running their own. `daemon run`, which the service itself executes, is
-/// unaffected.
+/// A platform service definition for one normal channel installation.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Service {
     pub(crate) manager: Manager,
@@ -127,47 +160,23 @@ pub(crate) struct Service {
     pub(crate) file: std::path::PathBuf,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Manager {
     Systemd,
     Launchd,
 }
 
-impl Service {
-    fn command(&self, verb: &str) -> String {
-        match self.manager {
-            Manager::Systemd => format!("systemctl --user {verb} {}", self.name),
-            Manager::Launchd => match verb {
-                "start" => format!("launchctl kickstart gui/$(id -u)/{}", self.name),
-                "stop" => format!("launchctl bootout gui/$(id -u)/{}", self.name),
-                _ => format!("launchctl kickstart -k gui/$(id -u)/{}", self.name),
-            },
+impl Manager {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Systemd => "systemd",
+            Self::Launchd => "launchd",
         }
-    }
-
-    fn refusal(&self, verb: &str) -> String {
-        let manager = match self.manager {
-            Manager::Systemd => "systemd",
-            Manager::Launchd => "launchd",
-        };
-        format!(
-            "this daemon is run by {manager} ({}); use `{}` so the service stays in charge \
-             (delete that file to manage the daemon by hand)",
-            self.file.display(),
-            self.command(verb),
-        )
     }
 }
 
 pub(crate) fn installed_service() -> Option<Service> {
-    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-    let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
-    find_service(
-        &home,
-        config.as_deref(),
-        std::env::consts::OS,
-        channel::CHANNEL,
-    )
+    service::configured(&Paths::discover().ok()?).filter(|service| service.file.is_file())
 }
 
 fn find_service(
@@ -192,7 +201,7 @@ fn find_service(
         }
         _ => return None,
     };
-    file.is_file().then_some(Service {
+    Some(Service {
         manager,
         name,
         file,
@@ -272,8 +281,10 @@ fn facts(paths: &Paths) -> serde_json::Value {
 
 /// `genet daemon status` — process facts plus a bounded runtime identity query.
 async fn daemon_report() -> i32 {
-    let mut value = facts(&paths());
+    let paths = paths();
+    let mut value = facts(&paths);
     add_runtime_version(&mut value).await;
+    add_service(&paths, &mut value);
     ok(value)
 }
 
@@ -292,6 +303,7 @@ async fn overview() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);
     add_runtime_version(&mut value).await;
+    add_service(&paths, &mut value);
     value["hub"] = if value["running"].as_bool() == Some(true) {
         crate::invoke::hub_status()
             .await
@@ -300,6 +312,19 @@ async fn overview() -> i32 {
         serde_json::Value::Null
     };
     ok(value)
+}
+
+fn add_service(paths: &Paths, value: &mut serde_json::Value) {
+    if let Some(service) = service::configured(paths).filter(|service| service.file.is_file()) {
+        let mut report = service.report(paths);
+        report["desiredState"] =
+            serde_json::json!(if paths.root.join("service-stopped").is_file() {
+                "stopped"
+            } else {
+                "running"
+            });
+        value["service"] = report;
+    }
 }
 
 /// `genet daemon endpoint` — how to connect, for a browser, an SSH tunnel or
@@ -925,46 +950,31 @@ mod service_tests {
     use super::*;
 
     #[test]
-    fn an_installed_user_service_takes_over_the_lifecycle_verbs() {
+    fn service_paths_are_channel_and_platform_specific() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(find_service(home.path(), None, "linux", "beta"), None);
-
-        let units = home.path().join(".config/systemd/user");
-        std::fs::create_dir_all(&units).unwrap();
-        std::fs::write(units.join("genehub-stable.service"), "").unwrap();
+        let linux = find_service(home.path(), None, "linux", "beta").unwrap();
         assert_eq!(
-            find_service(home.path(), None, "linux", "beta"),
-            None,
-            "another channel's service is not this daemon's"
+            linux.file,
+            home.path()
+                .join(".config/systemd/user/genehub-beta.service")
         );
-        std::fs::write(units.join("genehub-beta.service"), "").unwrap();
-        let service = find_service(home.path(), None, "linux", "beta").unwrap();
+        let mac = find_service(home.path(), None, "macos", "beta").unwrap();
         assert_eq!(
-            service.command("restart"),
-            "systemctl --user restart genehub-beta.service"
+            mac.file,
+            home.path()
+                .join("Library/LaunchAgents/com.genethub.beta.daemon.plist")
         );
-        assert!(service
-            .refusal("stop")
-            .contains("systemctl --user stop genehub-beta.service"));
-
-        let agents = home.path().join("Library/LaunchAgents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::write(agents.join("com.genethub.beta.daemon.plist"), "").unwrap();
-        let service = find_service(home.path(), None, "macos", "beta").unwrap();
-        assert_eq!(
-            service.command("restart"),
-            "launchctl kickstart -k gui/$(id -u)/com.genethub.beta.daemon"
-        );
-        assert_eq!(find_service(home.path(), None, "windows", "beta"), None);
+        assert!(find_service(home.path(), None, "windows", "beta").is_none());
     }
 
     #[test]
     fn xdg_config_home_moves_the_systemd_unit() {
         let home = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(config.path().join("systemd/user")).unwrap();
-        std::fs::write(config.path().join("systemd/user/genehub-dev.service"), "").unwrap();
-        assert!(find_service(home.path(), None, "linux", "dev").is_none());
-        assert!(find_service(home.path(), Some(config.path()), "linux", "dev").is_some());
+        let linux = find_service(home.path(), Some(config.path()), "linux", "dev").unwrap();
+        assert_eq!(
+            linux.file,
+            config.path().join("systemd/user/genehub-dev.service")
+        );
     }
 }

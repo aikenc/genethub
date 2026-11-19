@@ -31,6 +31,24 @@ mod version;
 use std::env;
 use std::path::PathBuf;
 
+/// Let the shell installer know that a replacement Host may have opened its
+/// data. Keep this receipt outside the data store it protects from downgrade.
+fn note_installer_start() -> anyhow::Result<()> {
+    let executable = env::current_exe()?;
+    let Some(parent) = executable.parent() else {
+        return Ok(());
+    };
+    let transaction = genet_frontdoor::managed_update::installer_transaction(parent);
+    if transaction.join("activation-pending").try_exists()? {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(transaction.join("startup-observed"))?
+            .sync_all()?;
+    }
+    Ok(())
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -41,7 +59,9 @@ fn main() {
             });
             if matches!(entry, load::Entry::Daemon) {
                 forget_launching_session();
-                if let Err(error) = update::note_daemon_start() {
+                if let Err(error) =
+                    update::note_daemon_start().and_then(|()| note_installer_start())
+                {
                     eprintln!("cannot record App startup before opening data: {error:#}");
                     std::process::exit(4);
                 }

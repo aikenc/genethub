@@ -44,14 +44,18 @@ impl Paths {
     pub fn discover() -> Result<Self> {
         let root = match std::env::var(channel::ENV_DATA_DIR) {
             Ok(dir) => PathBuf::from(dir),
-            Err(_) => dirs::data_dir()
-                .context("no platform data directory")?
-                .join(channel::DATA_DIR_NAME),
+            Err(_) => Self::platform_root()?,
         };
         Ok(Paths {
             root,
             default_workspace: Some(default_workspace()?),
         })
+    }
+
+    pub fn platform_root() -> Result<PathBuf> {
+        Ok(dirs::data_dir()
+            .context("no platform data directory")?
+            .join(channel::DATA_DIR_NAME))
     }
 
     pub fn config_file(&self) -> PathBuf {
