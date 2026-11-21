@@ -275,6 +275,7 @@ impl Manager {
         share: Option<(String, i64)>,
         peer: Option<PeerAccess>,
         service: Option<serde_json::Value>,
+        review: bool,
     ) -> Result<StaticPreviewGrant> {
         let hub = hub::Client::new(&enrollment.hub_url);
         if let Some(worker) = slot {
@@ -336,7 +337,7 @@ impl Manager {
                 "op":"open","host":host,"workspace":crate::guest_paths::host_path(&site.workspace),
                 "root":site.root,"entry":site.entry,"workbench_origin":worker.workbench_origin,
                 "ttl_seconds":ttl,"expires_at_ms":expires_at,"scope":scope,"bootstrap_digest":digest,
-                "https_port":worker.port,"service":service,
+                "https_port":worker.port,"service":service,"review":review,
             }))
             .await?
         {
@@ -377,13 +378,14 @@ impl Manager {
         share: Option<(&str, i64, Vec<String>)>,
         peer: Option<PeerAccess>,
         service: Option<serde_json::Value>,
+        review: bool,
     ) -> Result<StaticPreviewGrant> {
         let (share, allowed) = match share {
             Some((id, deadline, files)) => (Some((id.to_owned(), deadline)), Some(files)),
             None => (None, None),
         };
         let mut slot = self.worker.lock().await;
-        self.open_inner(state, &mut slot, enrollment, site, allowed, share, peer, service)
+        self.open_inner(state, &mut slot, enrollment, site, allowed, share, peer, service, review)
             .await
     }
 

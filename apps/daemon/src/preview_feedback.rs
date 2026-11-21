@@ -614,6 +614,7 @@ async fn open_static(
     path: &str,
     peer: Option<crate::dataplane::endpoint::PeerAccess>,
     service_run_id: Option<&str>,
+    review: bool,
 ) -> Result<genehub_proto::StaticPreviewGrant> {
     if !crate::static_preview::enabled() {
         bail!("此设备未启用独立预览");
@@ -632,7 +633,7 @@ async fn open_static(
             bail!("分享没有授权这个独立预览入口");
         }
         let files = static_files(state, workspace, &site, &share.allowed).await?;
-        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer, None).await;
+        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer, None, review).await;
     }
     if !caller.is_full() {
         bail!("此浏览器没有打开独立预览的权限");
@@ -645,7 +646,7 @@ async fn open_static(
     } else {
         None
     };
-    state.static_preview.open(state, enrollment, site, None, peer, service).await
+    state.static_preview.open(state, enrollment, site, None, peer, service, review).await
 }
 
 pub(crate) async fn handle(
@@ -676,16 +677,17 @@ pub(crate) async fn handle(
             authorize_asset(state, caller, workspace, path).await?;
             return Ok(Out::Source(source(state, workspace, path).await?));
         }
-        Op::OpenStatic { path, service_run_id } => {
+        Op::OpenStatic { path, service_run_id, review } => {
             let state = state.clone();
             let caller = caller.clone();
             let workspace = workspace.clone();
             let path = path.clone();
             let peer = peer.cloned();
             let service_run_id = service_run_id.clone();
+            let review = review.unwrap_or(false);
             // Keep the worker request/reply paired if the launching browser
             // abandons its RPC while a native operation is in flight.
-            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref()).await })
+            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref(), review).await })
                 .await?.map(Out::StaticPreview);
         }
         Op::Read { id } => {

@@ -55,6 +55,9 @@ pub enum PreviewFeedbackOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         service_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        review: Option<bool>,
     },
     Revoke {
         share_id: String,
