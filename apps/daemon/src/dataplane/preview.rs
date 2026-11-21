@@ -45,7 +45,10 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             .await
         {
             Ok(file) => file,
-            Err(_) => return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await,
+            Err(_) => {
+                trace_forbidden(stream, services, "authorize");
+                return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+            }
         };
     let resolved = &authorized.resolved;
 
@@ -70,7 +73,12 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     let read = crate::files::preview(root, &path);
     let mut file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
         Ok(Ok(file)) => file,
-        Ok(Err(failure)) => return failure_response(stream, failure).await,
+        Ok(Err(failure)) => {
+            if matches!(failure, PreviewFailure::Forbidden) {
+                trace_forbidden(stream, services, "open");
+            }
+            return failure_response(stream, failure).await;
+        }
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
     authorized
@@ -135,6 +143,16 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         "preview completed"
     );
     Ok(())
+}
+
+fn trace_forbidden(stream: &ServerStream, services: &PeerServices, stage: &'static str) {
+    tracing::debug!(
+        event = "preview_forbidden",
+        request_id = super::endpoint::diagnostic_id(&stream.head.metadata),
+        transport = services.carrier_kind.as_str(),
+        stage,
+        "preview denied"
+    );
 }
 
 struct CachedImage {

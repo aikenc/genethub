@@ -7,6 +7,7 @@
 
 mod control;
 mod invoke;
+mod static_preview;
 mod update;
 mod wasm;
 
@@ -36,7 +37,20 @@ const FORWARDED: &[&str] = &[
 ];
 
 fn main() {
-    run(std::env::args().skip(1).collect())
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if let [verb, cert, key, suffix] = args.as_slice() {
+        if verb == "static-preview-worker" {
+            let code = match static_preview::run(cert, key, suffix) {
+                Ok(()) => EXIT_OK,
+                Err(error) => {
+                    eprintln!("static preview worker: {error}");
+                    EXIT_FAILED
+                }
+            };
+            std::process::exit(code);
+        }
+    }
+    run(args)
 }
 
 // A front door waits on one forwarded command; it does not run the daemon.
