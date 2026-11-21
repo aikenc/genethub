@@ -57,6 +57,7 @@ pub struct AppState {
     /// This machine's relationship with a Hub. Set once, right after the state
     /// exists, because the link needs the state to serve relayed clients.
     pub link: std::sync::OnceLock<SharedLink>,
+    pub(crate) static_preview: Arc<crate::static_preview::Manager>,
     /// The rendezvous relay this machine waits at, if any. Set alongside the
     /// link and for the same reason.
     pub remote: std::sync::OnceLock<SharedRemote>,
@@ -199,6 +200,7 @@ impl AppState {
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,
             link: std::sync::OnceLock::new(),
+            static_preview: Default::default(),
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Downloader::new(updates_dir),
             fanout: std::sync::OnceLock::new(),

@@ -8,6 +8,7 @@ import { Client } from "../protocol/client";
 import { readRtcEnabled } from "../settings/rtc";
 import { redeemPreviewShare, type PreviewShareCredential } from "./PreviewShareButton";
 import { AssetPreviewPage } from "./AssetPreviewPage";
+import { IndependentPreviewLaunch } from "./IndependentPreviewLaunch";
 import { PreviewProductFeedbackContext } from "./PreviewToolbar";
 import {
   createPreviewPopoutChannel,
@@ -27,6 +28,7 @@ export function PreviewPopoutPage({
   shareCredential = null,
   host,
   onReportProduct = null,
+  independent = false,
 }: {
   source: AssetPreviewLocation;
   context: PreviewPopoutContext | null;
@@ -34,15 +36,19 @@ export function PreviewPopoutPage({
   shareCredential?: PreviewShareCredential | null;
   host?: Host;
   onReportProduct?: (() => void) | null;
+  independent?: boolean;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
   const [savedWorkspacePath, setSavedWorkspacePath] = useState<string | null>(null);
+  const usesShare = independent && !!shareCredential;
   const inherited = useMemo(
-    () => (context ? takePreviewPopoutBridge(context, source) : null),
-    [context, source.deviceHandle, source.path, source.workspaceHandle],
+    () => (context && !usesShare ? takePreviewPopoutBridge(context, source) : null),
+    [context, source.deviceHandle, source.path, source.workspaceHandle, usesShare],
   );
   const effectiveContext = inherited?.context ?? context;
   const sharedClient = inherited?.client ?? null;
+  const malformedShare = independent && !shareCredential
+    && new URLSearchParams(window.location.hash.slice(1)).has("genehubPreviewShare");
 
   // The feedback launcher is a sibling of this page in a standalone preview,
   // outside the normal workbench store. Publish the inherited client through
@@ -154,12 +160,18 @@ export function PreviewPopoutPage({
 
   const portableClient = portable?.kind === "ready" ? portable.client : null;
 
+  if (malformedShare) {
+    return <p role="alert" className="m-auto p-6 text-sm">分享链接无效</p>;
+  }
   if ((portableTicket || shareCredential) && !sharedClient && portable?.kind !== "ready") {
     return (
       <p role="status" className="m-auto p-6 text-center text-sm text-muted">
         {portable?.kind === "failed" ? portable.message : "正在连接资源所在的设备…"}
       </p>
     );
+  }
+  if (independent) {
+    return <IndependentPreviewLaunch source={source} host={host} client={shareCredential ? portableClient : sharedClient} />;
   }
 
   return (

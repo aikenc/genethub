@@ -1298,11 +1298,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         &services.state,
         services.access.transport,
         &caller,
-        if matches!(caller, Principal::PreviewShare { .. }) {
-            services.access.workspace_id.as_deref()
-        } else {
-            None
-        },
+        Some(&services.access),
         request,
     )
     .instrument(span)

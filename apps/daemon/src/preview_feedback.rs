@@ -5,7 +5,7 @@ use crate::{
     session::{artifacts::ArtifactStorage, preview_review},
     state::Shared,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,6 +27,8 @@ struct Share {
     allowed: BTreeSet<String>,
     expires_at_ms: i64,
     revoked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    independent: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -380,7 +382,8 @@ async fn authorize_scope(
 ) -> Result<()> {
     use PreviewFeedbackOperation as Op;
     let path = match operation {
-        Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. } => {
+        Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. }
+        | Op::ShareStatic { path, .. } | Op::OpenStatic { path } => {
             crate::file_access::display(&resolve_source(state, workspace, path).await?.absolute)
         }
         Op::Revoke { share_id } => {
@@ -575,15 +578,77 @@ async fn dependencies(
     }
     Ok(found)
 }
+
+async fn static_site(
+    state: &Shared,
+    workspace: &str,
+    path: &str,
+) -> Result<crate::static_preview::Site> {
+    let resolved = resolve_source(state, workspace, path).await?;
+    crate::file_access::resolve(
+        state,
+        &crate::file_access::display(&resolved.absolute),
+        (!workspace.is_empty()).then_some(workspace),
+    ).await?;
+    crate::static_preview::Site::resolve(resolved)
+}
+
+async fn static_files(
+    state: &Shared,
+    workspace: &str,
+    site: &crate::static_preview::Site,
+    paths: impl IntoIterator<Item = &String>,
+) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for path in paths {
+        let resolved = resolve_source(state, workspace, path).await?;
+        files.push(site.resource(&resolved.absolute)?);
+    }
+    Ok(files)
+}
+
+async fn open_static(
+    state: &Shared,
+    caller: &Principal,
+    workspace: &str,
+    path: &str,
+    peer: Option<crate::dataplane::endpoint::PeerAccess>,
+) -> Result<genehub_proto::StaticPreviewGrant> {
+    if !crate::static_preview::enabled() {
+        bail!("此设备未启用独立预览");
+    }
+    let site = static_site(state, workspace, path).await?;
+    let enrollment = state.link.get().context("Hub is not connected")?.preview_enrollment().await?;
+    if let Some(id) = share_id(caller) {
+        // Serialize checking the durable grant and registering the live lease
+        // with share revoke on the same daemon.
+        let _lock = WRITES.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let share = grant(state, workspace, id).await?;
+        if !share.independent || share.path != path {
+            bail!("分享没有授权这个独立预览入口");
+        }
+        let files = static_files(state, workspace, &site, &share.allowed).await?;
+        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer).await;
+    }
+    if !caller.is_full() {
+        bail!("此浏览器没有打开独立预览的权限");
+    }
+    state.static_preview.open(state, enrollment, site, None, peer).await
+}
+
 pub(crate) async fn handle(
     state: &Shared,
     caller: &Principal,
-    workspace_scope: Option<&str>,
+    peer: Option<&crate::dataplane::endpoint::PeerAccess>,
     request: PreviewFeedbackRequest,
 ) -> Result<PreviewFeedbackResponse> {
     use PreviewFeedbackOperation as Op;
     use PreviewFeedbackResponse as Out;
     let workspace = &request.workspace_id;
+    let workspace_scope = match caller {
+        Principal::PreviewShare { .. } => peer.and_then(|peer| peer.workspace_id.as_deref()),
+        _ => None,
+    };
     if let Some(scope) = workspace_scope {
         if !workspace.is_empty() && workspace != scope {
             bail!("feedback workspace mismatch");
@@ -598,6 +663,17 @@ pub(crate) async fn handle(
         Op::Source { path } => {
             authorize_asset(state, caller, workspace, path).await?;
             return Ok(Out::Source(source(state, workspace, path).await?));
+        }
+        Op::OpenStatic { path } => {
+            let state = state.clone();
+            let caller = caller.clone();
+            let workspace = workspace.clone();
+            let path = path.clone();
+            let peer = peer.cloned();
+            // Keep the worker request/reply paired if the launching browser
+            // abandons its RPC while a native operation is in flight.
+            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer).await })
+                .await?.map(Out::StaticPreview);
         }
         Op::Read { id } => {
             if share_id(caller).is_some() {
@@ -651,12 +727,17 @@ pub(crate) async fn handle(
         file: lock_file,
         path: lock_path,
     };
+    let independent = matches!(&request.operation, Op::ShareStatic { .. });
     match request.operation {
         Op::Source { path } => {
             authorize_asset(state, caller, workspace, &path).await?;
             Ok(Out::Source(source(state, workspace, &path).await?))
         }
         Op::Share {
+            path,
+            ttl_seconds,
+            resources,
+        } | Op::ShareStatic {
             path,
             ttl_seconds,
             resources,
@@ -667,7 +748,9 @@ pub(crate) async fn handle(
             if ![3600, 86400, 604800].contains(&ttl_seconds) {
                 bail!("preview sharing supports 1h, 1d or 7d");
             }
-            source(state, workspace, &path).await?;
+            if !independent {
+                source(state, workspace, &path).await?;
+            }
             let shares = home(state, workspace).await?.join("shares");
             prepare(&shares)?;
             for entry in fs::read_dir(&shares)? {
@@ -681,13 +764,26 @@ pub(crate) async fn handle(
                 bail!("preview share limit reached; remove expired shares");
             }
             let id = format!("ps_{}", uuid::Uuid::new_v4().simple());
-            let allowed = dependencies(state, workspace, &path, resources, workspace_scope).await?;
+            let allowed = if independent {
+                if !crate::static_preview::enabled() || resources.len() > 512 {
+                    bail!("独立预览未启用或资源超过 512 个");
+                }
+                let site = static_site(state, workspace, &path).await?;
+                let paths: BTreeSet<_> = resources.into_iter().chain([path.clone()]).collect();
+                // For large HTML, preserve the observed resource manifest
+                // without rescanning the entry on the single-thread guest.
+                static_files(state, workspace, &site, &paths).await?;
+                paths
+            } else {
+                dependencies(state, workspace, &path, resources, workspace_scope).await?
+            };
             let record = Share {
                 id: id.clone(),
                 path,
                 allowed,
                 expires_at_ms: now() + i64::from(ttl_seconds) * 1000,
                 revoked: false,
+                independent,
             };
             save(
                 &home(state, workspace)
@@ -717,8 +813,11 @@ pub(crate) async fn handle(
                     .join(format!("{id}.json")),
                 &record,
             )?;
+            let static_preview = state.static_preview.clone();
+            tokio::spawn(async move { static_preview.revoke_share(&id).await }).await?;
             Ok(Out::Ack)
         }
+        Op::OpenStatic { .. } => unreachable!("independent preview is handled before feedback writes"),
         Op::Open {
             path,
             version,

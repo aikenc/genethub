@@ -1,6 +1,7 @@
 import { previewFeedback, useFileFeedback, type FileFeedbackReview } from "./fileFeedback";
 import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
+import { IndependentPreviewMenu } from "./IndependentPreviewMenu";
 import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext } from "./PreviewToolbar";
 import type { PreviewSourceInfo } from "@genehub/proto";
 import { ServicePreviewClient, classifyServiceFailure, htmlServiceMedia } from "./serviceClient";
@@ -162,6 +163,7 @@ export function AssetPreviewPage({
   }, [source.path, source.workspaceHandle, source.deviceHandle, publishMeta]);
 
   const connections = useContext(MachineConnectionsContext);
+  const [independentClient, setIndependentClient] = useState<Client | null>(null);
   useEffect(() => {
     let cancelled = false;
     const abort = new AbortController();
@@ -171,6 +173,7 @@ export function AssetPreviewPage({
     setState({ kind: "loading" });
     setSourceInfo(null);
     setFeedbackSource(null);
+    setIndependentClient(null);
     resources.current = new Set([source.path]);
     emitPreviewDiagnostic("log", {
       topic: "preview-load",
@@ -200,13 +203,16 @@ export function AssetPreviewPage({
             (await endpointForDevice(host, source.deviceHandle)) ??
             (await host.endpoint());
           if (!endpoint) throw new Error("这台浏览器尚未获准连接资源所在的设备");
-          owned = connect(endpoint, host, source.deviceHandle);
+          owned = connectPreview(endpoint, host, source.deviceHandle);
           unregisterDiagnosticClient = registerDiagnosticClient(owned);
           await ready(owned);
           if (owned.identity?.machineId !== source.deviceHandle) {
             throw new Error("链接指向的设备与当前连接不一致");
           }
           active = owned;
+        }
+        if (!cancelled && !shareAccess && active.identity?.features?.includes("asset.preview.independent.v1")) {
+          setIndependentClient(active);
         }
         const imageFile = /\.(?:png|jpe?g|gif|webp)$/i.test(source.path);
         if (imageFile && !active.identity?.features?.includes("asset.preview.image.v1")) {
@@ -402,6 +408,14 @@ export function AssetPreviewPage({
       {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
       {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path, siteEntryPath: meta?.location?.siteEntryPath ?? source.siteEntryPath ?? source.path}} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
       {fileFeedbackEnabled && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
+      {independentClient && /\.html?$/i.test(source.path) ? (
+          <IndependentPreviewMenu
+            client={independentClient}
+            source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path}}
+            resources={resources.current}
+            canShare={state.kind === "ready"}
+          />
+        ) : null}
       {chrome === "page" && pageInfoOpen ? (
         <EmbeddedInfoDialog
           path={sourceInfo?.displayPath ?? basenamePath(source.path)}
@@ -2262,7 +2276,7 @@ function emitPreviewDiagnostic(
   );
 }
 
-async function endpointForDevice(host: Host, machineId: string): Promise<Endpoint | null> {
+export async function endpointForDevice(host: Host, machineId: string): Promise<Endpoint | null> {
   if (!host.targets || !host.openTarget) return null;
   const target = (await host.targets()).find(
     (candidate) => (candidate.deviceHandle ?? candidate.id) === machineId,
@@ -2270,7 +2284,7 @@ async function endpointForDevice(host: Host, machineId: string): Promise<Endpoin
   return target ? host.openTarget(target.id) : null;
 }
 
-function connect(endpoint: Endpoint, host: Host, deviceHandle: string): Client {
+export function connectPreview(endpoint: Endpoint, host: Host, deviceHandle: string): Client {
   const client = new Client({
     ...dial(endpoint),
     credential: endpoint.credential,

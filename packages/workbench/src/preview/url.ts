@@ -32,6 +32,33 @@ export function assetPreviewUrl(
   return withDocumentLocation(origin ? new URL(pathname, origin).toString() : pathname, documentLocation);
 }
 
+function independentPrefixes(basePath: string) {
+  const legacy = previewPrefix(basePath).slice(0, -"v2/".length);
+  return { legacy, launch: legacy.replace(/preview\/$/, "independent-preview/") };
+}
+
+export function independentPreviewUrl(
+  source: AssetPreviewLocation,
+  origin = location.origin,
+  basePath = previewBasePath(),
+): string {
+  const url = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, origin, basePath, source));
+  const { legacy, launch } = independentPrefixes(basePath);
+  url.pathname = launch + url.pathname.slice(legacy.length);
+  return url.href;
+}
+
+export function parseIndependentPreviewPath(
+  pathname: string,
+  basePath = previewBasePath(),
+  search = typeof location === "undefined" ? "" : location.search,
+): AssetPreviewLocation | null {
+  const { legacy, launch } = independentPrefixes(basePath);
+  return pathname.startsWith(launch)
+    ? parseAssetPreviewPath(legacy + pathname.slice(launch.length), basePath, search)
+    : null;
+}
+
 /**
  * Exact deployment/device/project/root prefix Agents append artifact paths to.
  *

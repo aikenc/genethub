@@ -60,6 +60,7 @@ pub mod skills;
 pub mod space_descriptor;
 pub mod speech;
 pub mod state;
+mod static_preview;
 pub mod transfer;
 pub mod transport;
 pub mod updates;

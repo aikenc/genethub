@@ -548,6 +548,43 @@ impl Client {
         read_json(response, 4096, "preview share reply").await
     }
 
+    pub(crate) async fn preview_uplink(&self, enrollment: &Enrollment) -> Result<crate::static_preview::Uplink> {
+        let response = self.http
+            .post(self.url(&format!("/api/machines/{}/preview-relay/uplink", enrollment.daemon_id))?)
+            .bearer_auth(&enrollment.secret)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Hub refused preview uplink: {}", response.status());
+        }
+        read_json(response, 4096, "preview uplink reply").await
+    }
+
+    pub(crate) async fn register_preview_view(&self, enrollment: &Enrollment, host: &str, expires_at_ms: i64) -> Result<()> {
+        let response = self.http
+            .post(self.url(&format!("/api/machines/{}/preview-relay/views", enrollment.daemon_id))?)
+            .bearer_auth(&enrollment.secret)
+            .json(&serde_json::json!({"hostname": host, "expiresAtMs": expires_at_ms}))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Hub refused preview route: {}", response.status());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn remove_preview_view(&self, enrollment: &Enrollment, host: &str) -> Result<()> {
+        let response = self.http
+            .delete(self.url(&format!("/api/machines/{}/preview-relay/views/{host}", enrollment.daemon_id))?)
+            .bearer_auth(&enrollment.secret)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Hub could not remove preview route: {}", response.status());
+        }
+        Ok(())
+    }
+
     /// Tickets are keyed by the Hub row id (`mch_…`). Workbench URLs and
     /// agents usually hold the daemon handle (`m_…` / `m-…`).
     async fn resolve_ticket_machine_id(
