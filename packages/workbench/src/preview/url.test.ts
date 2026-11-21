@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { assetPreviewBaseUrl, assetPreviewUrl, parseAssetPreviewPath } from "./url";
+import { assetPreviewBaseUrl, assetPreviewUrl, independentPreviewUrl, parseAssetPreviewPath, parseIndependentPreviewPath } from "./url";
 
 describe("portable Asset Preview locators", () => {
+  it("uses a distinct, subpath-aware trusted launcher for independent previews", () => {
+    const source = { deviceHandle: "device", workspaceHandle: "workspace", path: "r_root/游戏/index.html" };
+    const launch = new URL(independentPreviewUrl(source, "https://app.example", "/nested/"));
+    const legacy = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, "https://app.example", "/nested/"));
+    expect(launch.pathname).toContain("/nested/assets/independent-preview/v2/");
+    expect(parseIndependentPreviewPath(launch.pathname, "/nested/")).toEqual(source);
+    expect(parseAssetPreviewPath(launch.pathname, "/nested/")).toBeNull();
+    expect(parseIndependentPreviewPath(legacy.pathname, "/nested/")).toBeNull();
+    expect(parseAssetPreviewPath(legacy.pathname, "/nested/")).toEqual(source);
+  });
   it("keeps the device, workspace and workspace-relative path visible", () => {
     const url = assetPreviewUrl(
       "device-office",

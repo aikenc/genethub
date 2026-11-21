@@ -44,6 +44,15 @@ pub enum PreviewFeedbackOperation {
         #[serde(default)]
         resources: Vec<String>,
     },
+    ShareStatic {
+        path: String,
+        ttl_seconds: u32,
+        #[serde(default)]
+        resources: Vec<String>,
+    },
+    OpenStatic {
+        path: String,
+    },
     Revoke {
         share_id: String,
     },
@@ -109,6 +118,14 @@ pub struct PreviewShareLink {
     #[ts(type = "number")]
     pub expires_at_ms: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct StaticPreviewGrant {
+    pub action: String,
+    pub code: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -139,6 +156,7 @@ pub struct PreviewFeedbackRecord {
 pub enum PreviewFeedbackResponse {
     Source(PreviewSourceInfo),
     Share(PreviewShareLink),
+    StaticPreview(StaticPreviewGrant),
     Draft(Box<PreviewFeedbackDraft>),
     Upload(SessionArtifactUpload),
     Artifact(SessionArtifactBundle),

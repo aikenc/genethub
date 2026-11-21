@@ -1373,10 +1373,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tar",
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite 0.24.0",
  "tokio-util",
  "uuid",
 ]

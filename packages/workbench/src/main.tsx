@@ -6,7 +6,7 @@ import { App } from "./App";
 import { PRODUCT } from "./channel";
 import { parsePortablePreviewTicket, parsePreviewPopout, watchPreviewConnectionFragment } from "./preview/popout";
 import { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
-import { parseAssetPreviewPath } from "./preview/url";
+import { parseAssetPreviewPath, parseIndependentPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
 import "./theme.css";
 import { applyUiScale, useUiScale } from "./theme/scale";
@@ -38,7 +38,8 @@ watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 // any pane is open, and every one of them is inside the same fixed box.
 watchViewport();
 
-const preview = parseAssetPreviewPath(window.location.pathname);
+const independent = parseIndependentPreviewPath(window.location.pathname);
+const preview = independent ?? parseAssetPreviewPath(window.location.pathname);
 if (preview) watchPreviewConnectionFragment();
 const previewPopout = preview
   ? parsePreviewPopout(window.location.search, window.location.hash)
@@ -54,6 +55,7 @@ createRoot(root).render(
         source={preview}
         context={previewPopout}
         portableTicket={previewTicket}
+        independent={!!independent}
         shareCredential={parsePreviewShare(window.location.hash)}
       />
     ) : (

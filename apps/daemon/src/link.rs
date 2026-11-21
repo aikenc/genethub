@@ -203,6 +203,13 @@ impl Link {
         }
     }
 
+    pub(crate) async fn preview_enrollment(&self) -> Result<Enrollment> {
+        match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => Ok(enrollment.clone()),
+            _ => anyhow::bail!("这台机器尚未连接 Hub，无法开启独立预览"),
+        }
+    }
+
     async fn start(
         self: &Arc<Self>,
         hub_url: &str,

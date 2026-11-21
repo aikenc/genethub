@@ -2,10 +2,11 @@
 //! and writes view leases over a private pipe. TCP clients cannot register or
 //! extend a lease, and closing the pipe shuts down the worker and all streams.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use futures_util::{StreamExt, TryStreamExt};
-use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, StreamBody};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, Limited, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::{self, HeaderValue};
 use hyper::service::service_fn;
@@ -22,6 +23,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, RwLock, Semaphore};
@@ -29,15 +32,24 @@ use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 
-const MAX_COMMAND_BYTES: u64 = 16 * 1024;
+mod relay;
+
+const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
+const MAX_ALLOWED_FILES: usize = 4096;
 const MAX_VIEWS: usize = 64;
 const MAX_CONNECTIONS: usize = 128;
 const MAX_READS_PER_SITE: usize = 16;
 const MAX_PENDING_PER_SITE: usize = 64;
 const MAX_LEASE: Duration = Duration::from_secs(3600);
+const BOOTSTRAP_LIFETIME: Duration = Duration::from_secs(60);
 const TLS_TIMEOUT: Duration = Duration::from_secs(8);
 const READ_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const CHUNK_SIZE: usize = 64 * 1024;
+const BOOTSTRAP_PATH: &str = "/.well-known/genehub/preview-bootstrap";
+const COOKIE_NAME: &str = "__Host-genehub-preview";
+const FORM_PREFIX: &[u8] = b"code=";
+const SECRET_BYTES: usize = 64;
+const FRAME_POLICY: HeaderValue = HeaderValue::from_static("frame-ancestors 'none'");
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
 type Views = Arc<RwLock<HashMap<String, Arc<View>>>>;
@@ -52,9 +64,53 @@ struct View {
     directory: Dir,
     budget: Arc<SiteBudget>,
     entry: PathBuf,
-    ancestor: HeaderValue,
+    location: HeaderValue,
+    workbench_origin: HeaderValue,
+    bootstrap_digest: [u8; 32],
+    bootstrap_deadline: Instant,
+    bootstrap_redeemed: AtomicBool,
+    cookie: String,
+    scope: FileScope,
     deadline: Instant,
     revoked: watch::Sender<bool>,
+}
+
+enum FileScope {
+    Site,
+    Files(HashSet<PathBuf>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Scope {
+    Site,
+    Files { paths: Vec<String> },
+}
+
+impl FileScope {
+    fn from_command(scope: Scope, entry: &Path) -> Result<Self> {
+        let Scope::Files { paths } = scope else {
+            return Ok(Self::Site);
+        };
+        if paths.len() > MAX_ALLOWED_FILES {
+            bail!("too many files in preview grant");
+        }
+        let paths: HashSet<PathBuf> = paths
+            .iter()
+            .map(|path| local_path(path, false).context("invalid allowed preview file"))
+            .collect::<Result<_>>()?;
+        if !paths.contains(entry) {
+            bail!("preview grant does not cover the entry");
+        }
+        Ok(Self::Files(paths))
+    }
+
+    fn permits(&self, path: &Path) -> bool {
+        match self {
+            Self::Site => true,
+            Self::Files(paths) => paths.contains(path),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -66,11 +122,19 @@ enum Control {
         root: String,
         entry: String,
         workbench_origin: String,
+        bootstrap_digest: String,
+        scope: Scope,
         ttl_seconds: u64,
+        expires_at_ms: Option<u64>,
     },
     Close {
         host: String,
     },
+    JoinRelay {
+        url: String,
+        ticket: String,
+    },
+    RelayStatus,
 }
 
 pub fn run(cert: &str, key: &str, suffix: &str) -> Result<()> {
@@ -95,10 +159,11 @@ pub fn run(cert: &str, key: &str, suffix: &str) -> Result<()> {
 
 async fn serve(suffix: &str, tls: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    reply(serde_json::json!({ "port": listener.local_addr()?.port() }))?;
+    let address = listener.local_addr()?;
+    reply(serde_json::json!({ "port": address.port() }))?;
     let views = Views::default();
     tokio::select! {
-        result = control_loop(suffix, &views) => result,
+        result = control_loop(suffix, &views, address) => result,
         result = accept_loop(listener, tls, &views) => result,
     }
 }
@@ -118,9 +183,10 @@ async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, views: &Views) -> 
     }
 }
 
-async fn control_loop(suffix: &str, views: &Views) -> Result<()> {
+async fn control_loop(suffix: &str, views: &Views, address: std::net::SocketAddr) -> Result<()> {
     let mut control = BufReader::new(tokio::io::stdin());
     let mut command = Vec::new();
+    let mut uplink: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let mut bounded = (&mut control).take(MAX_COMMAND_BYTES);
         if bounded.read_until(b'\n', &mut command).await? == 0 {
@@ -130,6 +196,27 @@ async fn control_loop(suffix: &str, views: &Views) -> Result<()> {
             bail!("incomplete or oversized worker command");
         }
         let result = match serde_json::from_slice::<Control>(&command) {
+            Ok(Control::JoinRelay { url, ticket }) => {
+                match relay::connect(url, ticket, address).await {
+                    Ok(new) => {
+                        if let Some(old) = uplink.replace(new) {
+                            old.abort();
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(Control::RelayStatus) => {
+                if uplink
+                    .as_ref()
+                    .is_some_and(|connection| !connection.is_finished())
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("preview Relay is disconnected"))
+                }
+            }
             Ok(command) => apply(command, views, suffix).await,
             Err(_) => Err(anyhow::anyhow!("invalid command")),
         };
@@ -167,7 +254,10 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             root,
             entry,
             workbench_origin,
+            bootstrap_digest,
+            scope,
             ttl_seconds,
+            expires_at_ms,
         } => {
             // The first label is a fresh 128-bit view identifier chosen by the
             // supervisor. Only the configured wildcard suffix is admissible.
@@ -186,6 +276,19 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             if ttl.is_zero() || ttl > MAX_LEASE || !workspace.is_absolute() {
                 bail!("invalid workspace or lease");
             }
+            let ttl = if let Some(expires_at_ms) = expires_at_ms {
+                let deadline = std::time::UNIX_EPOCH
+                    .checked_add(Duration::from_millis(expires_at_ms))
+                    .context("invalid preview deadline")?;
+                ttl.min(
+                    deadline
+                        .duration_since(std::time::SystemTime::now())
+                        .context("preview lease expired")?,
+                )
+            } else {
+                ttl
+            };
+            let deadline = Instant::now() + ttl;
             let origin: hyper::Uri = workbench_origin
                 .parse()
                 .context("invalid Workbench origin")?;
@@ -204,12 +307,13 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             {
                 bail!("invalid Workbench origin");
             }
-            let ancestor = HeaderValue::from_str(&format!(
-                "frame-ancestors {}",
-                workbench_origin.trim_end_matches('/')
-            ))?;
+            let workbench_origin = HeaderValue::from_str(workbench_origin.trim_end_matches('/'))?;
+            let bootstrap_digest =
+                decode_digest(&bootstrap_digest).context("invalid bootstrap digest")?;
+            let location = entry_location(&entry)?;
             let root = local_path(&root, true).context("invalid preview root")?;
             let entry = local_path(&entry, false).context("invalid preview entry")?;
+            let scope = FileScope::from_command(scope, &entry)?;
             let path = workspace.join(&root);
             let (directory, entry) = tokio::task::spawn_blocking(move || {
                 let directory = open_site(&workspace, &root).context("opening preview root")?;
@@ -239,8 +343,14 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                     directory,
                     budget,
                     entry,
-                    ancestor,
-                    deadline: Instant::now() + ttl,
+                    location,
+                    workbench_origin,
+                    bootstrap_digest,
+                    bootstrap_deadline: deadline.min(Instant::now() + BOOTSTRAP_LIFETIME),
+                    bootstrap_redeemed: AtomicBool::new(false),
+                    cookie: uuid::Uuid::new_v4().simple().to_string(),
+                    scope,
+                    deadline,
                     revoked: watch::channel(false).0,
                 }),
             );
@@ -250,8 +360,32 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                 view.revoked.send_replace(true);
             }
         }
+        Control::JoinRelay { .. } | Control::RelayStatus => unreachable!("handled by control loop"),
     }
     Ok(())
+}
+
+fn decode_digest(value: &str) -> Option<[u8; 32]> {
+    if value.len() != SECRET_BYTES || !value.is_ascii() {
+        return None;
+    }
+    let mut decoded = [0; 32];
+    for (chunk, byte) in value.as_bytes().chunks_exact(2).zip(&mut decoded) {
+        *byte = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(decoded)
+}
+
+fn entry_location(entry: &str) -> Result<HeaderValue> {
+    let mut location = String::new();
+    for segment in entry.split('/') {
+        location.push('/');
+        location.extend(percent_encoding::utf8_percent_encode(
+            segment,
+            percent_encoding::NON_ALPHANUMERIC,
+        ));
+    }
+    Ok(HeaderValue::from_str(&location)?)
 }
 
 fn checked_component(part: &str) -> Option<&str> {
@@ -386,6 +520,9 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     {
         return empty(StatusCode::MISDIRECTED_REQUEST);
     }
+    if request.uri().path() == BOOTSTRAP_PATH {
+        return bootstrap(request, &view).await;
+    }
     if request.method() != Method::GET && request.method() != Method::HEAD {
         let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);
         response
@@ -393,9 +530,22 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
             .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
         return response;
     }
+    if !has_view_cookie(request.headers(), &view.cookie) {
+        return empty(StatusCode::FORBIDDEN);
+    }
     let Some(path) = request_path(request.uri().path(), &view.entry) else {
         return empty(StatusCode::FORBIDDEN);
     };
+    if !view.scope.permits(&path) {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    if request.uri().path() == "/" {
+        let mut response = empty(StatusCode::TEMPORARY_REDIRECT);
+        response
+            .headers_mut()
+            .insert(header::LOCATION, view.location.clone());
+        return response;
+    }
     let permit = match view.budget.reads.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -485,7 +635,7 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     }
     let mut response = response.body(body).expect("valid static response headers");
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_SECURITY_POLICY, view.ancestor.clone());
+    headers.insert(header::CONTENT_SECURITY_POLICY, FRAME_POLICY);
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
@@ -506,16 +656,84 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
         "cross-origin-embedder-policy",
         HeaderValue::from_static("require-corp"),
     );
-    // An isolated parent needs explicit opt-in for a cross-origin document.
-    // The view's frame-ancestors header restricts which Workbench may embed it.
-    let resource_policy = if media_type.starts_with("text/html") {
-        "cross-origin"
-    } else {
-        "same-origin"
-    };
     headers.insert(
         "cross-origin-resource-policy",
-        HeaderValue::from_static(resource_policy),
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+}
+
+fn has_view_cookie(headers: &hyper::HeaderMap, expected: &str) -> bool {
+    let mut values = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|header| header.to_str().ok())
+        .flat_map(|header| header.split(';'))
+        .filter_map(|item| {
+            let (name, value) = item.trim().split_once('=')?;
+            (name == COOKIE_NAME).then_some(value)
+        });
+    values
+        .next()
+        .is_some_and(|value| bool::from(value.as_bytes().ct_eq(expected.as_bytes())))
+        && values.next().is_none()
+}
+
+fn redeem_code(body: &[u8], expected: &[u8; 32], redeemed: &AtomicBool) -> bool {
+    let Some(code) = body.strip_prefix(FORM_PREFIX) else {
+        return false;
+    };
+    code.len() == SECRET_BYTES
+        && code
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && bool::from(Sha256::digest(code).as_slice().ct_eq(expected))
+        && !redeemed.swap(true, Ordering::AcqRel)
+}
+
+async fn bootstrap(request: Request<Incoming>, view: &View) -> Response<Body> {
+    if Instant::now() >= view.bootstrap_deadline
+        || request.method() != Method::POST
+        || request.uri().query().is_some()
+        || request.headers().get(header::ORIGIN) != Some(&view.workbench_origin)
+        || request.headers().get(header::CONTENT_TYPE)
+            != Some(&HeaderValue::from_static(
+                "application/x-www-form-urlencoded",
+            ))
+    {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    let body = Limited::new(request.into_body(), FORM_PREFIX.len() + SECRET_BYTES);
+    let collected = tokio::time::timeout(TLS_TIMEOUT, body.collect()).await;
+    let Ok(Ok(body)) = collected else {
+        return empty(StatusCode::FORBIDDEN);
+    };
+    if Instant::now() >= view.bootstrap_deadline
+        || !redeem_code(
+            &body.to_bytes(),
+            &view.bootstrap_digest,
+            &view.bootstrap_redeemed,
+        )
+    {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    let max_age = view
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs();
+    if max_age == 0 {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    let mut response = empty(StatusCode::SEE_OTHER);
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, view.location.clone());
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "{COOKIE_NAME}={}; Max-Age={max_age}; Secure; HttpOnly; SameSite=Lax; Path=/",
+            view.cookie,
+        ))
+        .expect("cookie contains only ASCII"),
     );
     response
 }
@@ -523,6 +741,9 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
 fn empty(status: StatusCode) -> Response<Body> {
     Response::builder()
         .status(status)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::CONTENT_SECURITY_POLICY, FRAME_POLICY)
         .body(empty_body())
         .unwrap()
 }
@@ -575,5 +796,70 @@ fn content_type(path: &Path) -> &'static str {
         Some("wav") => "audio/wav",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bootstrap_cannot_be_replayed_or_consumed_with_an_invalid_code() {
+        let code = "e4".repeat(32);
+        let digest = Sha256::digest(code.as_bytes()).into();
+        let redeemed = AtomicBool::new(false);
+        assert!(!redeem_code(b"code=short", &digest, &redeemed));
+        assert!(!redeem_code(
+            format!("code={}", "aa".repeat(32)).as_bytes(),
+            &digest,
+            &redeemed,
+        ));
+        let form = format!("code={code}");
+        assert!(redeem_code(form.as_bytes(), &digest, &redeemed));
+        assert!(!redeem_code(form.as_bytes(), &digest, &redeemed));
+    }
+
+    #[test]
+    fn share_scope_checks_the_resolved_file_and_requires_the_entry() {
+        let entry = Path::new("nested/index.html");
+        let scope = FileScope::from_command(
+            Scope::Files {
+                paths: vec!["nested/index.html".into(), "nested/data.bin".into()],
+            },
+            entry,
+        )
+        .unwrap();
+        assert!(scope.permits(&request_path("/", entry).unwrap()));
+        assert!(scope.permits(&request_path("/nested/%64ata.bin", entry).unwrap()));
+        assert!(!scope.permits(&request_path("/nested/private.bin", entry).unwrap()));
+        assert!(request_path("/nested/%2E%2E/private.bin", entry).is_none());
+        assert!(FileScope::from_command(Scope::Files { paths: Vec::new() }, entry).is_err());
+    }
+
+    #[test]
+    fn the_view_cookie_has_an_exact_name_and_a_single_value() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("other=secret"));
+        assert!(!has_view_cookie(&headers, "secret"));
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("__Host-genehub-preview=secret"),
+        );
+        assert!(has_view_cookie(&headers, "secret"));
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("__Host-genehub-preview=wrong"),
+        );
+        assert!(!has_view_cookie(&headers, "secret"));
+    }
+
+    #[test]
+    fn encoded_redirect_keeps_the_entry_directory() {
+        let location = entry_location("站点/A B.html").unwrap();
+        assert_eq!(location, "/%E7%AB%99%E7%82%B9/A%20B%2Ehtml");
+        assert_eq!(
+            request_path(location.to_str().unwrap(), Path::new("unused")).unwrap(),
+            Path::new("站点/A B.html"),
+        );
     }
 }

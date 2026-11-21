@@ -178,7 +178,7 @@ pub(crate) async fn handle_in_workspace(
     state: &Shared,
     transport: TransportKind,
     caller: &crate::authz::Principal,
-    workspace_scope: Option<&str>,
+    peer: Option<&crate::dataplane::endpoint::PeerAccess>,
     request: Request,
 ) -> Handled {
     if !caller.permits(&request) {
@@ -191,7 +191,7 @@ pub(crate) async fn handle_in_workspace(
         return Handled::err(ErrorCode::Forbidden, message);
     }
     let operation = diagnostic_operation(&request);
-    let handled = dispatch(state, transport, caller, workspace_scope, request).await;
+    let handled = dispatch(state, transport, caller, peer, request).await;
     if let Some(operation) = operation {
         let (outcome, code) = match &handled.reply {
             Ok(_) => ("ok", None),
@@ -448,7 +448,7 @@ async fn dispatch(
     state: &Shared,
     transport: TransportKind,
     caller: &crate::authz::Principal,
-    workspace_scope: Option<&str>,
+    peer: Option<&crate::dataplane::endpoint::PeerAccess>,
     request: Request,
 ) -> Handled {
     if matches!(caller, crate::authz::Principal::PreviewShare { .. })
@@ -464,7 +464,7 @@ async fn dispatch(
     }
     match request {
         Request::PreviewFeedback(request) => Box::pin(async move {
-            match crate::preview_feedback::handle(state, caller, workspace_scope, request).await {
+            match crate::preview_feedback::handle(state, caller, peer, request).await {
                 Ok(reply) => Handled::ok(Reply::PreviewFeedback(reply)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
@@ -519,7 +519,10 @@ async fn dispatch(
                     genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                     genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
                     genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
-                ].into_iter().chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string())).collect()),
+                ].into_iter()
+                    .chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string()))
+                    .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.v1".to_string()))
+                    .collect()),
                 isolation: Some(crate::isolation::report()),
             }))
         }).await,        Request::CatalogSync { subscription_id, enabled, known_sessions, known_workspaces } => {

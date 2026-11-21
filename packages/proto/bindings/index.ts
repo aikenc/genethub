@@ -1143,13 +1143,13 @@ kind: string, };
 
 export type PreviewFeedbackDraft = { id: string, source: PreviewSourceInfo, review: PreviewReviewDraft, bundles: Array<SessionArtifactBundle>, receipt: PreviewFeedbackRecord | null, };
 
-export type PreviewFeedbackOperation = { "kind": "source", path: string, } | { "kind": "share", path: string, ttlSeconds: number, resources: Array<string>, } | { "kind": "revoke", shareId: string, } | { "kind": "open", path: string, version: string, draftId: string | null, } | { "kind": "draft", id: string, } | { "kind": "upsert", id: string, annotation: PreviewAnnotation, expectedRevision: number, } | { "kind": "remove", id: string, ids: Array<string>, expectedRevision: number, } | { "kind": "beginArtifact", id: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } | { "kind": "chunk", id: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } | { "kind": "finishArtifact", id: string, uploadId: string, } | { "kind": "abortArtifact", id: string, uploadId: string, } | { "kind": "submit", id: string, description: string, annotationIds: Array<string>, bundlePaths: Array<string>, } | { "kind": "read", id: string, };
+export type PreviewFeedbackOperation = { "kind": "source", path: string, } | { "kind": "share", path: string, ttlSeconds: number, resources: Array<string>, } | { "kind": "shareStatic", path: string, ttlSeconds: number, resources: Array<string>, } | { "kind": "openStatic", path: string, } | { "kind": "revoke", shareId: string, } | { "kind": "open", path: string, version: string, draftId: string | null, } | { "kind": "draft", id: string, } | { "kind": "upsert", id: string, annotation: PreviewAnnotation, expectedRevision: number, } | { "kind": "remove", id: string, ids: Array<string>, expectedRevision: number, } | { "kind": "beginArtifact", id: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } | { "kind": "chunk", id: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } | { "kind": "finishArtifact", id: string, uploadId: string, } | { "kind": "abortArtifact", id: string, uploadId: string, } | { "kind": "submit", id: string, description: string, annotationIds: Array<string>, bundlePaths: Array<string>, } | { "kind": "read", id: string, };
 
 export type PreviewFeedbackRecord = { id: string, source: PreviewSourceInfo, description: string, annotations: Array<PreviewAnnotation>, bundles: Array<SessionArtifactBundle>, submittedAtMs: number, workspacePath: string, trust: string, };
 
 export type PreviewFeedbackRequest = { workspaceId: string, operation: PreviewFeedbackOperation, };
 
-export type PreviewFeedbackResponse = { "kind": "source", "data": PreviewSourceInfo } | { "kind": "share", "data": PreviewShareLink } | { "kind": "draft", "data": PreviewFeedbackDraft } | { "kind": "upload", "data": SessionArtifactUpload } | { "kind": "artifact", "data": SessionArtifactBundle } | { "kind": "receipt", "data": PreviewFeedbackRecord } | { "kind": "ack" };
+export type PreviewFeedbackResponse = { "kind": "source", "data": PreviewSourceInfo } | { "kind": "share", "data": PreviewShareLink } | { "kind": "staticPreview", "data": StaticPreviewGrant } | { "kind": "draft", "data": PreviewFeedbackDraft } | { "kind": "upload", "data": SessionArtifactUpload } | { "kind": "artifact", "data": SessionArtifactBundle } | { "kind": "receipt", "data": PreviewFeedbackRecord } | { "kind": "ack" };
 
 /**
  * The one preview-annotation draft owned by a session. Not a `SessionDraft`.
@@ -2055,6 +2055,8 @@ acceptPartial: boolean, };
  * default text, not UTF-8 bytes or JavaScript UTF-16 code units.
  */
 export type SpeechUncertainSpan = { spanId: string, startChar: number, endChar: number, alternatives: Array<SpeechSpanAlternative>, defaultAlternativeId: string, };
+
+export type StaticPreviewGrant = { action: string, code: string, };
 
 /**
  * One daemon-owned diagnostic fact. Values are intentionally categorical.

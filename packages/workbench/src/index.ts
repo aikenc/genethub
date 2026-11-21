@@ -23,7 +23,7 @@ export { PreviewFloat } from "./preview/PreviewFloat";
 export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 export { parsePreviewPopout, watchPreviewConnectionFragment } from "./preview/popout";
 export type { PreviewPopoutContext } from "./preview/popout";
-export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
+export { assetPreviewUrl, parseAssetPreviewPath, parseIndependentPreviewPath } from "./preview/url";
 export {
   formatWorkbenchHref,
   formatWorkbenchPath,
