@@ -12,6 +12,8 @@ import {
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
 import { PreviewFileFeedbackOpenContext, PreviewToolbarContext } from "./PreviewToolbar";
+import { ServiceMediaPanel } from "./ServiceMediaPanel";
+import type { ServicePreviewClient } from "./serviceClient";
 import type { PixelSnapshot } from "./runtimeCapture";
 import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 
@@ -87,12 +89,13 @@ function expectPixels(value: unknown): PixelSnapshot {
   };
 }
 
-export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceUrl }: {
+export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceUrl, media }: {
   client: Client;
   source: AssetPreviewLocation;
   grant: StaticPreviewGrant;
   feedbackScope: string;
   serviceUrl?: string;
+  media?: ServicePreviewClient;
 }) {
   const form = useRef<HTMLFormElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -225,6 +228,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
               requestDomSnapshot={requestDomSnapshot} requestRenderedSnapshot={requestRenderedSnapshot}
               onSubmit={version ? save : undefined}
             />
+            {media ? <ServiceMediaPanel service={media} /> : null}
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <iframe ref={frame} title="独立 HTML 预览" name={frameName} src={origin + "/.well-known/genehub/preview-frame"}
                 sandbox="allow-scripts allow-same-origin" allow="cross-origin-isolated; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"
