@@ -5,6 +5,8 @@ import { browserHost, type Host } from "../host";
 import type { Client } from "../protocol/client";
 import { connectPreview, endpointForDevice } from "./AssetPreviewPage";
 import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
+import { INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
+import { ServicePreviewClient } from "./serviceClient";
 
 const feature = "asset.preview.independent.v1";
 
@@ -47,16 +49,19 @@ function waitForIdentity(client: Client, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function IndependentPreviewLaunch({ source, client, host }: {
+export function IndependentPreviewLaunch({ source, client, host, withService = false }: {
   source: AssetPreviewLocation;
   client: Client | null;
   host?: Host;
+  withService?: boolean;
 }) {
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
+  const [confirmed, setConfirmed] = useState(false);
   const { deviceHandle, path, workspaceHandle } = source;
   useEffect(() => {
+    if (withService && !confirmed) return;
     const cancellation = new AbortController();
     const signal = cancellation.signal;
     const deadline = setTimeout(() => cancellation.abort(new Error("开启独立预览超时")), 40_000);
@@ -78,11 +83,21 @@ export function IndependentPreviewLaunch({ source, client, host }: {
       if (!connection.identity.features?.includes(feature)) {
         throw new Error("目标设备未启用独立预览");
       }
+      let serviceRunId: string | undefined;
+      if (withService) {
+        if (!connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
+          throw new Error("目标设备未启用独立服务预览");
+        }
+        const service = await ServicePreviewClient.discover(connection, workspaceHandle, path);
+        signal.throwIfAborted();
+        if (!service) throw new Error("这个入口没有已登记的服务");
+        serviceRunId = service.descriptor.runId;
+      }
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
           workspaceId: isAbsoluteFilePath(path) ? "" : workspaceHandle,
-          operation: { kind: "openStatic", path },
+          operation: { kind: "openStatic", path, ...(serviceRunId ? { serviceRunId } : {}) },
         },
       }, { timeoutMs: 30_000 });
       signal.throwIfAborted();
@@ -102,13 +117,20 @@ export function IndependentPreviewLaunch({ source, client, host }: {
       cancellation.abort();
       owned?.close();
     };
-  }, [client, deviceHandle, host, path, workspaceHandle]);
+  }, [client, confirmed, deviceHandle, host, path, withService, workspaceHandle]);
 
   useEffect(() => { if (grant) form.current?.submit(); }, [grant]);
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
       <meta name="referrer" content="strict-origin" />
-      <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>
+      {withService && !confirmed ? (
+        <>
+          <p>允许这个页面访问源机器上为它登记的本地服务？</p>
+          <button type="button" className="mt-3 rounded border border-line px-3 py-2" onClick={() => setConfirmed(true)}>
+            启用服务并打开预览
+          </button>
+        </>
+      ) : <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>}
       {grant ? (
         <form ref={form} method="post" action={grant.action}>
           <input type="hidden" name="code" value={grant.code} />

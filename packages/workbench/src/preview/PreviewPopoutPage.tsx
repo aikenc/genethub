@@ -171,7 +171,12 @@ export function PreviewPopoutPage({
     );
   }
   if (independent) {
-    return <IndependentPreviewLaunch source={source} host={host} client={shareCredential ? portableClient : sharedClient} />;
+    return <IndependentPreviewLaunch
+      source={source}
+      host={host}
+      client={shareCredential ? portableClient : sharedClient}
+      withService={!shareCredential && new URLSearchParams(window.location.search).get("service") === "1"}
+    />;
   }
 
   return (

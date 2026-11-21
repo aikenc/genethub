@@ -1364,6 +1364,7 @@ dependencies = [
  "genet-frontdoor",
  "genet-http",
  "genet-native",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",

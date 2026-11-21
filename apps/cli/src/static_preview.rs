@@ -33,6 +33,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 
 mod relay;
+mod service;
 
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_ALLOWED_FILES: usize = 4096;
@@ -57,6 +58,7 @@ type Views = Arc<RwLock<HashMap<String, Arc<View>>>>;
 struct SiteBudget {
     reads: Arc<Semaphore>,
     pending: Semaphore,
+    service: Arc<Semaphore>,
 }
 
 struct View {
@@ -66,6 +68,8 @@ struct View {
     entry: PathBuf,
     location: HeaderValue,
     workbench_origin: HeaderValue,
+    origin: HeaderValue,
+    service: Option<service::Run>,
     bootstrap_digest: [u8; 32],
     bootstrap_deadline: Instant,
     bootstrap_redeemed: AtomicBool,
@@ -124,6 +128,8 @@ enum Control {
         workbench_origin: String,
         bootstrap_digest: String,
         scope: Scope,
+        service: Option<service::Run>,
+        https_port: Option<u16>,
         ttl_seconds: u64,
         expires_at_ms: Option<u64>,
     },
@@ -256,9 +262,17 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             workbench_origin,
             bootstrap_digest,
             scope,
+            service,
+            https_port,
             ttl_seconds,
             expires_at_ms,
         } => {
+            if let Some(run) = &service {
+                run.validate()?;
+                if !matches!(&scope, Scope::Site) {
+                    bail!("file grants cannot open a preview service");
+                }
+            }
             // The first label is a fresh 128-bit view identifier chosen by the
             // supervisor. Only the configured wildcard suffix is admissible.
             let view = host
@@ -334,8 +348,13 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                     Arc::new(SiteBudget {
                         reads: Arc::new(Semaphore::new(MAX_READS_PER_SITE)),
                         pending: Semaphore::new(MAX_PENDING_PER_SITE),
+                        service: Arc::new(Semaphore::new(16)),
                     })
                 });
+            let origin = match https_port {
+                None | Some(443) => format!("https://{host}"),
+                Some(port) => format!("https://{host}:{port}"),
+            }.parse()?;
             views.insert(
                 host,
                 Arc::new(View {
@@ -345,6 +364,8 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                     entry,
                     location,
                     workbench_origin,
+                    origin,
+                    service,
                     bootstrap_digest,
                     bootstrap_deadline: deadline.min(Instant::now() + BOOTSTRAP_LIFETIME),
                     bootstrap_redeemed: AtomicBool::new(false),
@@ -498,7 +519,7 @@ async fn serve_connection(client: TcpStream, tls: TlsAcceptor, views: Views) {
     tokio::select! {
         _ = revoked.wait_for(|revoked| *revoked) => {}
         _ = tokio::time::sleep_until(deadline) => {}
-        _ = builder.serve_connection(TokioIo::new(client), service) => {}
+        _ = builder.serve_connection_with_upgrades(TokioIo::new(client), service) => {}
     }
 }
 
@@ -522,6 +543,12 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     }
     if request.uri().path() == BOOTSTRAP_PATH {
         return bootstrap(request, &view).await;
+    }
+    if let Some(run) = view.service.as_ref().filter(|_| request.uri().path().starts_with("/api/")) {
+        if !has_view_cookie(request.headers(), &view.cookie) {
+            return empty(StatusCode::FORBIDDEN);
+        }
+        return service::respond(request, view.clone(), run, &view.budget.service).await;
     }
     if request.method() != Method::GET && request.method() != Method::HEAD {
         let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);

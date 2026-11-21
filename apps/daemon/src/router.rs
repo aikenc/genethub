@@ -522,6 +522,7 @@ async fn dispatch(
                 ].into_iter()
                     .chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string()))
                     .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.v1".to_string()))
+                    .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.service.v1".to_string()))
                     .collect()),
                 isolation: Some(crate::isolation::report()),
             }))
