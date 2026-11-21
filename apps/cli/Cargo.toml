@@ -24,6 +24,7 @@ genet-native = { path = "../../packages/native" }
 anyhow.workspace = true
 cap-fs-ext = "4"
 cap-std = "4"
+hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }

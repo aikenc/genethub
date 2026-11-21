@@ -383,7 +383,7 @@ async fn authorize_scope(
     use PreviewFeedbackOperation as Op;
     let path = match operation {
         Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. }
-        | Op::ShareStatic { path, .. } | Op::OpenStatic { path } => {
+        | Op::ShareStatic { path, .. } | Op::OpenStatic { path, .. } => {
             crate::file_access::display(&resolve_source(state, workspace, path).await?.absolute)
         }
         Op::Revoke { share_id } => {
@@ -613,6 +613,7 @@ async fn open_static(
     workspace: &str,
     path: &str,
     peer: Option<crate::dataplane::endpoint::PeerAccess>,
+    service_run_id: Option<&str>,
 ) -> Result<genehub_proto::StaticPreviewGrant> {
     if !crate::static_preview::enabled() {
         bail!("此设备未启用独立预览");
@@ -620,6 +621,9 @@ async fn open_static(
     let site = static_site(state, workspace, path).await?;
     let enrollment = state.link.get().context("Hub is not connected")?.preview_enrollment().await?;
     if let Some(id) = share_id(caller) {
+        if service_run_id.is_some() {
+            bail!("文件分享不包含动态服务权限");
+        }
         // Serialize checking the durable grant and registering the live lease
         // with share revoke on the same daemon.
         let _lock = WRITES.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
@@ -628,12 +632,20 @@ async fn open_static(
             bail!("分享没有授权这个独立预览入口");
         }
         let files = static_files(state, workspace, &site, &share.allowed).await?;
-        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer).await;
+        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer, None).await;
     }
     if !caller.is_full() {
         bail!("此浏览器没有打开独立预览的权限");
     }
-    state.static_preview.open(state, enrollment, site, None, peer).await
+    let service = if let Some(run_id) = service_run_id {
+        if !caller.permits_stream(crate::authz::StreamMethod::ServicePreview) {
+            bail!("此连接不能通过独立中转访问服务");
+        }
+        Some(crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id).await?)
+    } else {
+        None
+    };
+    state.static_preview.open(state, enrollment, site, None, peer, service).await
 }
 
 pub(crate) async fn handle(
@@ -664,15 +676,16 @@ pub(crate) async fn handle(
             authorize_asset(state, caller, workspace, path).await?;
             return Ok(Out::Source(source(state, workspace, path).await?));
         }
-        Op::OpenStatic { path } => {
+        Op::OpenStatic { path, service_run_id } => {
             let state = state.clone();
             let caller = caller.clone();
             let workspace = workspace.clone();
             let path = path.clone();
             let peer = peer.cloned();
+            let service_run_id = service_run_id.clone();
             // Keep the worker request/reply paired if the launching browser
             // abandons its RPC while a native operation is in flight.
-            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer).await })
+            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref()).await })
                 .await?.map(Out::StaticPreview);
         }
         Op::Read { id } => {

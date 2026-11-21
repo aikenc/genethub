@@ -194,6 +194,28 @@ async fn load_entry(
     }
     Ok(Some(run))
 }
+pub(crate) async fn independent_binding(
+    state: &crate::state::Shared,
+    workspace: &str,
+    entry: &str,
+    expected_run: &str,
+) -> Result<Value> {
+    let run = load_entry(state, workspace, entry)
+        .await?
+        .context("这个入口没有已登记的服务")?;
+    if run.run_id != expected_run {
+        anyhow::bail!("登记服务已更换，请重新打开预览");
+    }
+    if !matches!(run.data_policy.as_str(), "" | "auto") {
+        anyhow::bail!("此服务的传输策略不允许独立中转");
+    }
+    if !run.media.is_null() {
+        anyhow::bail!("带有媒体权限的服务请通过工作台预览打开");
+    }
+    let routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes)?;
+    Ok(json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes}))
+}
+
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let req: Request = serde_json::from_value(stream.head.metadata.clone())?;
     if req.operation != "describe" && req.operation != "connect" && req.operation != "ice" {

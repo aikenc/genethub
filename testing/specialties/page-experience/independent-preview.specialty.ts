@@ -1,19 +1,19 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, createPublicKey, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
-import { createServer } from "node:https";
+import { createServer, request as httpsRequest } from "node:https";
 import path from "node:path";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 
-import { allocatePort, defineSpecialty, startHub, startRelay } from "../../framework/public.ts";
+import { allocatePort, BlockedError, defineSpecialty, startHub, startRelay, type CaseContext } from "../../framework/public.ts";
 
 const run = promisify(execFile);
 const suffix = "preview.test";
 
-defineSpecialty({
+const staticSpec: Parameters<typeof defineSpecialty>[0] = {
   id: "specialty.page-experience.independent-preview",
   title: "The two external preview choices keep their original authorization",
   oracle: "The old preview works. A paired account opens a separate TLS origin without making a share. An anonymous browser can open a scoped share until it is revoked.",
@@ -24,7 +24,22 @@ defineSpecialty({
   resources: { environments: 1, cpu: 2, memoryMb: 3072, io: 1, browser: 1, pool: "browser" },
   surfaces: ["cloud-console", "cloud-server", "relay", "daemon", "asset-preview"],
   productInterfaces: ["@genehub/workbench", "hub-http", "preview.feedback", "asset.preview"],
-}, async t => {
+};
+
+defineSpecialty(staticSpec, exercise);
+
+defineSpecialty({
+  ...staticSpec,
+  id: "specialty.page-experience.independent-preview-service",
+  title: "Authorized preview origins carry registered HTTP, streaming and WSS",
+  oracle: "A Chromium page reaches the registered runner after confirmation. A static view, scoped share, and sibling origin lack service access.",
+  catches: ["registered service unavailable on the new origin", "cross-origin service access", "scope escapes registered routes", "different run receives requests"],
+  productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
+  requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
+}, t => exercise(t, true));
+
+async function exercise(t: CaseContext, withService = false) {
+
   const [edgePort, publicPort, relayPort] = await Promise.all([allocatePort(), allocatePort(), allocatePort()]);
   const origin = `https://workbench.${suffix}:${publicPort}`;
   const token = randomBytes(32).toString("base64url");
@@ -52,6 +67,7 @@ defineSpecialty({
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   let edge: ChildProcess | undefined;
   let front: ReturnType<typeof createServer> | undefined;
+  let service: ChildProcess | undefined;
   try {
     relay = await startRelay({ openRoot: t.openRoot, port: relayPort, control: { origin: hub.origin, token: relayToken } });
     edge = spawn(process.execPath, ["--import", "tsx", "src/preview-edge.ts"], {
@@ -77,6 +93,20 @@ defineSpecialty({
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv: {
       GENEHUB_PREVIEW_ENABLED: "1", GENEHUB_PREVIEW_TLS_CERT: cert, GENEHUB_PREVIEW_TLS_KEY: key,
     } });
+    if (withService) {
+      const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+      if (!python) throw new BlockedError("Python with aiohttp is required by the preview runner");
+      service = spawn(python, [
+        path.join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/app.py"),
+        "--entry", path.join(t.env.workspace, "index.html"), "--daemon-root", t.env.data,
+      ], { stdio: ["ignore", "ignore", "inherit"] });
+      const registration = path.join(t.env.data, "service-previews", createHash("sha256")
+        .update(path.join(t.env.workspace, "index.html")).digest("hex") + ".json");
+      await t.tools.waitUntil(async () => {
+        if (service?.exitCode != null) throw new Error(`runner exited with code ${service.exitCode}`);
+        return access(registration).then(() => true, () => false);
+      }, 10_000);
+    }
     const device = opened.client.identity?.machineId;
     t.assertions.assert(!!device, "source identity missing");
     t.assertions.assert(opened.client.identity?.features?.includes("asset.preview.independent.v1"),
@@ -132,6 +162,74 @@ defineSpecialty({
     if (!await ownPage.evaluate(() => crossOriginIsolated && typeof SharedArrayBuffer === "function" && window.opener === null)) {
       throw new Error("external preview origin or opener isolation failed");
     }
+    if (withService) {
+      await menu.click();
+      const servicePopup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开并启用本地服务" }).click();
+      const page = await servicePopup;
+      await page.getByRole("button", { name: "启用服务并打开预览" }).click();
+      const ready = page.getByText("Shared resource loaded");
+      const failed = page.getByRole("alert");
+      await ready.or(failed).waitFor();
+      if (await failed.isVisible()) throw new Error(await failed.innerText());
+      const result = await page.evaluate(async () => {
+        const payload = new Uint8Array([0, 255, 1, 34]);
+        const echo = await fetch("/api/demo/echo", {
+          method: "POST", headers: { "content-type": "application/octet-stream" }, body: payload,
+        });
+        const data = [...new Uint8Array(await echo.arrayBuffer())];
+        const denied = await fetch("/api/unregistered/echo");
+        const progress = await fetch("/api/demo/stream");
+        const stream = progress.body!.getReader();
+        const first = await stream.read();
+        const remaining = [];
+        while (true) {
+          const chunk = await stream.read();
+          if (chunk.done) break;
+          remaining.push(new TextDecoder().decode(chunk.value));
+        }
+        const echoed = await new Promise<string>((resolve, reject) => {
+          const socket = new WebSocket(new URL("/api/demo/ws", location.href.replace(/^https:/, "wss:")));
+          socket.binaryType = "arraybuffer";
+          socket.onerror = () => reject(new Error("Could not open WSS"));
+          socket.onopen = () => socket.send("preview echo");
+          socket.onmessage = event => {
+            if (typeof event.data === "string") {
+              if (event.data === "preview echo") socket.send(payload);
+              else reject(new Error("WebSocket text changed"));
+            } else {
+              socket.close();
+              resolve([...new Uint8Array(event.data)].join(","));
+            }
+          };
+        });
+        return { status: echo.status, data, denied: denied.status, progress: new TextDecoder().decode(first.value) + remaining.join(""), echoed };
+      });
+      t.assertions.assert(result.status === 201 && result.data.join(",") === "0,255,1,34", "HTTP body or status changed");
+      t.assertions.assert(result.denied === 403 && result.progress === "data: 0\n\ndata: 1\n\ndata: 2\n\n", "service path restriction or streaming failed");
+      t.assertions.assert(result.echoed === "0,255,1,34", "WSS binary was not echoed");
+      const endpoint = new URL("/api/demo/echo", page.url());
+      const lease = (await owner.cookies(endpoint.href)).find(cookie => cookie.name === "__Host-genehub-preview");
+      if (!lease) throw new Error("service view is missing its host-only cookie");
+      const certificate = await readFile(cert);
+      const foreign = await new Promise<number | undefined>((resolve, reject) => {
+        const request = httpsRequest({
+          host: "127.0.0.1", port: endpoint.port, servername: endpoint.hostname, ca: certificate,
+          path: endpoint.pathname, method: "POST", headers: {
+            Host: endpoint.host, Origin: new URL(ownPage.url()).origin, "Sec-Fetch-Site": "same-site",
+            Cookie: `${lease.name}=${lease.value}`,
+          },
+        }, response => { response.resume(); resolve(response.statusCode); });
+        request.on("error", reject);
+        request.end();
+      });
+      t.assertions.assert(foreign === 403, "another preview origin was able to invoke the runner");
+      const staticStatus = await ownPage.evaluate(async () => (await fetch("/api/demo/echo", { method: "POST" })).status);
+      t.assertions.assert(staticStatus === 405, "opening a static preview also granted service access");
+      service?.kill();
+      await t.tools.waitUntil(async () => (await page.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
+      await page.close();
+    }
     const anonymous = await visitor.newPage();
     const plain = new URL(`${origin}/assets/independent-preview/v2/${locator}`);
     const launch = await anonymous.goto(plain.href);
@@ -151,6 +249,8 @@ defineSpecialty({
     await anonymous.getByText("Shared resource loaded").waitFor();
     const denied = await anonymous.evaluate(async () => (await fetch("./private.txt")).status);
     t.assertions.assert(denied === 403, "shared viewer obtained a sibling outside the manifest");
+    const sharedService = await anonymous.evaluate(async () => (await fetch("/api/demo/echo", { method: "POST" })).status);
+    t.assertions.assert(sharedService === 405, "a scoped file share granted service access");
     t.assertions.assert((await visitor.cookies(origin)).length === 0, "a share required an account cookie");
     const copied = await (await browser.newContext()).newPage();
     const copiedResponse = await copied.goto(anonymous.url());
@@ -166,6 +266,11 @@ defineSpecialty({
     await ordinary.goto(plain.href);
     await ordinary.getByText("Shared resource loaded").waitFor();
   } finally {
+    if (service && service.exitCode === null && service.signalCode === null) {
+      const done = once(service, "exit");
+      service.kill();
+      await done;
+    }
     await browser?.close();
     if (opened) {
       opened.client.close();
@@ -181,4 +286,4 @@ defineSpecialty({
     await relay?.stop();
     await hub.stop();
   }
-});
+}
