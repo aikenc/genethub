@@ -51,7 +51,7 @@ export async function mintPreviewShare(client: Client, source: AssetPreviewLocat
         throw new Error("设备未确认分享授权");
     return { url: previewShareUrl(source, result.data, independent), link: result.data };
 }
-export function PreviewShareButton({ client, source, defaultTtl = 3600, label = "分享预览", quick = false, resources, trigger = true, bindOpen, independent = false }: {
+export function PreviewShareButton({ client, source, defaultTtl = 3600, label = "分享预览", quick = false, resources, trigger = true, bindOpen, independent = false, allowReview = false }: {
     client: Client;
     source: AssetPreviewLocation;
     defaultTtl?: number;
@@ -62,6 +62,7 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
     trigger?: boolean;
     bindOpen?: (open: (() => void) | null) => void;
     independent?: boolean;
+    allowReview?: boolean;
 }) {
     const [open, setOpen] = useState(false);
     const bindRef = useRef(bindOpen);
@@ -71,6 +72,7 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
         bindRef.current(() => setOpen(true));
         return () => bindRef.current?.(null);
     }, []);
+    const [review, setReview] = useState(false);
     const [ttl, setTtl] = useState(defaultTtl);
     const [busy, setBusy] = useState(false);
     const [value, setValue] = useState<{
@@ -79,6 +81,8 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
     } | null>(null);
     const [problem, setProblem] = useState("");
     const [copied, setCopied] = useState(false);
+    const shareUrl = value ? new URL(value.url) : null;
+    if (allowReview && review) shareUrl?.searchParams.set("review", "1");
     const generate = async (seconds: number) => { setBusy(true); setProblem(""); setCopied(false); try {
         setValue(await mintPreviewShare(client, source, seconds, resources, independent));
     }
@@ -93,12 +97,13 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
     {open ? <div role="dialog" aria-modal="true" aria-label="分享预览链接" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-3"><section className="w-full max-w-lg rounded-xl border border-line bg-surface p-4 text-sm text-fg">
       <header className="mb-3 flex items-center justify-between"><h2>{independent ? "创建限时分享" : quick ? "在浏览器打开预览" : "分享预览"}</h2><button aria-label="关闭分享" onClick={() => setOpen(false)}>关闭</button></header>
       {!quick ? <label>授权时间 <select aria-label="分享授权时间" value={ttl} onChange={e => { setTtl(Number(e.target.value)); setValue(null); setCopied(false); }} className="rounded border border-line bg-bg p-1"><option value={3600}>1h</option><option value={86400}>1d</option><option value={604800}>7d</option></select></label> : <p>链接授权时间：1h</p>}
-      {value ? <><p className="mt-2 text-xs">有效至 {new Date(value.link.expiresAtMs).toLocaleString()}</p><textarea aria-label="预览分享链接" readOnly value={value.url} className="mt-2 h-24 w-full rounded border border-line bg-bg p-2 text-xs"/><p className="mt-2 text-xs text-muted">{independent ? "持有链接的人可在授权时间内打开分享的页面和资源。" : "访问者可以添加批注和提交运行日志，提交后复制反馈传回。"}</p></> : null}
+      {allowReview ? <label className="ml-3"><input type="checkbox" checked={review} onChange={e => { setReview(e.target.checked); setCopied(false); }} /> 打开批注和运行日志</label> : null}
+      {value && shareUrl ? <><p className="mt-2 text-xs">有效至 {new Date(value.link.expiresAtMs).toLocaleString()}</p><textarea aria-label="预览分享链接" readOnly value={shareUrl.href} className="mt-2 h-24 w-full rounded border border-line bg-bg p-2 text-xs"/><p className="mt-2 text-xs text-muted">{independent && !(allowReview && review) ? "持有链接的人可在授权时间内打开分享的页面和资源。" : "访问者可以添加批注和提交运行日志，提交后复制反馈传回。"}</p></> : null}
       {problem ? <p role="alert" className="mt-2 text-danger">{problem}</p> : null}
       <footer className="mt-3 flex justify-end gap-2">{value ? <><button className="rounded border border-line px-3 py-2" onClick={() => { void previewFeedback(client, isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle, { kind: "revoke", shareId: value.link.shareId }).then(() => { setValue(null); setProblem("分享已撤销"); }).catch(e => setProblem(String(e))); }}>撤销分享</button><button className="rounded bg-accent px-3 py-2 text-white" onClick={() => { if (!navigator.clipboard) {
             setProblem("请选择上面的链接手动复制");
             return;
-        } void navigator.clipboard.writeText(value.url).then(() => setCopied(true)).catch(() => setProblem("复制失败，请选择上面的链接手动复制")); }}>{copied ? "已复制" : "复制链接"}</button></> : <button disabled={busy} className="rounded bg-accent px-3 py-2 text-white disabled:opacity-50" onClick={() => void generate(quick ? 3600 : ttl)}>{busy ? "正在生成…" : "生成链接"}</button>}</footer>
+        } void navigator.clipboard.writeText(shareUrl?.href ?? value.url).then(() => setCopied(true)).catch(() => setProblem("复制失败，请选择上面的链接手动复制")); }}>{copied ? "已复制" : "复制链接"}</button></> : <button disabled={busy} className="rounded bg-accent px-3 py-2 text-white disabled:opacity-50" onClick={() => void generate(quick ? 3600 : ttl)}>{busy ? "正在生成…" : "生成链接"}</button>}</footer>
     </section></div> : null}
   </>;
 }

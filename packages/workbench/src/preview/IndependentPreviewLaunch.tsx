@@ -5,7 +5,8 @@ import { browserHost, type Host } from "../host";
 import type { Client } from "../protocol/client";
 import { connectPreview, endpointForDevice } from "./AssetPreviewPage";
 import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
-import { INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
+import { INDEPENDENT_REVIEW_FEATURE, INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
+import { IndependentPreviewReview } from "./IndependentPreviewReview";
 import { ServicePreviewClient } from "./serviceClient";
 
 const feature = "asset.preview.independent.v1";
@@ -49,13 +50,16 @@ function waitForIdentity(client: Client, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function IndependentPreviewLaunch({ source, client, host, withService = false }: {
+export function IndependentPreviewLaunch({ source, client, host, withService = false, review = false, feedbackScope = "owner" }: {
   source: AssetPreviewLocation;
   client: Client | null;
   host?: Host;
   withService?: boolean;
+  review?: boolean;
+  feedbackScope?: string;
 }) {
   const [grant, setGrant] = useState<StaticPreviewGrant>();
+  const [reviewClient, setReviewClient] = useState<Client>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -67,7 +71,11 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
     const deadline = setTimeout(() => cancellation.abort(new Error("开启独立预览超时")), 40_000);
     let owned: Client | undefined;
     let active = true;
+    let retainClient = false;
     void (async () => {
+      if (review && !globalThis.crossOriginIsolated) {
+        throw new Error("当前浏览器或入口未启用独立评审所需的跨源隔离");
+      }
       const currentHost = host ?? browserHost();
       if (!client) {
         const endpoint = await endpointForDevice(currentHost, deviceHandle);
@@ -83,6 +91,9 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       if (!connection.identity.features?.includes(feature)) {
         throw new Error("目标设备未启用独立预览");
       }
+      if (review && !connection.identity.features?.includes(INDEPENDENT_REVIEW_FEATURE)) {
+        throw new Error("目标设备未启用独立评审");
+      }
       let serviceRunId: string | undefined;
       if (withService) {
         if (!connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
@@ -97,19 +108,26 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         type: "preview.feedback",
         payload: {
           workspaceId: isAbsoluteFilePath(path) ? "" : workspaceHandle,
-          operation: { kind: "openStatic", path, ...(serviceRunId ? { serviceRunId } : {}) },
+          operation: { kind: "openStatic", path, ...(serviceRunId ? { serviceRunId } : {}), ...(review ? { review } : {}) },
         },
       }, { timeoutMs: 30_000 });
       signal.throwIfAborted();
       if (reply?.type !== "previewFeedback" || reply.data.kind !== "staticPreview") {
         throw new Error("设备未签发独立预览凭证");
       }
-      if (active) setGrant(validateStaticPreviewGrant(reply.data.data));
+      if (active) {
+        const validated = validateStaticPreviewGrant(reply.data.data);
+        if (review) {
+          retainClient = true;
+          setReviewClient(connection);
+        }
+        setGrant(validated);
+      }
     })().catch(error => {
       if (active) setProblem(error instanceof Error ? error.message : "无法打开独立预览");
     }).finally(() => {
       clearTimeout(deadline);
-      owned?.close();
+      if (!retainClient) owned?.close();
     });
     return () => {
       active = false;
@@ -117,9 +135,17 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       cancellation.abort();
       owned?.close();
     };
-  }, [client, confirmed, deviceHandle, host, path, withService, workspaceHandle]);
+  }, [client, confirmed, deviceHandle, host, path, review, withService, workspaceHandle]);
 
-  useEffect(() => { if (grant) form.current?.submit(); }, [grant]);
+  useEffect(() => { if (grant && !review) form.current?.submit(); }, [grant, review]);
+  if (grant && review && reviewClient) {
+    const mayEnableService = feedbackScope === "owner" && !withService
+      && reviewClient.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
+    const serviceUrl = mayEnableService ? new URL(window.location.href) : undefined;
+    serviceUrl?.searchParams.set("service", "1");
+    return <IndependentPreviewReview client={reviewClient} source={source} grant={grant}
+      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} />;
+  }
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
       <meta name="referrer" content="strict-origin" />

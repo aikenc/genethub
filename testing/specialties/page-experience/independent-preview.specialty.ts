@@ -36,9 +36,19 @@ defineSpecialty({
   catches: ["registered service unavailable on the new origin", "cross-origin service access", "scope escapes registered routes", "different run receives requests"],
   productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
   requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
-}, t => exercise(t, true));
+}, t => exercise(t, "service"));
 
-async function exercise(t: CaseContext, withService = false) {
+defineSpecialty({
+  ...staticSpec,
+  id: "specialty.page-experience.independent-preview-review",
+  title: "Independent preview content can be reviewed from the trusted workbench",
+  oracle: "Paired and shared browsers retain isolation. The visitor reports an element, console logs and a DOM snapshot and the owner retrieves the receipt.",
+  catches: ["review disables SharedArrayBuffer", "review grants workbench context to content", "annotation or feedback cannot be submitted on the isolated origin"],
+}, t => exercise(t, "review"));
+
+async function exercise(t: CaseContext, mode?: "service" | "review") {
+  const withService = mode === "service";
+  const withReview = mode === "review";
 
   const [edgePort, publicPort, relayPort] = await Promise.all([allocatePort(), allocatePort(), allocatePort()]);
   const origin = `https://workbench.${suffix}:${publicPort}`;
@@ -87,7 +97,7 @@ async function exercise(t: CaseContext, withService = false) {
     }).listen(publicPort, "127.0.0.1");
     await once(front, "listening");
     await writeFile(path.join(t.env.workspace, "index.html"), `<!doctype html><meta charset="utf-8"><p>独立预览样本</p>
-      <p id="data">loading</p><script>fetch('./data.json').then(r=>r.json()).then(x=>document.querySelector('#data').textContent=x.message)</script>`);
+      <p id="data">loading</p><script>console.log('preview started before load'); fetch('./data.json').then(r=>r.json()).then(x=>document.querySelector('#data').textContent=x.message)</script>`);
     await writeFile(path.join(t.env.workspace, "data.json"), '{"message":"Shared resource loaded"}');
     await writeFile(path.join(t.env.workspace, "private.txt"), "outside share");
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv: {
@@ -226,9 +236,41 @@ async function exercise(t: CaseContext, withService = false) {
       t.assertions.assert(foreign === 403, "another preview origin was able to invoke the runner");
       const staticStatus = await ownPage.evaluate(async () => (await fetch("/api/demo/echo", { method: "POST" })).status);
       t.assertions.assert(staticStatus === 405, "opening a static preview also granted service access");
+      await menu.click();
+      const reviewPopup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
+      const review = await reviewPopup;
+      const reviewFrame = review.frameLocator('iframe[title="独立 HTML 预览"]');
+      await reviewFrame.getByText("Shared resource loaded").waitFor();
+      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
+      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      const loadedInReview = reviewFrame.getByText("Shared resource loaded");
+      await loadedInReview.waitFor();
+      const combined = await loadedInReview.evaluate(async () => {
+        const response = await fetch("/api/demo/status");
+        return crossOriginIsolated && response.ok && (await response.json()).ready === true;
+      });
+      t.assertions.assert(combined, "review mode cannot access the confirmed service");
+      await review.close();
       service?.kill();
       await t.tools.waitUntil(async () => (await page.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
       await page.close();
+    }
+    if (withReview) {
+      await menu.click();
+      const popup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
+      const review = await popup;
+      const frame = review.frameLocator('iframe[title="独立 HTML 预览"]');
+      const loaded = frame.getByText("Shared resource loaded");
+      await loaded.waitFor();
+      t.assertions.assert(await review.evaluate(() => crossOriginIsolated), "trusted host lost isolation");
+      t.assertions.assert(await loaded.evaluate(() => {
+        try { void parent.document; return false; } catch {
+          return crossOriginIsolated && typeof SharedArrayBuffer === "function" && parent !== window;
+        }
+      }), "content lost isolation or can read its parent");
+      await review.close();
     }
     const anonymous = await visitor.newPage();
     const plain = new URL(`${origin}/assets/independent-preview/v2/${locator}`);
@@ -255,6 +297,47 @@ async function exercise(t: CaseContext, withService = false) {
     const copied = await (await browser.newContext()).newPage();
     const copiedResponse = await copied.goto(anonymous.url());
     t.assertions.assert(copiedResponse?.status() === 403, "opening the resource URL without the view cookie gave access");
+    if (withReview) {
+      await creator.getByLabel("打开批注和运行日志", { exact: true }).check();
+      const review = await visitor.newPage();
+      await review.addInitScript(() => {
+        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { value: undefined });
+      });
+      await review.goto(await shareLink.inputValue());
+      const subdomain = review.frameLocator('iframe[title="独立 HTML 预览"]');
+      await subdomain.getByText("Shared resource loaded").waitFor();
+      const privateStatus = await subdomain.locator("body").evaluate(async () => (await fetch("/private.txt")).status);
+      t.assertions.assert(privateStatus === 403, "review changed the share's allowed files");
+      await review.getByLabel("批注", { exact: true }).click();
+      await review.getByRole("button", { name: "开始批注", exact: true }).click();
+      await subdomain.locator("#data").click();
+      await review.getByRole("textbox", { name: "批注", exact: true }).fill("Independent visitor annotation");
+      await review.getByRole("button", { name: "添加批注", exact: true }).click();
+      await review.getByRole("button", { name: "完成批注", exact: true }).click();
+      await review.getByLabel("更多预览操作", { exact: true }).click();
+      await review.getByRole("button", { name: "截图", exact: true }).click();
+      await review.getByText(/已截取 Preview 画面 .* 和 DOM 状态/).waitFor();
+      await review.getByRole("button", { name: "保存运行产物", exact: true }).click();
+      await review.getByText("已保存到文件反馈草稿，请从批注菜单选择并提交").waitFor();
+      await review.keyboard.press("Escape");
+      await review.getByLabel("批注", { exact: true }).click();
+      await review.getByRole("button", { name: "提交批注反馈", exact: true }).click();
+      await review.getByRole("textbox", { name: "反馈说明" }).fill("Private origin feedback");
+      await review.getByRole("button", { name: "提交反馈", exact: true }).click();
+      const receipt = review.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
+      await receipt.waitFor();
+      const id = (await receipt.inputValue()).match(/pf_[a-f0-9]{32}/)?.[0];
+      if (!id) throw new Error("review did not return a feedback receipt");
+      const stored = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: opened.workspaceId, operation: { kind: "read", id } } });
+      if (stored?.type !== "previewFeedback" || stored.data.kind !== "receipt") throw new Error("owner cannot retrieve the review");
+      const { annotations, bundles } = stored.data.data;
+      t.assertions.assert(annotations[0]?.comment === "Independent visitor annotation" && bundles.length === 1, "review did not persist annotations and evidence");
+      const log = await readFile(path.join(bundles[0]!.workspacePath, "events.jsonl"), "utf8");
+      const dom = await readFile(path.join(bundles[0]!.workspacePath, "dom.jsonl"), "utf8");
+      t.assertions.assert(log.includes("preview started before load") && dom.includes("Shared resource loaded"), "source startup or DOM evidence was lost");
+      t.assertions.assert(bundles[0]!.files.some(file => file.name.endsWith(".webp")), "screenshot was not retained with feedback");
+      await review.close();
+    }
     await creator.getByRole("button", { name: "撤销分享" }).click();
     await creator.getByText("分享已撤销").waitFor();
     const afterRevoke = await anonymous.evaluate(async () => {

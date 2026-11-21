@@ -513,9 +513,11 @@ type HtmlMark = { id: string; x: number; y: number; width: number; height: numbe
 export function HtmlAnnotationOverlay({
   frameRef,
   frameReady,
+  origin = "*",
 }: {
   frameRef: RefObject<HTMLIFrameElement | null>;
   frameReady: boolean;
+  origin?: string;
 }) {
   const review = useContext(PreviewReviewContext);
   const [outline, setOutline] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -542,16 +544,16 @@ export function HtmlAnnotationOverlay({
         command: "locate",
         requestId: "locate",
         items,
-      }, "*");
+      }, origin);
     };
     frame.addEventListener("load", publish);
     publish();
     return () => frame.removeEventListener("load", publish);
-  }, [frameRef, locateKey, frameReady]);
+  }, [frameRef, locateKey, frameReady, origin]);
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
-      if (event.source !== frameRef.current?.contentWindow) return;
+      if (event.source !== frameRef.current?.contentWindow || (origin !== "*" && event.origin !== origin)) return;
       const data = event.data as { source?: string; kind?: string; requestId?: string; detail?: unknown };
       if (data?.source !== RUNTIME_SOURCE) return;
       if (data.kind === "locate") {
@@ -576,7 +578,7 @@ export function HtmlAnnotationOverlay({
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [frameRef, review]);
+  }, [frameRef, review, origin]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -587,11 +589,11 @@ export function HtmlAnnotationOverlay({
       requestId: "annotation-mode",
       active: Boolean(review?.active),
       selection: review?.htmlSelection ?? null,
-    }, "*");
+    }, origin);
     frame.addEventListener("load", publish);
     publish();
     return () => frame.removeEventListener("load", publish);
-  }, [frameRef, frameReady, review?.active, review?.htmlSelection]);
+  }, [frameRef, frameReady, origin, review?.active, review?.htmlSelection]);
 
   if (!review || (!review.active && marks.length === 0)) return null;
   return (

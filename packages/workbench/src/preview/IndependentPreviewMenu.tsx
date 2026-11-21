@@ -6,6 +6,7 @@ import { PreviewShareButton } from "./PreviewShareButton";
 import { PreviewToolbarPortal } from "./PreviewToolbar";
 import { independentPreviewUrl, type AssetPreviewLocation } from "./url";
 
+export const INDEPENDENT_REVIEW_FEATURE = "asset.preview.independent.review.v1";
 export const INDEPENDENT_SERVICE_FEATURE = "asset.preview.independent.service.v1";
 
 export function IndependentPreviewMenu({ client, source, resources, canShare }: {
@@ -27,6 +28,9 @@ export function IndependentPreviewMenu({ client, source, resources, canShare }: 
   const url = independentPreviewUrl(source);
   const serviceUrl = new URL(url);
   serviceUrl.searchParams.set("service", "1");
+  const reviewUrl = new URL(url);
+  reviewUrl.searchParams.set("review", "1");
+  const supportsReview = !!client.identity?.features?.includes(INDEPENDENT_REVIEW_FEATURE);
   const supportsService = client.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
   const open = (event: React.MouseEvent<HTMLAnchorElement>) => {
     if (menu.current) menu.current.open = false;
@@ -60,6 +64,11 @@ export function IndependentPreviewMenu({ client, source, resources, canShare }: 
             {supportsService ? (
               <a className={item} href={serviceUrl.href} target="_blank" rel="noopener" onClick={open}>打开并启用本地服务</a>
             ) : null}
+            {supportsReview ? (
+              <a className={item} href={reviewUrl.href} target="_blank" rel="noopener" onClick={() => {
+                if (menu.current) menu.current.open = false;
+              }}>打开批注和运行日志</a>
+            ) : null}
             <button type="button" className={item} disabled={!canShare || !openShare} onClick={() => {
               if (menu.current) menu.current.open = false;
               openShare?.();
@@ -67,7 +76,7 @@ export function IndependentPreviewMenu({ client, source, resources, canShare }: 
           </div>
         </details>
       </PreviewToolbarPortal>
-      <PreviewShareButton client={client} source={source} resources={resources} trigger={false} bindOpen={bindShare} independent />
+      <PreviewShareButton client={client} source={source} resources={resources} trigger={false} bindOpen={bindShare} independent allowReview={supportsReview} />
     </>
   );
 }

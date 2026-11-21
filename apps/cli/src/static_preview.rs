@@ -33,6 +33,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 
 mod relay;
+mod review;
 mod service;
 
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
@@ -70,6 +71,8 @@ struct View {
     workbench_origin: HeaderValue,
     origin: HeaderValue,
     service: Option<service::Run>,
+    review: bool,
+    frame_policy: HeaderValue,
     bootstrap_digest: [u8; 32],
     bootstrap_deadline: Instant,
     bootstrap_redeemed: AtomicBool,
@@ -130,6 +133,8 @@ enum Control {
         scope: Scope,
         service: Option<service::Run>,
         https_port: Option<u16>,
+        #[serde(default)]
+        review: bool,
         ttl_seconds: u64,
         expires_at_ms: Option<u64>,
     },
@@ -264,6 +269,7 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             scope,
             service,
             https_port,
+            review,
             ttl_seconds,
             expires_at_ms,
         } => {
@@ -322,6 +328,11 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                 bail!("invalid Workbench origin");
             }
             let workbench_origin = HeaderValue::from_str(workbench_origin.trim_end_matches('/'))?;
+            let frame_policy = if review {
+                HeaderValue::from_str(&format!("frame-ancestors {}; frame-src 'none'", workbench_origin.to_str()?))?
+            } else {
+                FRAME_POLICY
+            };
             let bootstrap_digest =
                 decode_digest(&bootstrap_digest).context("invalid bootstrap digest")?;
             let location = entry_location(&entry)?;
@@ -366,6 +377,8 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                     workbench_origin,
                     origin,
                     service,
+                    review,
+                    frame_policy,
                     bootstrap_digest,
                     bootstrap_deadline: deadline.min(Instant::now() + BOOTSTRAP_LIFETIME),
                     bootstrap_redeemed: AtomicBool::new(false),
@@ -544,6 +557,16 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     if request.uri().path() == BOOTSTRAP_PATH {
         return bootstrap(request, &view).await;
     }
+    if view.review && request.uri().path() == review::FRAME_PATH && request.method() == Method::GET {
+        return review::frame(&view);
+    }
+    if view.review && request.uri().path() == review::SCRIPT_PATH && request.method() == Method::GET {
+        return if has_view_cookie(request.headers(), &view.cookie) {
+            review::script(&view)
+        } else {
+            empty(StatusCode::FORBIDDEN)
+        };
+    }
     if let Some(run) = view.service.as_ref().filter(|_| request.uri().path().starts_with("/api/")) {
         if !has_view_cookie(request.headers(), &view.cookie) {
             return empty(StatusCode::FORBIDDEN);
@@ -632,26 +655,41 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     } else {
         StatusCode::OK
     };
-    let body = if request.method() == Method::HEAD {
-        empty_body()
+    let media_type = content_type(&path);
+    let review_page = view.review
+        && media_type.starts_with("text/html")
+        && request.headers().get("sec-fetch-dest").is_some_and(|dest| dest == "iframe")
+        && range.is_none();
+    let (body, wire_length) = if request.method() == Method::HEAD {
+        (empty_body(), length)
     } else {
         let mut file = tokio::fs::File::from_std(file);
         if start != 0 && file.seek(io::SeekFrom::Start(start)).await.is_err() {
             return empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        let stream = ReaderStream::with_capacity(file.take(length), CHUNK_SIZE)
-            // Keep the read budget for the lifetime of the HTTP body.
-            .map(move |chunk| {
-                let _permit = &permit;
-                chunk
-            })
-            .map_ok(Frame::data);
-        StreamBody::new(stream).boxed_unsync()
+        let (prefix, consumed) = if review_page {
+            match review::read_prefix(&mut file, length, &view.workbench_origin).await {
+                Ok((prefix, consumed)) => (Some(prefix), consumed),
+                Err(_) => return empty(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        } else {
+            (None, 0)
+        };
+        let wire_length = length - consumed + prefix.as_ref().map_or(0, |chunk| chunk.len() as u64);
+        let stream = futures_util::stream::iter(prefix.map(Ok)).chain(
+            ReaderStream::with_capacity(file.take(length - consumed), CHUNK_SIZE),
+        )
+        // Keep the read budget for the lifetime of the HTTP body.
+        .map(move |chunk| {
+            let _permit = &permit;
+            chunk
+        })
+        .map_ok(Frame::data);
+        (StreamBody::new(stream).boxed_unsync(), wire_length)
     };
-    let media_type = content_type(&path);
     let mut response = Response::builder()
         .status(status)
-        .header(header::CONTENT_LENGTH, length)
+        .header(header::CONTENT_LENGTH, wire_length)
         .header(header::CONTENT_TYPE, media_type)
         .header(header::ACCEPT_RANGES, "bytes");
     if range.is_some() {
@@ -662,7 +700,7 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     }
     let mut response = response.body(body).expect("valid static response headers");
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_SECURITY_POLICY, FRAME_POLICY);
+    headers.insert(header::CONTENT_SECURITY_POLICY, view.frame_policy.clone());
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
@@ -687,6 +725,9 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
         "cross-origin-resource-policy",
         HeaderValue::from_static("same-origin"),
     );
+    if review_page {
+        review::headers(headers, &view);
+    }
     response
 }
 
@@ -762,6 +803,9 @@ async fn bootstrap(request: Request<Incoming>, view: &View) -> Response<Body> {
         ))
         .expect("cookie contains only ASCII"),
     );
+    if view.review {
+        review::headers(headers, view);
+    }
     response
 }
 
