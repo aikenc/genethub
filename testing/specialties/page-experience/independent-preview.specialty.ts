@@ -46,9 +46,20 @@ defineSpecialty({
   catches: ["review disables SharedArrayBuffer", "review grants workbench context to content", "annotation or feedback cannot be submitted on the isolated origin"],
 }, t => exercise(t, "review"));
 
-async function exercise(t: CaseContext, mode?: "service" | "review") {
+defineSpecialty({
+  ...staticSpec,
+  id: "specialty.page-experience.independent-preview-media",
+  title: "Trusted independent review renders registered audio and video",
+  oracle: "The trusted Workbench receives real media, stops the source session, and keeps media routes outside the preview origin.",
+  catches: ["explicit media cannot be opened in the independent review", "the content iframe can call media signalling", "a stopped view leaks the source media session"],
+  productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
+  requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp", "aiortc", "av", "numpy"] }],
+}, t => exercise(t, "media"));
+
+async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
   const withService = mode === "service";
   const withReview = mode === "review";
+  const withMedia = mode === "media";
 
   const [edgePort, publicPort, relayPort] = await Promise.all([allocatePort(), allocatePort(), allocatePort()]);
   const origin = `https://workbench.${suffix}:${publicPort}`;
@@ -78,6 +89,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review") {
   let edge: ChildProcess | undefined;
   let front: ReturnType<typeof createServer> | undefined;
   let service: ChildProcess | undefined;
+  let mediaHealth: string | undefined;
   try {
     relay = await startRelay({ openRoot: t.openRoot, port: relayPort, control: { origin: hub.origin, token: relayToken } });
     edge = spawn(process.execPath, ["--import", "tsx", "src/preview-edge.ts"], {
@@ -103,13 +115,28 @@ async function exercise(t: CaseContext, mode?: "service" | "review") {
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv: {
       GENEHUB_PREVIEW_ENABLED: "1", GENEHUB_PREVIEW_TLS_CERT: cert, GENEHUB_PREVIEW_TLS_KEY: key,
     } });
-    if (withService) {
+    if (withService || withMedia) {
       const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
       if (!python) throw new BlockedError("Python with aiohttp is required by the preview runner");
-      service = spawn(python, [
-        path.join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/app.py"),
-        "--entry", path.join(t.env.workspace, "index.html"), "--daemon-root", t.env.data,
-      ], { stdio: ["ignore", "ignore", "inherit"] });
+      const example = path.join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets");
+      let args = [path.join(example, "python-adapter/app.py"), "--entry", path.join(t.env.workspace, "index.html")];
+      if (withMedia) {
+        const [demoPort, mediaPort] = await Promise.all([allocatePort(), allocatePort()]);
+        const config = path.join(t.env.workspace, "media.json");
+        mediaHealth = `http://127.0.0.1:${mediaPort}/health`;
+        await writeFile(config, JSON.stringify({
+          entry: "index.html",
+          backends: [
+            { command: [python, path.join(example, "demo/backend.py")], origin: `http://127.0.0.1:${demoPort}`,
+              env: { PREVIEW_DEMO_PORT: String(demoPort) }, health: "/health", routes: [{ prefix: "/api/demo/" }] },
+            { command: [python, path.join(example, "demo/media.py")], origin: `http://127.0.0.1:${mediaPort}`,
+              env: { PREVIEW_MEDIA_PORT: String(mediaPort) }, health: "/health", routes: [{ prefix: "/api/media/" }] },
+          ],
+          media: { offerPath: "/api/media/offer", stopPath: "/api/media/stop", microphone: "none" },
+        }));
+        args = [path.join(example, "python-adapter/run.py"), "--config", config];
+      }
+      service = spawn(python, [...args, "--daemon-root", t.env.data], { stdio: ["ignore", "ignore", "inherit"] });
       const registration = path.join(t.env.data, "service-previews", createHash("sha256")
         .update(path.join(t.env.workspace, "index.html")).digest("hex") + ".json");
       await t.tools.waitUntil(async () => {
@@ -255,6 +282,40 @@ async function exercise(t: CaseContext, mode?: "service" | "review") {
       service?.kill();
       await t.tools.waitUntil(async () => (await page.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
       await page.close();
+    }
+    if (withMedia) {
+      await menu.click();
+      const popup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
+      const review = await popup;
+      const content = review.frameLocator('iframe[title="独立 HTML 预览"]');
+      await content.getByText("Shared resource loaded").waitFor();
+      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
+      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      const loaded = content.getByText("Shared resource loaded");
+      await loaded.waitFor();
+      const panel = review.getByRole("region", { name: "服务音视频" });
+      await panel.getByLabel("仅直连").check();
+      await panel.getByRole("button", { name: "连接音视频" }).click();
+      const element = panel.locator("video");
+      await t.tools.waitUntil(() => element.evaluate((node: HTMLVideoElement) => {
+        const stream = node.srcObject;
+        return stream instanceof MediaStream && stream.getAudioTracks().some(track => track.readyState === "live")
+          && node.videoWidth > 0 && node.readyState >= node.HAVE_CURRENT_DATA;
+      }), 25_000);
+      const paths = await loaded.evaluate(async () => {
+        const ordinary = await fetch("/api/demo/health");
+        const offer = await fetch("/api/media/offer", { method: "POST" });
+        const stop = await fetch("/api/media/stop", { method: "POST" });
+        return [ordinary.status, offer.status, stop.status];
+      });
+      t.assertions.assert(paths.join() === "200,403,403", "media signalling escaped the trusted panel or ordinary APIs were lost");
+      const active = await (await fetch(mediaHealth!)).json();
+      t.assertions.assert(active.sessions === 1, "source did not have exactly one live session");
+      await panel.getByRole("button", { name: "停止", exact: true }).click();
+      await t.tools.waitUntil(async () => (await (await fetch(mediaHealth!)).json()).sessions === 0, 5000);
+      t.assertions.assert(await element.evaluate((node: HTMLVideoElement) => node.srcObject === null), "stopped media remained attached");
+      await review.close();
     }
     if (withReview) {
       await menu.click();

@@ -199,21 +199,58 @@ pub(crate) async fn independent_binding(
     workspace: &str,
     entry: &str,
     expected_run: &str,
-) -> Result<Value> {
+    review: bool,
+) -> Result<Option<Value>> {
     let run = load_entry(state, workspace, entry)
         .await?
         .context("这个入口没有已登记的服务")?;
     if run.run_id != expected_run {
         anyhow::bail!("登记服务已更换，请重新打开预览");
     }
+    let mut routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes)?;
+    if !run.media.is_null() {
+        let media: genehub_proto::ServicePreviewMedia = serde_json::from_value(run.media)?;
+        if media.client.is_some() {
+            anyhow::bail!("由页面控制的实时媒体请通过原工作台预览打开");
+        }
+        if !review {
+            anyhow::bail!("带有媒体权限的服务请使用独立评审打开");
+        }
+        if run.data_policy == "direct-only" {
+            // The Workbench media panel still uses ServicePreview's original
+            // transport policy. The page gets no native service binding.
+            return Ok(None);
+        }
+        // Keep every overlapping route in the trusted media panel. This also
+        // covers an application registering both broad and narrow routes, or
+        // treating aliases beneath an offer/stop path as the same operation.
+        let exclusive: Vec<_> = std::iter::once(media.offer_path.as_str())
+            .chain(media.stop_path.as_deref())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if exclusive.iter().any(|path| {
+            !path.starts_with("/api/")
+                || path.contains(['%', '\\', '?', '#', ';'])
+                || path.chars().any(char::is_control)
+                || path.split('/').skip(1).any(|part| ["", ".", ".."].contains(&part))
+        }) {
+            return Ok(None);
+        }
+        routes.retain(|route| {
+            let prefix = route.prefix.to_ascii_lowercase();
+            let route_root = prefix.trim_end_matches('/');
+            !exclusive.iter().any(|path| {
+                path == route_root || path.starts_with(&prefix) || route_root.starts_with(&format!("{path}/"))
+            })
+        });
+    }
     if !matches!(run.data_policy.as_str(), "" | "auto") {
         anyhow::bail!("此服务的传输策略不允许独立中转");
     }
-    if !run.media.is_null() {
-        anyhow::bail!("带有媒体权限的服务请通过工作台预览打开");
+    if routes.is_empty() {
+        return Ok(None);
     }
-    let routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes)?;
-    Ok(json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes}))
+    Ok(Some(json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes})))
 }
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {

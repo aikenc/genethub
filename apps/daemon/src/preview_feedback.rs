@@ -642,7 +642,7 @@ async fn open_static(
         if !caller.permits_stream(crate::authz::StreamMethod::ServicePreview) {
             bail!("此连接不能通过独立中转访问服务");
         }
-        Some(crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id).await?)
+        crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id, review).await?
     } else {
         None
     };

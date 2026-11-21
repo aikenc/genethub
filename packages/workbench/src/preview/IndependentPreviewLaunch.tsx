@@ -60,6 +60,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
 }) {
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [reviewClient, setReviewClient] = useState<Client>();
+  const [reviewMedia, setReviewMedia] = useState<ServicePreviewClient>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -72,6 +73,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
     let owned: Client | undefined;
     let active = true;
     let retainClient = false;
+    let enabledService: ServicePreviewClient | null = null;
     void (async () => {
       if (review && !globalThis.crossOriginIsolated) {
         throw new Error("当前浏览器或入口未启用独立评审所需的跨源隔离");
@@ -94,16 +96,16 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       if (review && !connection.identity.features?.includes(INDEPENDENT_REVIEW_FEATURE)) {
         throw new Error("目标设备未启用独立评审");
       }
-      let serviceRunId: string | undefined;
+
       if (withService) {
         if (!connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
           throw new Error("目标设备未启用独立服务预览");
         }
-        const service = await ServicePreviewClient.discover(connection, workspaceHandle, path);
+        enabledService = await ServicePreviewClient.discover(connection, workspaceHandle, path);
         signal.throwIfAborted();
-        if (!service) throw new Error("这个入口没有已登记的服务");
-        serviceRunId = service.descriptor.runId;
+        if (!enabledService) throw new Error("这个入口没有已登记的服务");
       }
+      const serviceRunId = enabledService?.descriptor.runId;
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
@@ -120,6 +122,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         if (review) {
           retainClient = true;
           setReviewClient(connection);
+          setReviewMedia(enabledService?.descriptor.media ? enabledService : undefined);
         }
         setGrant(validated);
       }
@@ -127,12 +130,16 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       if (active) setProblem(error instanceof Error ? error.message : "无法打开独立预览");
     }).finally(() => {
       clearTimeout(deadline);
-      if (!retainClient) owned?.close();
+      if (!retainClient) {
+        enabledService?.close();
+        owned?.close();
+      }
     });
     return () => {
       active = false;
       clearTimeout(deadline);
       cancellation.abort();
+      enabledService?.close();
       owned?.close();
     };
   }, [client, confirmed, deviceHandle, host, path, review, withService, workspaceHandle]);
@@ -144,7 +151,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
     const serviceUrl = mayEnableService ? new URL(window.location.href) : undefined;
     serviceUrl?.searchParams.set("service", "1");
     return <IndependentPreviewReview client={reviewClient} source={source} grant={grant}
-      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} />;
+      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} media={reviewMedia} />;
   }
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
