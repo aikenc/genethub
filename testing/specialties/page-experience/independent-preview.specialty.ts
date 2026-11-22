@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, createPublicKey, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { createServer, request as httpsRequest } from "node:https";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 
-import { allocatePort, BlockedError, defineSpecialty, startHub, startRelay, type CaseContext } from "../../framework/public.ts";
+import { allocatePort, BlockedError, daemonEndpoint, defineSpecialty, startHub, startRelay, type CaseContext } from "../../framework/public.ts";
 
 const run = promisify(execFile);
 const suffix = "preview.test";
@@ -18,10 +18,10 @@ const suffix = "preview.test";
 const staticSpec: Parameters<typeof defineSpecialty>[0] = {
   id: "specialty.page-experience.independent-preview",
   title: "The two external preview choices keep their original authorization",
-  oracle: "The old preview works. A resident worker is connected before the first open and serves multiple origins after idling. It recovers without an open request. Anonymous shares remain scoped and revocable.",
-  catches: ["legacy preview replaced", "on-demand or duplicate workers", "idle worker exits", "worker is not supervised", "share inherits account authority", "copying the resource URL gives access", "TLS terminates before the source"],
+  oracle: "The old preview works. A resident worker is connected before the first open and serves multiple origins after idling. The same worker reconnects after loss of the preview transport. Anonymous shares remain scoped and revocable.",
+  catches: ["legacy preview replaced", "on-demand or duplicate workers", "idle worker exits", "worker does not reconnect", "share inherits account authority", "copying the resource URL gives access", "TLS terminates before the source"],
   tags: ["page-experience", "authorization", "preview-feedback"],
-  runner: "playwright", requiredRepos: ["cloud"], llm: { default: "mock" },
+  runner: "playwright", requiredRepos: ["cloud"], requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"], llm: { default: "mock" },
   expectedDurationMs: 110_000, timeoutMs: 210_000,
   resources: { environments: 1, cpu: 2, memoryMb: 3072, io: 1, browser: 1, pool: "browser" },
   surfaces: ["cloud-console", "cloud-server", "relay", "daemon", "asset-preview"],
@@ -182,8 +182,14 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     // The Hub's relay presence is an independent readiness witness. Do not open
     // a preview to find out whether the supervisor has already connected.
     const initialPresence = await waitForPreviewPresence(t, databasePath, device);
-    const resident = mode === undefined ? await previewWorkerPids(cert) : [];
-    if (mode === undefined) t.assertions.assert(resident.length === 1, "expected one worker before the first preview");
+    const daemonPid = daemonEndpoint(opened.daemon).localServerProof.pid;
+    const resident = mode === undefined ? await previewThreads(daemonPid) : [];
+    if (mode === undefined) {
+      if (process.platform === "linux") {
+        t.assertions.assert(resident.length === 1, "expected one WASM thread before the first preview");
+      }
+      t.assertions.assert((await previewWorkerPids(cert)).length === 0, "the daemon spawned a preview subprocess");
+    }
     const idleSince = Date.now();
     browser = await chromium.launch({ args: [
       "--no-proxy-server", `--host-resolver-rules=MAP *.${suffix} 127.0.0.1`, `--ignore-certificate-errors-spki-list=${pin}`,
@@ -204,7 +210,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     await old.getByText("Shared resource loaded").waitFor();
     if (mode === undefined) {
       await sleep(Math.max(0, 65_000 - (Date.now() - idleSince)));
-      t.assertions.assert((await previewWorkerPids(cert)).join() === resident.join(), "the idle worker was replaced or stopped");
+      t.assertions.assert((await previewThreads(daemonPid)).join() === resident.join(), "the idle worker was replaced or stopped");
     }
     const menu = creator.getByText("独立预览", { exact: true });
     await menu.click();
@@ -225,6 +231,14 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
       const failed = page.getByRole("alert");
       await ready.or(failed).waitFor();
       if (await failed.isVisible()) throw new Error(await failed.innerText());
+      const executingThreads = await previewThreads(daemonPid);
+      if (process.platform === "linux") {
+        const staticCount = Number(process.env.GENEHUB_PREVIEW_THREADS ?? "1");
+        const serviceCount = process.env.GENEHUB_PREVIEW_SERVICE_THREADS === "0" ? 0
+          : Number(staticCount > 0 || process.env.GENEHUB_PREVIEW_SERVICE_THREADS === "1");
+        t.assertions.assert(executingThreads.length === staticCount + serviceCount,
+          "expected the configured static workers and one worker for the registered service");
+      }
       const result = await page.evaluate(async () => {
         const payload = new Uint8Array([0, 255, 1, 34]);
         const echo = await fetch("/api/demo/echo", {
@@ -294,6 +308,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
         return crossOriginIsolated && response.ok && (await response.json()).ready === true;
       });
       t.assertions.assert(combined, "review mode cannot access the confirmed service");
+      t.assertions.assert((await previewThreads(daemonPid)).join() === executingThreads.join(),
+        "two viewers of the same run did not share its preview worker");
       await review.close();
       service?.kill();
       await t.tools.waitUntil(async () => (await page.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
@@ -428,15 +444,12 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     if (mode === undefined) {
       t.assertions.assert(new URL(ordinary.url()).host !== new URL(ownPage.url()).host, "two views reused an origin");
       t.assertions.assert(await ownPage.evaluate(async () => (await fetch("./data.json")).ok), "opening another view interrupted the first");
-      t.assertions.assert((await previewWorkerPids(cert)).join() === resident.join(), "separate views did not share the resident process");
+      t.assertions.assert((await previewThreads(daemonPid)).join() === resident.join(), "separate views did not share the resident WASM thread");
 
-      process.kill(resident[0]!, "SIGKILL");
+      await relay.stop();
+      relay = await startRelay({ openRoot: t.openRoot, port: relayPort, control: { origin: hub.origin, token: relayToken } });
       await waitForPreviewPresence(t, databasePath, device, initialPresence);
-      const replacement = await previewWorkerPids(cert);
-      t.assertions.assert(replacement.length === 1 && replacement[0] !== resident[0], "the worker did not recover in the background");
-      t.assertions.assert(!(await ownPage.evaluate(async () => {
-        try { return (await fetch("./data.json", { cache: "no-store" })).ok; } catch { return false; }
-      })), "the replacement accepted a lease issued by the stopped worker");
+      t.assertions.assert((await previewThreads(daemonPid)).join() === resident.join(), "relay reconnect replaced the source thread");
       await creator.reload();
       await old.getByText("Shared resource loaded").waitFor();
       const recovered = await owner.newPage();
@@ -486,6 +499,17 @@ async function waitForPreviewPresence(t: CaseContext, databasePath: string, devi
   } finally {
     db.close();
   }
+}
+
+async function previewThreads(pid: number): Promise<string[]> {
+  if (process.platform !== "linux") return [];
+  const directory = `/proc/${pid}/task`;
+  const tasks = await readdir(directory);
+  const threads = await Promise.all(tasks.map(async tid => {
+    const name = await readFile(path.join(directory, tid, "comm"), "utf8").catch(() => "");
+    return name.startsWith("genehub-wasm-wo") ? tid : null;
+  }));
+  return threads.filter(tid => tid !== null).sort();
 }
 
 async function previewWorkerPids(cert: string): Promise<number[]> {

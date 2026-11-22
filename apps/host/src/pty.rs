@@ -199,6 +199,7 @@ impl wit::Host for crate::load::Host {
         cols: u16,
         rows: u16,
     ) -> Result<Resource<PtySession>, String> {
+        self.require_primary_instance()?;
         let session = PtySession::open(&argv, &cwd, &env, cols, rows)?;
         self.table.push(session).map_err(|error| error.to_string())
     }

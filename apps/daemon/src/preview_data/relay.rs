@@ -7,6 +7,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[cfg(target_family = "wasm")]
+use genet_wasi::net::TcpStream;
+#[cfg(not(target_family = "wasm"))]
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
@@ -102,14 +106,18 @@ pub(super) async fn connect(
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {ticket}").parse()?);
-    let socket = tokio::time::timeout(
-        IO_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(request, Some(config), true),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("preview Relay handshake timed out"))?
-    .map_err(|_| anyhow::anyhow!("preview Relay handshake failed"))?
-    .0;
+    #[cfg(not(target_family = "wasm"))]
+    let dial = async {
+        tokio_tungstenite::connect_async_with_config(request, Some(config), true)
+            .await
+            .map(|(socket, _)| socket)
+    };
+    #[cfg(target_family = "wasm")]
+    let dial = crate::transport::ws::connect_request(request, config);
+    let socket = tokio::time::timeout(IO_TIMEOUT, dial)
+        .await
+        .map_err(|_| anyhow::anyhow!("preview Relay handshake timed out"))?
+        .map_err(|_| anyhow::anyhow!("preview Relay handshake failed"))?;
     Ok(tokio::spawn(async move {
         let _ = transfer(socket, address).await;
     }))
@@ -248,9 +256,14 @@ async fn serve_stream(
     mut received: mpsc::Receiver<Input>,
     send: &mpsc::Sender<Message>,
 ) -> Result<()> {
-    let socket = tokio::time::timeout(IO_TIMEOUT, TcpStream::connect(address)).await??;
+    #[cfg(not(target_family = "wasm"))]
+    let dial = TcpStream::connect(address);
+    #[cfg(target_family = "wasm")]
+    let dial = TcpStream::connect("127.0.0.1", address.port());
+    let socket = tokio::time::timeout(IO_TIMEOUT, dial).await??;
+    #[cfg(not(target_family = "wasm"))]
     socket.set_nodelay(true)?;
-    let (mut reader, mut writer) = socket.into_split();
+    let (mut reader, mut writer) = tokio::io::split(socket);
     send.send(frame(ACCEPT, id, 0, &[])).await?;
     let incoming = async {
         while let Some(input) = received.recv().await {

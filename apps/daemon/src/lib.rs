@@ -46,7 +46,11 @@ mod build_support;
 pub use genet_frontdoor::channel;
 pub use genet_frontdoor::fs_lock;
 pub use genet_frontdoor::lifecycle;
+#[cfg(target_family = "wasm")]
+pub mod background_worker;
 pub mod logs;
+#[cfg(target_family = "wasm")]
+mod preview_data;
 pub mod process;
 pub mod processes;
 pub mod provider;

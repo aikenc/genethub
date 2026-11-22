@@ -32,6 +32,17 @@ pub struct Host {
     pub http: WasiHttpCtx,
     pub http_hooks: crate::http_hooks::Hooks,
     pub tls: WasiTlsCtx,
+    pub(crate) worker: crate::worker::State,
+    pub(crate) limits: wasmtime::StoreLimits,
+}
+
+impl Host {
+    pub(crate) fn require_primary_instance(&self) -> Result<(), String> {
+        if matches!(self.worker, crate::worker::State::Worker(_)) {
+            return Err("host operation requires a primary component entry".into());
+        }
+        Ok(())
+    }
 }
 
 impl WasiView for Host {
@@ -104,6 +115,7 @@ pub fn run_component(path: &Path, guest_args: &[String], entry: Entry) -> Result
 pub(crate) fn engine_config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    config.epoch_interruption(true);
     // This standalone host spawns and reaps native children. On macOS their
     // SIGCHLD can interrupt Wasmtime's Mach-port receive (MACH_RCV_INTERRUPTED),
     // whose handler aborts instead of retrying. Use Wasmtime's supported Unix
@@ -141,7 +153,11 @@ async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -
             // Bytes are re-read every round: "reload" exists so an update can
             // replace the artifact on disk and continue in this same pid.
             let component = load_component(&engine, path)?;
-            let (store, linker) = build_instance(&engine, guest_args, Some(path))?;
+            let (mut store, linker) = build_instance(&engine, guest_args, Some(path))?;
+            store.data_mut().worker = crate::worker::State::Manager(crate::worker::Manager::new(
+                engine.clone(),
+                component.clone(),
+            ));
             match run_daemon(&engine, store, &linker, &component).await? {
                 DaemonExit::Shutdown => return Ok(0),
                 DaemonExit::Reload => debug_log("guest asked to reload; re-instantiating"),
@@ -234,7 +250,8 @@ async fn run_agent(
 /// A trap can leave the resource table inconsistent. Dropping that Store
 /// often traps again (`resource has children`). The process is exiting;
 /// forgetting the table lets the OS reclaim fds and child pids.
-fn abandon_store<T>(store: Store<Host>, error: anyhow::Error) -> Result<T> {
+fn abandon_store<T>(mut store: Store<Host>, error: anyhow::Error) -> Result<T> {
+    store.data_mut().worker = crate::worker::State::Disabled;
     std::mem::forget(store);
     let message = format!("{error:#}");
     if message.contains("resource has children") {
@@ -361,7 +378,16 @@ fn build_instance(
         crate::guest_paths::env_value_for_guest(data_dir.to_string_lossy()),
     );
 
-    let store = Store::new(
+    let (store, mut linker) = worker_capable_instance(engine, wasi)?;
+    add_daemon_imports(&mut linker)?;
+    Ok((store, linker))
+}
+
+pub(crate) fn worker_capable_instance(
+    engine: &Engine,
+    mut wasi: WasiCtxBuilder,
+) -> Result<(Store<Host>, Linker<Host>)> {
+    let mut store = Store::new(
         engine,
         Host {
             table: ResourceTable::new(),
@@ -369,8 +395,12 @@ fn build_instance(
             http: WasiHttpCtx::new(),
             http_hooks: crate::http_hooks::Hooks,
             tls: WasiTlsCtxBuilder::new().build(),
+            worker: crate::worker::State::Disabled,
+            limits: wasmtime::StoreLimitsBuilder::new().build(),
         },
     );
+    store.epoch_deadline_callback(|_| Ok(wasmtime::UpdateDeadline::Continue(1)));
+    store.set_epoch_deadline(1);
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)
         .anyhow()
@@ -390,48 +420,62 @@ fn build_instance(
     wasmtime_wasi_tls::p2::add_to_linker(&mut linker, &tls)
         .anyhow()
         .context("wasi:tls linker")?;
-    crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
+    crate::bindings::genehub::host::worker::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
         state
     })
     .anyhow()
-    .context("process linker")?;
-    crate::bindings::genehub::host::file_lock::add_to_linker::<_, HasSelf<_>>(
+    .context("worker linker")?;
+    crate::bindings::genehub::host::scoped_fs::add_to_linker::<_, HasSelf<_>>(
         &mut linker,
         |state| state,
     )
+    .anyhow()
+    .context("scoped filesystem linker")?;
+    crate::bindings::genehub::host::tls_server::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("TLS server linker")?;
+    Ok((store, linker))
+}
+
+pub(crate) fn add_daemon_imports(linker: &mut Linker<Host>) -> Result<()> {
+    crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+        .anyhow()
+        .context("process linker")?;
+    crate::bindings::genehub::host::file_lock::add_to_linker::<_, HasSelf<_>>(linker, |state| {
+        state
+    })
     .anyhow()
     .context("file-lock linker")?;
-    crate::bindings::genehub::host::fs_perms::add_to_linker::<_, HasSelf<_>>(
-        &mut linker,
-        |state| state,
-    )
-    .anyhow()
-    .context("fs-perms linker")?;
-    crate::bindings::genehub::host::pty::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+    crate::bindings::genehub::host::fs_perms::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+        .anyhow()
+        .context("fs-perms linker")?;
+    crate::bindings::genehub::host::pty::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
         .anyhow()
         .context("pty linker")?;
-    crate::bindings::genehub::host::isolation::add_to_linker::<_, HasSelf<_>>(
-        &mut linker,
-        |state| state,
-    )
+    crate::bindings::genehub::host::isolation::add_to_linker::<_, HasSelf<_>>(linker, |state| {
+        state
+    })
     .anyhow()
     .context("isolation linker")?;
-    crate::bindings::genehub::host::rtc::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+    crate::bindings::genehub::host::rtc::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
         .anyhow()
         .context("rtc linker")?;
     crate::bindings::genehub::host::component_update::add_to_linker::<_, HasSelf<_>>(
-        &mut linker,
+        linker,
         |state| state,
     )
     .anyhow()
     .context("component-update linker")?;
     crate::bindings::genehub::host::image_preview::add_to_linker::<_, HasSelf<_>>(
-        &mut linker,
+        linker,
         |state| state,
     )
     .anyhow()
     .context("image-preview linker")?;
-    Ok((store, linker))
+    Ok(())
 }
 
 /// Compile in memory from the bytes we just read, or deserialize a derived

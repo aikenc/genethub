@@ -64,7 +64,7 @@ fn document(view: &View, media_type: &'static str, source: &'static str) -> Resp
 }
 
 pub(super) async fn read_prefix(
-    file: &mut tokio::fs::File,
+    file: &mut (impl tokio::io::AsyncRead + Unpin),
     original_length: u64,
     parent_origin: &header::HeaderValue,
 ) -> io::Result<(Bytes, u64)> {

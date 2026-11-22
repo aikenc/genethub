@@ -519,12 +519,14 @@ impl wit::Host for crate::load::Host {
     // context), so the work runs on the blocking pool rather than on the
     // executor that is driving the guest.
     async fn check(&mut self) -> Result<wit::Status, String> {
+        self.require_primary_instance()?;
         tokio::task::spawn_blocking(|| check().map_err(|error| error.to_string()))
             .await
             .map_err(|error| format!("component update check task: {error}"))?
     }
 
     async fn apply(&mut self, request_id: String) -> Result<(), String> {
+        self.require_primary_instance()?;
         tokio::task::spawn_blocking(move || apply(&request_id).map_err(|error| error.to_string()))
             .await
             .map_err(|error| format!("component update apply task: {error}"))?

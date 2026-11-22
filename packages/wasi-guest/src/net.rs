@@ -68,6 +68,13 @@ impl TcpStream {
         }))
     }
 
+    pub fn shutdown_send(&self) -> io::Result<()> {
+        use wasi::sockets::tcp::ShutdownType;
+        self.socket
+            .shutdown(ShutdownType::Send)
+            .map_err(|error| socket_error("shutting down TCP send", error))
+    }
+
     /// Splits into the raw WASI stream pair, giving up the ability to read and
     /// write through this type. The socket goes with them: whoever holds the
     /// streams is the one who needs the connection to stay open.
@@ -203,8 +210,9 @@ impl AsyncWrite for TcpStream {
         Poll::Ready(flush(&self.output))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        std::task::ready!(self.as_mut().poll_flush(cx))?;
+        Poll::Ready(self.shutdown_send())
     }
 }
 

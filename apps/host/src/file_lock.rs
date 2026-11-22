@@ -59,6 +59,7 @@ impl wit::HostHandle for crate::load::Host {
 
 impl wit::Host for crate::load::Host {
     async fn open(&mut self, path: String) -> Result<Resource<LockHandle>, String> {
+        self.require_primary_instance()?;
         let host_path = crate::guest_paths::host_path_from_guest(&path);
         let file = OpenOptions::new()
             .read(true)

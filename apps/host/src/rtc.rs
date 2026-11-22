@@ -322,6 +322,7 @@ impl wit::Host for crate::load::Host {
         offer: String,
         config: wit::Config,
     ) -> Result<Resource<RtcSession>, String> {
+        self.require_primary_instance()?;
         let session = RtcSession::accept(&offer, &config).await?;
         self.table.push(session).map_err(|error| error.to_string())
     }

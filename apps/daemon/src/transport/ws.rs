@@ -48,7 +48,14 @@ pub async fn connect(url: &str, config: WebSocketConfig) -> Result<Socket, Error
 
 #[cfg(target_family = "wasm")]
 pub async fn connect(url: &str, config: WebSocketConfig) -> Result<Socket, Error> {
-    let request = url.into_client_request()?;
+    connect_request(url.into_client_request()?, config).await
+}
+
+#[cfg(target_family = "wasm")]
+pub async fn connect_request(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    config: WebSocketConfig,
+) -> Result<Socket, Error> {
     tracing::debug!("guest opening the transport");
     let transport = guest::open(&request).await?;
     tracing::debug!("guest transport open; starting the WebSocket upgrade");

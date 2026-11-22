@@ -2,6 +2,7 @@
 //! TLS private key, browser connections and a dedicated Fabric uplink.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use genehub_proto::StaticPreviewGrant;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_family = "wasm"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
@@ -19,19 +21,29 @@ use uuid::Uuid;
 use crate::config::Enrollment;
 use crate::dataplane::endpoint::PeerAccess;
 use crate::hub;
+#[cfg(not(target_family = "wasm"))]
 use crate::os_process::{Child, ChildStdin, ChildStdout, Command};
 use crate::state::Shared;
 use crate::workspace::ResolvedWorkspacePath;
+#[cfg(target_family = "wasm")]
+use genet_wasi::wit::genehub::host::worker as background;
 
 const START_TIMEOUT: Duration = Duration::from_secs(12);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const VIEW_SECONDS: u64 = 900;
+const MAX_VIEWS: usize = 64;
 
+#[derive(Clone)]
 struct LocalConfig {
+    #[cfg(not(target_family = "wasm"))]
     cli: PathBuf,
     cert: PathBuf,
     key: PathBuf,
+    #[cfg(target_family = "wasm")]
+    static_threads: usize,
+    #[cfg(target_family = "wasm")]
+    run_threads: bool,
 }
 
 impl LocalConfig {
@@ -43,12 +55,27 @@ impl LocalConfig {
             let path = PathBuf::from(std::env::var_os(name)?);
             path.is_absolute().then_some(path)
         };
+        #[cfg(target_family = "wasm")]
+        let static_threads = std::env::var("GENEHUB_PREVIEW_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value <= 5)
+            .unwrap_or(1);
         Some(Self {
             // The native host injects the verified front door into the guest
             // as GENEHUB_CLI. Its own startup override is host-only.
+            #[cfg(not(target_family = "wasm"))]
             cli: file("GENEHUB_CLI")?,
             cert: file("GENEHUB_PREVIEW_TLS_CERT")?,
             key: file("GENEHUB_PREVIEW_TLS_KEY")?,
+            #[cfg(target_family = "wasm")]
+            static_threads,
+            #[cfg(target_family = "wasm")]
+            run_threads: match std::env::var("GENEHUB_PREVIEW_SERVICE_THREADS").as_deref() {
+                Ok("0") => false,
+                Ok("1") => true,
+                _ => static_threads > 0,
+            },
         })
     }
 }
@@ -132,8 +159,17 @@ impl Site {
 }
 
 struct Worker {
+    #[cfg(target_family = "wasm")]
+    instance: Execution,
+    #[cfg(target_family = "wasm")]
+    extra_workers: HashMap<Executor, Execution>,
+    #[cfg(target_family = "wasm")]
+    config: LocalConfig,
+    #[cfg(not(target_family = "wasm"))]
     child: Child,
+    #[cfg(not(target_family = "wasm"))]
     input: ChildStdin,
+    #[cfg(not(target_family = "wasm"))]
     output: BufReader<ChildStdout>,
     suffix: String,
     workbench_origin: String,
@@ -143,7 +179,102 @@ struct Worker {
     usable: bool,
 }
 
+#[cfg(target_family = "wasm")]
+enum Execution {
+    Thread(background::Instance),
+    Inline {
+        outgoing: tokio::sync::mpsc::Sender<Vec<u8>>,
+        incoming: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    },
+}
+
+#[cfg(target_family = "wasm")]
+impl Execution {
+    fn start(config: &LocalConfig, suffix: &str, role: &str) -> Result<Self> {
+        let cert = config.cert.to_string_lossy().into_owned();
+        let key = config.key.to_string_lossy().into_owned();
+        if config.static_threads == 0 && role == "preview" {
+            let (outgoing, commands) = tokio::sync::mpsc::channel(2);
+            let (replies, incoming) = tokio::sync::mpsc::channel(2);
+            let suffix = suffix.to_owned();
+            tokio::spawn(async move {
+                let _ = crate::preview_data::run_guest(
+                    &cert,
+                    &key,
+                    &suffix,
+                    crate::preview_data::guest_control::Port::Local {
+                        incoming: commands,
+                        outgoing: replies,
+                    },
+                    true,
+                )
+                .await;
+            });
+            return Ok(Self::Inline { outgoing, incoming });
+        }
+        background::start(role, &[cert, key, suffix.to_owned()])
+            .map(Self::Thread)
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn closed(&self) -> bool {
+        match self {
+            Self::Thread(instance) => instance.closed(),
+            Self::Inline { outgoing, .. } => outgoing.is_closed(),
+        }
+    }
+
+    fn id(&self) -> Option<u64> {
+        match self {
+            Self::Thread(instance) => Some(instance.id()),
+            Self::Inline { .. } => None,
+        }
+    }
+
+    async fn command(&mut self, command: &Value) -> Result<bool> {
+        self.send(serde_json::to_vec(command)?)?;
+        let reply = tokio::time::timeout(START_TIMEOUT, self.receive()).await??;
+        let reply: Value = serde_json::from_slice(&reply)?;
+        reply
+            .get("ok")
+            .and_then(Value::as_bool)
+            .context("invalid preview worker response")
+    }
+
+    fn send(&self, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Thread(instance) => instance.send(&bytes).map_err(anyhow::Error::msg),
+            Self::Inline { outgoing, .. } => outgoing
+                .try_send(bytes)
+                .map_err(|_| anyhow::anyhow!("inline preview mailbox closed or full")),
+        }
+    }
+
+    async fn receive(&mut self) -> Result<Vec<u8>> {
+        match self {
+            Self::Thread(instance) => loop {
+                if let Some(bytes) = instance.receive().map_err(anyhow::Error::msg)? {
+                    return Ok(bytes);
+                }
+                genet_wasi::poll::idle().await;
+            },
+            Self::Inline { incoming, .. } => {
+                incoming.recv().await.context("inline preview stopped")
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Executor {
+    Static(usize),
+    Service(String),
+}
+
 struct Lease {
+    #[cfg(target_family = "wasm")]
+    executor: Option<(Executor, u64)>,
     share: Option<String>,
     expires: Instant,
     peer: Option<PeerAccess>,
@@ -164,27 +295,42 @@ fn revoked(peer: &PeerAccess, state: &Shared) -> bool {
 
 impl Worker {
     async fn start(config: &LocalConfig, enrollment: Enrollment, uplink: &Uplink) -> Result<Self> {
-        let mut command = Command::new(crate::guest_paths::host_path(&config.cli));
-        command
-            .arg("static-preview-worker")
-            .arg(crate::guest_paths::host_path(&config.cert))
-            .arg(crate::guest_paths::host_path(&config.key))
-            .arg(&uplink.suffix)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().context("启动独立预览进程失败")?;
-        let input = child.stdin.take().context("missing preview worker input")?;
-        let output = BufReader::new(
-            child
-                .stdout
-                .take()
-                .context("missing preview worker output")?,
-        );
+        #[cfg(target_family = "wasm")]
+        let instance = Execution::start(config, &uplink.suffix, "preview")?;
+        #[cfg(not(target_family = "wasm"))]
+        let (child, input, output) = {
+            let mut command = Command::new(crate::guest_paths::host_path(&config.cli));
+            command
+                .arg("static-preview-worker")
+                .arg(crate::guest_paths::host_path(&config.cert))
+                .arg(crate::guest_paths::host_path(&config.key))
+                .arg(&uplink.suffix)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let mut child = command.spawn().context("启动独立预览服务失败")?;
+            let input = child.stdin.take().context("missing preview worker input")?;
+            let output = BufReader::new(
+                child
+                    .stdout
+                    .take()
+                    .context("missing preview worker output")?,
+            );
+            (child, input, output)
+        };
         let mut worker = Self {
+            #[cfg(target_family = "wasm")]
+            instance,
+            #[cfg(target_family = "wasm")]
+            extra_workers: HashMap::new(),
+            #[cfg(target_family = "wasm")]
+            config: config.clone(),
+            #[cfg(not(target_family = "wasm"))]
             child,
+            #[cfg(not(target_family = "wasm"))]
             input,
+            #[cfg(not(target_family = "wasm"))]
             output,
             suffix: uplink.suffix.clone(),
             workbench_origin: uplink.workbench_origin.clone(),
@@ -200,34 +346,147 @@ impl Worker {
             .and_then(Value::as_u64)
             .is_none_or(|port| port == 0 || port > 65535)
         {
-            bail!("独立预览进程未就绪");
+            bail!("独立预览服务未就绪");
+        }
+        #[cfg(target_family = "wasm")]
+        for index in 1..config.static_threads {
+            worker.prepare_executor(&Executor::Static(index)).await?;
         }
         worker.join(uplink).await?;
         Ok(worker)
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn read(&mut self) -> Result<Value> {
         let mut line = String::new();
         if tokio::time::timeout(START_TIMEOUT, self.output.read_line(&mut line)).await?? == 0 {
-            bail!("独立预览进程已退出");
+            bail!("独立预览服务已退出");
         }
         Ok(serde_json::from_str(&line)?)
     }
 
+    #[cfg(target_family = "wasm")]
+    async fn read(&mut self) -> Result<Value> {
+        let bytes = tokio::time::timeout(START_TIMEOUT, self.instance.receive()).await??;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    fn exited(&mut self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        return !matches!(self.child.try_wait(), Ok(None));
+        #[cfg(target_family = "wasm")]
+        return self.instance.closed();
+    }
+
     async fn command(&mut self, command: Value) -> Result<bool> {
         self.usable = false;
-        tokio::time::timeout(
-            START_TIMEOUT,
-            crate::adapter::stdio::write_json_line(&mut self.input, &command),
-        )
-        .await??;
-        let reply = self.read().await?;
-        let ok = reply
-            .get("ok")
-            .and_then(Value::as_bool)
-            .context("invalid preview worker response")?;
+        #[cfg(target_family = "wasm")]
+        let ok = self.instance.command(&command).await?;
+        #[cfg(not(target_family = "wasm"))]
+        let ok = {
+            tokio::time::timeout(
+                START_TIMEOUT,
+                crate::adapter::stdio::write_json_line(&mut self.input, &command),
+            )
+            .await??;
+            self.read()
+                .await?
+                .get("ok")
+                .and_then(Value::as_bool)
+                .context("invalid preview worker response")?
+        };
         self.usable = true;
         Ok(ok)
+    }
+
+    #[cfg(target_family = "wasm")]
+    async fn prepare_executor(&mut self, executor: &Executor) -> Result<&mut Execution> {
+        if !self.extra_workers.contains_key(executor) {
+            let mut execution = Execution::start(&self.config, &self.suffix, "preview-executor")?;
+            let ready = tokio::time::timeout(START_TIMEOUT, execution.receive()).await??;
+            let ready: Value = serde_json::from_slice(&ready)?;
+            if ready.get("port").and_then(Value::as_u64) != Some(0) {
+                bail!("预览工作线程尚未就绪");
+            }
+            self.extra_workers.insert(executor.clone(), execution);
+        }
+        self.extra_workers
+            .get_mut(executor)
+            .context("预览工作线程尚未就绪")
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn executor_for(&self, site: &Site, service: Option<&Value>) -> Option<Executor> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        if self.config.run_threads {
+            if let Some(run) = service.and_then(|value| value["runId"].as_str()) {
+                return Some(Executor::Service(run.to_owned()));
+            }
+        }
+        if self.config.static_threads <= 1 {
+            return None;
+        }
+        let mut hash = DefaultHasher::new();
+        site.absolute_root.hash(&mut hash);
+        let index = (hash.finish() % self.config.static_threads as u64) as usize;
+        (index != 0).then_some(Executor::Static(index))
+    }
+
+    #[cfg(target_family = "wasm")]
+    async fn open_routed(
+        &mut self,
+        executor: &Executor,
+        host: &str,
+        command: &Value,
+    ) -> Result<u64> {
+        let target = self.prepare_executor(executor).await?;
+        match target.command(command).await {
+            Ok(true) => {}
+            result => {
+                if result.is_err() {
+                    self.extra_workers.remove(executor);
+                }
+                bail!("预览工作线程拒绝了视图");
+            }
+        }
+        let id = target.id().context("预览工作线程没有路由句柄")?;
+        if !self
+            .command(json!({"op":"route","host":host,"target":id}))
+            .await?
+        {
+            if let Some(target) = self.extra_workers.get_mut(executor) {
+                let _ = target.command(&json!({"op":"close","host":host})).await;
+            }
+            bail!("独立预览无法路由到工作线程");
+        }
+        Ok(id)
+    }
+
+    fn serving_lease(&self, lease: &Lease) -> bool {
+        #[cfg(target_family = "wasm")]
+        return lease.executor.as_ref().is_none_or(|(executor, id)| {
+            self.extra_workers
+                .get(executor)
+                .is_some_and(|worker| worker.id() == Some(*id) && !worker.closed())
+        });
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let _ = lease;
+            true
+        }
+    }
+
+    fn collect_idle(&mut self) {
+        #[cfg(target_family = "wasm")]
+        self.extra_workers.retain(|executor, _| {
+            matches!(executor, Executor::Static(_))
+                || self.views.values().any(|lease| {
+                    lease
+                        .executor
+                        .as_ref()
+                        .is_some_and(|(key, _)| key == executor)
+                })
+        });
     }
 
     async fn join(&mut self, uplink: &Uplink) -> Result<()> {
@@ -254,11 +513,29 @@ impl Worker {
     }
 
     async fn close_view(&mut self, host: &str) -> Result<()> {
-        if !self.command(json!({"op":"close","host":host})).await? {
+        let command = json!({"op":"close","host":host});
+        #[cfg(target_family = "wasm")]
+        if let Some((executor, id)) = self
+            .views
+            .get(host)
+            .and_then(|lease| lease.executor.clone())
+        {
+            if let Some(target) = self
+                .extra_workers
+                .get_mut(&executor)
+                .filter(|target| target.id() == Some(id))
+            {
+                if !matches!(target.command(&command).await, Ok(true)) {
+                    self.extra_workers.remove(&executor);
+                }
+            }
+        }
+        if !self.command(command).await? {
             self.usable = false;
-            bail!("独立预览进程无法关闭视图");
+            bail!("独立预览服务无法关闭视图");
         }
         self.views.remove(host);
+        self.collect_idle();
         Ok(())
     }
 
@@ -337,8 +614,10 @@ impl Manager {
         let mut slot = self.worker.lock().await;
         if slot.as_mut().is_some_and(|worker| {
             !worker.usable
-                || enrollment.as_ref().is_none_or(|enrollment| !worker.belongs_to(enrollment))
-                || !matches!(worker.child.try_wait(), Ok(None))
+                || enrollment
+                    .as_ref()
+                    .is_none_or(|enrollment| !worker.belongs_to(enrollment))
+                || worker.exited()
         }) {
             let retired = slot.take();
             drop(slot);
@@ -351,14 +630,20 @@ impl Manager {
             return Ok(());
         };
         if let Some(worker) = slot.as_mut() {
+            #[cfg(target_family = "wasm")]
+            worker
+                .extra_workers
+                .retain(|_, executor| !executor.closed());
             let now = Instant::now();
             let expired_or_revoked: Vec<_> = worker
                 .views
                 .iter()
                 .filter_map(|(host, lease)| {
                     let expired = lease.expires <= now;
-                    (expired || lease.peer.as_ref().is_some_and(|peer| revoked(peer, state)))
-                        .then(|| (host.clone(), !expired))
+                    (expired
+                        || !worker.serving_lease(lease)
+                        || lease.peer.as_ref().is_some_and(|peer| revoked(peer, state)))
+                    .then(|| (host.clone(), !expired))
                 })
                 .collect();
             let mut revoked_routes = Vec::new();
@@ -376,6 +661,11 @@ impl Manager {
                     revoked_routes.push(host);
                 }
             }
+            worker.collect_idle();
+            #[cfg(target_family = "wasm")]
+            for index in 1..worker.config.static_threads {
+                worker.prepare_executor(&Executor::Static(index)).await?;
+            }
             let online = worker.command(json!({"op":"relay_status"})).await;
             drop(slot);
             remove_routes(&enrollment, revoked_routes).await;
@@ -386,7 +676,9 @@ impl Manager {
             drop(slot);
         }
 
-        let uplink = hub::Client::new(&enrollment.hub_url).preview_uplink(&enrollment).await?;
+        let uplink = hub::Client::new(&enrollment.hub_url)
+            .preview_uplink(&enrollment)
+            .await?;
         let mut slot = self.worker.lock().await;
         if let Some(worker) = slot.as_mut() {
             if worker.usable {
@@ -395,7 +687,7 @@ impl Manager {
             // A concurrent open or revoke lost the worker while we fetched the ticket.
             return Ok(());
         }
-        // Keep control requests free to report readiness while the child starts.
+        // Keep control requests free to report readiness while the worker starts.
         drop(slot);
         let worker = Worker::start(config, enrollment, &uplink).await?;
         let mut slot = self.worker.lock().await;
@@ -462,6 +754,9 @@ impl Manager {
         if ttl == 0 {
             bail!("预览授权已到期");
         }
+        if worker.views.len() >= MAX_VIEWS {
+            bail!("该机器的独立预览视图已满");
+        }
         let host = format!("{}.{}", Uuid::new_v4().simple(), worker.suffix);
         let code = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let digest = format!("{:x}", Sha256::digest(code.as_bytes()));
@@ -471,20 +766,37 @@ impl Manager {
             None => json!({"kind":"site"}),
         };
         let expires = Instant::now() + Duration::from_secs(ttl);
-        if !worker
-            .command(json!({
-                "op":"open","host":host,"workspace":crate::guest_paths::host_path(&site.workspace),
-                "root":site.root,"entry":site.entry,"workbench_origin":worker.workbench_origin,
-                "ttl_seconds":ttl,"expires_at_ms":expires_at,"scope":scope,"bootstrap_digest":digest,
-                "https_port":worker.port,"service":service,"review":review,
-            }))
-            .await?
-        {
-            bail!("独立预览进程拒绝了文件或租约");
+        #[cfg(target_family = "wasm")]
+        let workspace = &site.workspace;
+        #[cfg(not(target_family = "wasm"))]
+        let workspace = crate::guest_paths::host_path(&site.workspace);
+        #[cfg(target_family = "wasm")]
+        let executor = worker.executor_for(&site, service.as_ref());
+        let command = json!({
+            "op":"open","host":host,"workspace":workspace,
+            "root":site.root,"entry":site.entry,"workbench_origin":worker.workbench_origin,
+            "ttl_seconds":ttl,"expires_at_ms":expires_at,"scope":scope,"bootstrap_digest":digest,
+            "https_port":worker.port,"service":service,"review":review,
+        });
+        #[cfg(target_family = "wasm")]
+        let executor = if let Some(executor) = executor {
+            let id = worker.open_routed(&executor, &host, &command).await?;
+            Some((executor, id))
+        } else {
+            if !worker.command(command).await? {
+                bail!("独立预览服务拒绝了文件或租约");
+            }
+            None
+        };
+        #[cfg(not(target_family = "wasm"))]
+        if !worker.command(command).await? {
+            bail!("独立预览服务拒绝了文件或租约");
         }
         worker.views.insert(
             host.clone(),
             Lease {
+                #[cfg(target_family = "wasm")]
+                executor,
                 share: share.map(|(id, _)| id.to_owned()),
                 expires,
                 peer,

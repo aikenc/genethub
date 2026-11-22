@@ -1,8 +1,8 @@
 //! The one v2 artifact (`genehub_guest.wasm`).
 //!
-//! One component, two entries (`wit/genehub-host.wit` world `daemon`): the
+//! One component, three entries (`wit/genehub-host.wit` world `daemon`): the
 //! shell picks one per OS process — `run` for the resident daemon, `agent-run`
-//! for each agent it spawns. Nothing native is left to fall back to.
+//! for each agent it spawns, and `worker-run` for a background Store.
 
 #![cfg(target_family = "wasm")]
 
@@ -29,6 +29,10 @@ impl Guest for GenehubGuest {
                 genet_daemon::run::Exit::Reload => "reload".to_string(),
             })
             .map_err(|error| format!("{error:#}"))
+    }
+
+    fn worker_run(entry: String, arguments: Vec<String>) -> Result<(), String> {
+        runtime(false)?.block_on(genet_daemon::background_worker::run(&entry, arguments))
     }
 
     /// One agent process: JSONL over stdio, exit code as the return value.
