@@ -929,7 +929,7 @@ pub async fn run_timer(state: Shared) {
         if refreshed.is_none_or(|at| at.elapsed() >= ROSTER_EVERY) {
             roster = state
                 .workspaces
-                .list()
+                .list_for_maintenance()
                 .await
                 .into_iter()
                 .filter(|workspace| workspace.terminated_at_ms.is_none())
