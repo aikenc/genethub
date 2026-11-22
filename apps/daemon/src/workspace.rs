@@ -402,7 +402,7 @@ impl Workspaces {
             discovered.last = clean.then_some((discovery.roots, discovery.problems));
         }
         *self.discovery.lock().expect("never poisoned") = discovered;
-        let projects = self.list().await;
+        let projects = self.list_for_maintenance().await;
         let mut directories = HashSet::new();
         let now = std::time::Instant::now();
         for project in &projects {
@@ -711,12 +711,26 @@ impl Workspaces {
     }
 
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
+        self.list_projects(true).await
+    }
+
+    pub(crate) async fn list_for_maintenance(&self) -> Vec<WorkspaceInfo> {
+        self.list_projects(false).await
+    }
+
+    async fn list_projects(&self, include_preview_entries: bool) -> Vec<WorkspaceInfo> {
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let mut out: Vec<WorkspaceInfo> = entries
             .values()
             .filter(|entry| !entry.removed)
-            .map(|entry| self.describe_with_space(entry, &config))
+            .map(|entry| {
+                if include_preview_entries {
+                    self.describe_with_space(entry, &config)
+                } else {
+                    self.describe_project(entry, &config)
+                }
+            })
             .collect();
         drop(config);
         drop(entries);
@@ -932,9 +946,14 @@ impl Workspaces {
     }
 
     fn describe_with_space(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
-        let mut info = describe(entry);
+        let mut info = self.describe_project(entry, config);
         let preview_entries = read_preview_entries(entry);
         info.preview_entries = (!preview_entries.is_empty()).then_some(preview_entries);
+        info
+    }
+
+    fn describe_project(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
+        let mut info = describe(entry);
         let builtin_root = self
             .config_path
             .parent()
@@ -1693,6 +1712,10 @@ fn apply_termination(
     config: &Config,
     terminations: &HashMap<PathBuf, i64>,
 ) {
+    if terminations.is_empty() {
+        info.terminated_at_ms = None;
+        return;
+    }
     info.terminated_at_ms = terminated_by(&lineage(config, &info.id), |root| {
         terminations.get(root).copied()
     })

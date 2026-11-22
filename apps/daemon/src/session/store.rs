@@ -777,26 +777,28 @@ impl WorkspaceHomes {
         let Ok(homes) = self.homes.read() else {
             return Vec::new();
         };
-        homes
-            .roots
-            .keys()
-            .filter(|root| {
-                workspace.is_none_or(|id| {
-                    homes
-                        .workspaces
-                        .get(id)
-                        .is_some_and(|home| &home.root == *root)
-                })
-            })
-            .map(|root| {
-                let projects = homes
-                    .workspaces
-                    .iter()
-                    .filter(|(_, candidate)| &candidate.root == root)
-                    .map(|(id, home)| (id.clone(), home.clone()))
-                    .collect();
-                (projects, sessions_dir(root))
-            })
+        let scoped_root = match workspace {
+            Some(id) => match homes.workspaces.get(id) {
+                Some(home) => Some(home.root.as_path()),
+                None => return Vec::new(),
+            },
+            None => None,
+        };
+        // Group projects in one pass. Reconciliation costs one registry walk
+        // even when every project has a separate physical home.
+        let mut projects_by_root: BTreeMap<&Path, Vec<_>> = BTreeMap::new();
+        for (id, home) in &homes.workspaces {
+            let root = home.root.as_path();
+            if scoped_root.is_none_or(|scope| root == scope) {
+                projects_by_root
+                    .entry(root)
+                    .or_default()
+                    .push((id.clone(), home.clone()));
+            }
+        }
+        projects_by_root
+            .into_iter()
+            .map(|(root, projects)| (projects, sessions_dir(root)))
             .collect()
     }
 
@@ -2664,7 +2666,13 @@ impl Store {
                 // still acquires its physical lock and replans after waiting;
                 // final generation/registry fences also cover skipped homes.
                 if cache.homes.get(&sessions).is_some_and(|home| {
-                    home.seen.owners == home_owners(&projects)
+                    home.seen
+                        .owners
+                        .iter()
+                        .map(|(id, key, aliases)| (id, key, aliases))
+                        .eq(projects
+                            .iter()
+                            .map(|(id, home)| (id, &home.project_key, &home.aliases)))
                         && !home.listing.due(started)
                         && !home.tombstones.due(started)
                         && home
@@ -2673,7 +2681,9 @@ impl Store {
                             .iter()
                             .filter(|id| !home.seen.deleted.contains(*id))
                             .all(|id| {
-                                let path = sessions.join(id).join("meta.json");
+                                let mut path = sessions.clone();
+                                path.push(id);
+                                path.push("meta.json");
                                 cache
                                     .watches
                                     .get(&path)
