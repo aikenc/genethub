@@ -20,7 +20,22 @@ const SCRIPT: &str = concat!(
       mutationCount += records.length;
       scheduleMarks();
     }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    function reportLocation(action) {
+      sendRuntime("review-location", "", { url: String(location.href).slice(0, 4096),
+        title: String(document.title).slice(0, 500), action: action });
+    }
+    window.addEventListener("hashchange", function() { reportLocation("navigate"); });
+    ["pushState", "replaceState"].forEach(function(method) {
+      var original = history[method];
+      history[method] = function() {
+        var result = original.apply(history, arguments);
+        reportLocation(method === "replaceState" ? "replace" : "navigate");
+        return result;
+      };
+    });
     send("log", { topic: "html-preview-iframe", phase: "bridge-ready", url: safeUrl(location.href) });
+    reportLocation("navigate");
+    document.addEventListener("DOMContentLoaded", function() { reportLocation("ready"); }, { once: true });
     })();
 "#,
 );
@@ -29,7 +44,7 @@ pub(super) fn headers(headers: &mut HeaderMap, view: &View) {
     headers.insert(header::CONTENT_SECURITY_POLICY, view.frame_policy.clone());
     headers.insert(
         "cross-origin-resource-policy",
-        header::HeaderValue::from_static("same-site"),
+        header::HeaderValue::from_static("cross-origin"),
     );
     headers.insert(
         "cross-origin-embedder-policy",

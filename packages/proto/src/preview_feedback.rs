@@ -19,6 +19,9 @@ pub struct PreviewSourceInfo {
     pub display_path: String,
     pub absolute_path: String,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub feedback_writable: Option<bool>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -43,12 +46,18 @@ pub enum PreviewFeedbackOperation {
         ttl_seconds: u32,
         #[serde(default)]
         resources: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        view_only: Option<bool>,
     },
     ShareStatic {
         path: String,
         ttl_seconds: u32,
         #[serde(default)]
         resources: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        view_only: Option<bool>,
     },
     OpenStatic {
         path: String,
@@ -113,6 +122,9 @@ pub enum PreviewFeedbackOperation {
         annotation_ids: Vec<String>,
         bundle_paths: Vec<String>,
     },
+    List {
+        path: String,
+    },
     Read {
         id: String,
     },
@@ -160,6 +172,16 @@ pub struct PreviewFeedbackRecord {
     pub trust: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreviewFeedbackSummary {
+    pub id: String,
+    pub description: String,
+    pub version: String,
+    #[ts(type = "number")]
+    pub submitted_at_ms: i64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", content = "data", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum PreviewFeedbackResponse {
@@ -170,5 +192,6 @@ pub enum PreviewFeedbackResponse {
     Upload(SessionArtifactUpload),
     Artifact(SessionArtifactBundle),
     Receipt(Box<PreviewFeedbackRecord>),
+    List(Vec<PreviewFeedbackSummary>),
     Ack,
 }

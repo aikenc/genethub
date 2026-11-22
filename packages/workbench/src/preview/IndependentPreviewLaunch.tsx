@@ -160,7 +160,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
     const player = reviewService && htmlServiceMedia(reviewService.descriptor)?.protocol === "pixel-streaming/1";
     const stopUrl = player ? new URL(window.location.href) : undefined;
     stopUrl?.searchParams.delete("service");
-    return <IndependentPreviewReview client={reviewClient} source={source} grant={grant}
+    return <IndependentPreviewReview key={grant.action} client={reviewClient} source={source} grant={grant}
       feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} stopPlayerUrl={stopUrl?.href}
       media={reviewService?.descriptor.media && !player ? reviewService : undefined} />;
   }

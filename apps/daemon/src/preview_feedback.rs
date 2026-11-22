@@ -29,6 +29,8 @@ struct Share {
     revoked: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     independent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    view_only: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,6 +245,7 @@ pub async fn source(state: &Shared, workspace: &str, path: &str) -> Result<Previ
             .to_string_lossy()
             .into_owned(),
         version: file.metadata.version,
+        feedback_writable: None,
     })
 }
 async fn grant(state: &Shared, workspace: &str, id: &str) -> Result<Share> {
@@ -383,7 +386,7 @@ async fn authorize_scope(
     use PreviewFeedbackOperation as Op;
     let path = match operation {
         Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. }
-        | Op::ShareStatic { path, .. } | Op::OpenStatic { path, .. } => {
+        | Op::ShareStatic { path, .. } | Op::OpenStatic { path, .. } | Op::List { path } => {
             crate::file_access::display(&resolve_source(state, workspace, path).await?.absolute)
         }
         Op::Revoke { share_id } => {
@@ -669,14 +672,28 @@ pub(crate) async fn handle(
         }
         authorize_scope(state, caller, workspace, scope, &request.operation).await?;
     }
-    if let Some(id) = share_id(caller) {
-        grant(state, workspace, id).await?;
-    }
+    let share = if let Some(id) = share_id(caller) {
+        let share = grant(state, workspace, id).await?;
+        if share.view_only && !matches!(&request.operation, Op::Source { .. } | Op::OpenStatic { .. }) {
+            bail!("preview share allows viewing only");
+        }
+        Some(share)
+    } else {
+        None
+    };
     // Metadata and immutable receipt reads also work on read-only roots.
     match &request.operation {
         Op::Source { path } => {
             authorize_asset(state, caller, workspace, path).await?;
-            return Ok(Out::Source(source(state, workspace, path).await?));
+            let mut info = source(state, workspace, path).await?;
+            if let Some(share) = &share {
+                info.feedback_writable = Some(!share.view_only);
+                info.machine_name.clear();
+                info.project_name.clear();
+                info.absolute_path.clear();
+                info.display_path.clone_from(&info.relative_path);
+            }
+            return Ok(Out::Source(info));
         }
         Op::OpenStatic { path, service_run_id, player_allow_turn, review } => {
             let state = state.clone();
@@ -691,6 +708,43 @@ pub(crate) async fn handle(
             // abandons its RPC while a native operation is in flight.
             return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref(), player_allow_turn, review).await })
                 .await?.map(Out::StaticPreview);
+        }
+        Op::List { path } => {
+            if share.is_some() {
+                bail!("share permission does not include project feedback retrieval");
+            }
+            let file = resolve_source(state, workspace, path).await?;
+            let absolute = crate::file_access::display(&file.absolute);
+            let drafts = home(state, workspace).await?.join("drafts");
+            let entries = match fs::read_dir(drafts) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Out::List(vec![])),
+                Err(error) => return Err(error.into()),
+            };
+            let mut results: Vec<genehub_proto::PreviewFeedbackSummary> = Vec::new();
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue };
+                if valid_id(&id, "pf_").is_err() {
+                    continue;
+                }
+                let Ok(record) = read::<PreviewFeedbackRecord>(&entry.path().join("feedback.json")) else { continue };
+                if record.id != id || record.source.absolute_path != absolute {
+                    continue;
+                }
+                results.push(genehub_proto::PreviewFeedbackSummary {
+                    id,
+                    description: record.description.chars().take(160).collect(),
+                    version: record.source.version,
+                    submitted_at_ms: record.submitted_at_ms,
+                });
+                results.sort_unstable_by(|a, b| b.submitted_at_ms.cmp(&a.submitted_at_ms).then_with(|| a.id.cmp(&b.id)));
+                results.truncate(25);
+            }
+            return Ok(Out::List(results));
         }
         Op::Read { id } => {
             if share_id(caller).is_some() {
@@ -754,10 +808,12 @@ pub(crate) async fn handle(
             path,
             ttl_seconds,
             resources,
+            view_only,
         } | Op::ShareStatic {
             path,
             ttl_seconds,
             resources,
+            view_only,
         } => {
             if share_id(caller).is_some() {
                 bail!("a shared preview cannot create another share");
@@ -801,6 +857,7 @@ pub(crate) async fn handle(
                 expires_at_ms: now() + i64::from(ttl_seconds) * 1000,
                 revoked: false,
                 independent,
+                view_only: view_only.unwrap_or(false),
             };
             save(
                 &home(state, workspace)

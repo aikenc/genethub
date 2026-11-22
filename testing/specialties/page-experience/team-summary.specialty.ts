@@ -52,7 +52,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await artifactLink.click();
     await page.getByRole("heading", { name: "Remote artifact on machine B", exact: true }).waitFor();
     t.assertions.assert(extraSockets === socketsBeforePreview, "cross-machine preview opened a duplicate machine connection");
-    await page.getByRole("button", { name: "关闭预览", exact: true }).click();
+    await page.getByRole("button", { name: "返回对话", exact: true }).click();
     if (width < 768) await page.getByRole("button", { name: "会话列表", exact: true }).click();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
     const machines = list.getByRole("button", { name: "机器筛选", exact: true });

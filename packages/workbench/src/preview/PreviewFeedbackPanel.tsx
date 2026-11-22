@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MessageSquareText } from "lucide-react";
 import type { PreviewFeedbackRecord } from "@genehub/proto";
 import { feedbackReceiptText, type useFileFeedback } from "./fileFeedback";
-import { PreviewToolbarPortal } from "./PreviewToolbar";
+import { previewTextButton, PreviewToolbarPortal } from "./PreviewToolbar";
 export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = false }: {
     feedback: ReturnType<typeof useFileFeedback>;
     bindOpen?: (open: (() => void) | null) => void;
@@ -13,6 +12,8 @@ export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = f
     const [busy, setBusy] = useState(false);
     const [problem, setProblem] = useState("");
     const [description, setDescription] = useState("");
+    const [descriptionKey, setDescriptionKey] = useState("");
+    const [draftStatus, setDraftStatus] = useState("");
     const [notes, setNotes] = useState<string[]>([]);
     const [bundles, setBundles] = useState<string[]>([]);
     const [receipt, setReceipt] = useState<PreviewFeedbackRecord | null>(null);
@@ -20,6 +21,10 @@ export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = f
     const show = useCallback(async () => { setOpen(true); setCopied(false); setBusy(true); setProblem(""); try {
         const draft = await feedback.ensure();
         setReceipt(draft.receipt);
+        const key = `genehub:preview-feedback:description:${draft.id}`;
+        setDescriptionKey(key);
+        setDescription(draft.receipt?.description ?? readDescription(key));
+        setDraftStatus("");
         setNotes(draft.review.annotations.map(n => n.id));
         setBundles(draft.bundles.map(b => b.workspacePath));
     }
@@ -42,6 +47,9 @@ export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = f
         if (result.kind !== "receipt")
             throw new Error("设备未确认反馈提交");
         setReceipt(result.data);
+        if (descriptionKey) {
+          try { localStorage.removeItem(descriptionKey); } catch { /* Draft storage may be unavailable. */ }
+        }
     }
     catch (e) {
         setProblem(String(e));
@@ -49,15 +57,27 @@ export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = f
     finally {
         setBusy(false);
     } };
+    const changeDescription = (value: string) => {
+        setDescription(value);
+        if (!descriptionKey) return;
+        try {
+          localStorage.setItem(descriptionKey, value);
+          setDraftStatus("说明已保存在此浏览器");
+        } catch {
+          setDraftStatus("浏览器无法保存说明，关闭页面前可复制文字");
+        }
+    };
     const toggle = (values: string[], id: string) => values.includes(id) ? values.filter(v => v !== id) : [...values, id];
-    return <>{showToolbarButton ? <PreviewToolbarPortal><button type="button" aria-label="预览反馈" title="预览反馈" className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => void show()}><MessageSquareText size={14} /></button></PreviewToolbarPortal> : null}
+    return <>{showToolbarButton ? <PreviewToolbarPortal slot="feedback"><button type="button" data-preview-dismiss
+      className={previewTextButton} onClick={() => void show()}>写整页反馈</button></PreviewToolbarPortal> : null}
     {open ? <div role="dialog" aria-modal="true" aria-label="预览反馈" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-3">
       <section className="flex max-h-[85dvh] w-full max-w-xl flex-col rounded-xl border border-line bg-surface p-4 text-sm text-fg">
         <header className="mb-3 flex items-center justify-between"><h2>预览反馈</h2><button aria-label="关闭反馈" onClick={() => setOpen(false)}>关闭</button></header>
         <div className="min-h-0 overflow-y-auto">
           {receipt ? <><p role="status">反馈已提交：{receipt.id}</p><textarea aria-label="可复制的预览反馈" readOnly value={feedbackReceiptText(receipt)} className="mt-3 h-56 w-full rounded border border-line bg-bg p-2 text-xs"/></> : <>
             <p className="mb-2 text-xs text-muted">{feedback.draft?.source.displayPath}</p>
-            <textarea aria-label="反馈说明" placeholder="描述体验或问题" value={description} maxLength={5000} onChange={e => setDescription(e.target.value)} className="h-24 w-full rounded border border-line bg-bg p-2"/>
+            <textarea aria-label="反馈说明" placeholder="描述体验或问题" value={description} disabled={busy} maxLength={5000} onChange={e => changeDescription(e.target.value)} className="h-24 w-full rounded border border-line bg-bg p-2"/>
+            {draftStatus ? <p role="status" className="text-xs text-muted">{draftStatus}</p> : null}
             {feedback.draft?.review.annotations.map(note => <label key={note.id} className="mt-2 flex items-start gap-2"><input type="checkbox" checked={notes.includes(note.id)} onChange={() => setNotes(toggle(notes, note.id))}/><span className="break-words">{note.comment}</span></label>)}
             {feedback.draft?.bundles.map(bundle => <label key={bundle.workspacePath} className="mt-2 flex items-start gap-2"><input type="checkbox" checked={bundles.includes(bundle.workspacePath)} onChange={() => setBundles(toggle(bundles, bundle.workspacePath))}/><span>运行日志及附件（{bundle.files.length} 个文件）</span></label>)}
           </>}
@@ -70,4 +90,9 @@ export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = f
         </> : <button disabled={busy} className="rounded bg-accent px-3 py-2 text-white disabled:opacity-50" onClick={() => void submit()}>{busy ? "正在保存…" : "提交反馈"}</button>}</footer>
       </section></div> : null}
   </>;
+}
+
+function readDescription(key: string) {
+  try { return localStorage.getItem(key) ?? ""; }
+  catch { return ""; }
 }

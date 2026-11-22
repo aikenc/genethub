@@ -273,7 +273,6 @@
       sendRuntime("hit-test", "annotation-pick", elementHit(picked));
       return;
     }
-    if (reviewParentOrigin !== "*") return;
     var node = event.target;
     if (node && node.nodeType !== 1) node = node.parentElement;
     while (node && node !== document.body && String(node.tagName || "").toUpperCase() !== "A") node = node.parentElement;
@@ -282,25 +281,40 @@
     if (!href || /^(javascript:|mailto:|tel:)/i.test(href)) return;
     var parsed;
     try { parsed = new URL(href, document.baseURI); } catch (e) { return; }
+    var newWindow = String(node.target || "").toLowerCase() === "_blank";
+    if (reviewParentOrigin !== "*") {
+      if (!newWindow || !/^https?:$/.test(parsed.protocol)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      sendRuntime("review-new-window", "", { url: parsed.href.slice(0, 4096) });
+      return;
+    }
     if (parsed.protocol !== "https:" || parsed.hostname !== "preview.invalid") return;
     event.preventDefault();
     event.stopPropagation();
     var path = parsed.pathname.replace(/^\/+/, "");
     if (href.charAt(0) === "#" || !path) {
-      sendRuntime("open-path", "open-path", {url: href});
-      if (parsed.hash) {
+      sendRuntime("open-path", "open-path", { url: href, newWindow: newWindow });
+      if (parsed.hash && !newWindow) {
         var target = document.getElementById(decodeURIComponent(parsed.hash.slice(1)));
         if (target && target.scrollIntoView) target.scrollIntoView();
       }
       return;
     }
-    sendRuntime("open-path", "open-path", { url: href });
+    sendRuntime("open-path", "open-path", { url: href, newWindow: newWindow });
   }, true);
   window.addEventListener("message", function(event){
     if (event.source !== parent || (reviewParentOrigin !== "*" && event.origin !== reviewParentOrigin)) return;
     var data = event.data;
     if (!data || data.source !== "genehub-preview-runtime-command") return;
     var requestId = String(data.requestId || "");
+    if (data.command === "review-go" && reviewParentOrigin !== "*") {
+      try {
+        var next = new URL(data.url);
+        if (next.origin === location.origin && !next.pathname.startsWith("/.well-known/")) location.replace(next.href);
+      } catch (e) {}
+      return;
+    }
     if (data.command === "snapshot-render") {
       if (reviewParentOrigin !== "*" && !window.modernScreenshot
           && typeof data.renderer === "string" && data.renderer.length < 200000) {
@@ -389,6 +403,16 @@
   window.addEventListener("unhandledrejection", function(e){
     send("error", { message: text(e.reason, 500) });
   });
+  if (reviewParentOrigin === "*") {
+    window.addEventListener("submit", function(event) {
+      if (event.defaultPrevented) return;
+      // Local event handlers can process forms. The preview never submits a
+      // form as a document navigation; the document CSP also enforces this
+      // for direct calls to HTMLFormElement.submit().
+      event.preventDefault();
+      send("csp", { effectiveDirective: "form-action", message: "预览已阻止表单提交" });
+    });
+  }
   window.addEventListener("securitypolicyviolation", function(e){
     send("csp", {
       violatedDirective: text(e.violatedDirective, 200),

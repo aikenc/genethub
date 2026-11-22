@@ -30,7 +30,7 @@ defineSpecialty({
     const openFile = async (name: string) => {
       await page.getByRole("link", { name, exact: true }).first().click();
       await page.getByRole("dialog", { name: "文件预览", exact: true }).waitFor();
-      await page.getByLabel("批注", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "反馈", exact: true }).waitFor();
     };
     const checkRow = async () => {
       const header = page.getByLabel("预览工具栏", { exact: true });
@@ -44,22 +44,24 @@ defineSpecialty({
       t.assertions.assert(geometry.scrollWidth <= geometry.width + 1 && geometry.height < 50, `toolbar geometry: ${JSON.stringify(geometry)} controls=${JSON.stringify(boxes)}`);
     };
     await openFile("review.md");
-    await page.getByRole("status").filter({hasText: "页面参数：?chat=yes"}).waitFor();
+    await page.getByRole("button", {name: "预览信息", exact: true}).click();
+    await page.getByRole("complementary", {name: "预览信息"}).getByText(/review\.md\?chat=yes/).waitFor();
+    await page.getByRole("button", {name: "关闭信息", exact: true}).click();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     const heading = page.getByRole("heading", { name: "Review notes", exact: true });
     const header = await page.getByLabel("预览工具栏", { exact: true }).boundingBox();
     t.assertions.assert((await heading.boundingBox())!.y >= header!.y + header!.height, "MD controls cover the heading");
-    await page.getByRole("button", { name: "关闭预览", exact: true }).click();
+    await page.getByRole("button", { name: "返回对话", exact: true }).click();
     await openFile("review.html");
     const frame = page.frameLocator('iframe[title="HTML 文件预览"]');
     await frame.locator("#paragraph-0").waitFor();
     await frame.locator("#persist").click();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     t.assertions.assert(!(await page.getByRole("button", { name: "截图", exact: true }).isVisible()), "low frequency action remains on toolbar");
-    t.assertions.assert(!(await page.getByRole("button", { name: "分享预览", exact: true }).isVisible()), "share stays on the toolbar");
-    t.assertions.assert(await page.getByLabel(/^本地服务：/).count() === 0, "service status stays on the toolbar");
-    await page.getByLabel("更多预览操作", { exact: true }).click();
-    for (const name of ["截图", "录制", "保存运行产物", "分享预览"])
+    t.assertions.assert(await page.getByRole("button", { name: "分享", exact: true }).isVisible(), "share stays on the toolbar");
+    t.assertions.assert(await page.getByLabel("预览工具栏", { exact: true }).getByLabel(/^本地服务：/).count() === 0, "service status stays on the toolbar");
+    await page.getByLabel("采集", { exact: true }).click();
+    for (const name of ["截图", "开始录制", "保存运行产物"])
       t.assertions.assert(await page.getByRole("button", { name, exact: true }).isVisible(), `menu omitted ${name}`);
     t.assertions.assert(await page.getByText("日志已开始记录", { exact: true }).count() === 0, "overflow menu still shows the log status");
     t.assertions.assert(await page.getByText(/日志 \d+ · 现场/).count() === 0, "overflow menu still shows log counts");
@@ -69,17 +71,17 @@ defineSpecialty({
     await page.getByText("这个文件没有登记本地服务。", { exact: true }).waitFor();
     t.assertions.assert(await page.getByText("这个文件没有登记本地服务。", { exact: true }).isVisible(), "absent service hides its reason");
     t.assertions.assert(await page.getByRole("button", { name: "重新连接", exact: true }).isVisible(), "preview info omitted recheck");
-    t.assertions.assert(await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").count() === 0, "service failure still occupies a content row");
+    t.assertions.assert(!await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").isVisible(), "service failure still occupies a content row");
     await page.keyboard.press("Escape");
-    t.assertions.assert(await page.getByRole("dialog", { name: "预览信息", exact: true }).count() === 0, "Escape left preview info open");
+    t.assertions.assert(!await page.getByRole("complementary", { name: "预览信息", exact: true }).isVisible(), "Escape left preview info open");
     t.assertions.assert(await page.getByRole("dialog", { name: "文件预览", exact: true }).isVisible(), "Escape from menu minimized Preview");
-    const annotationBefore = (await page.getByLabel("批注", { exact: true }).boundingBox())!;
-    const overflowBefore = (await page.getByLabel("更多预览操作", { exact: true }).boundingBox())!;
+    const annotationBefore = (await page.getByRole("button", { name: "反馈", exact: true }).boundingBox())!;
+    const overflowBefore = (await page.getByLabel("采集", { exact: true }).boundingBox())!;
     t.assertions.assert(annotationBefore.x < overflowBefore.x, "annotation starts to the right of overflow");
-    await page.getByLabel("批注", { exact: true }).click();
-    await page.getByRole("button", { name: "开始批注", exact: true }).click();
+    await page.getByRole("button", { name: "反馈", exact: true }).click();
+    await page.getByRole("button", { name: "点选批注", exact: true }).click();
     const annotationAfter = (await page.getByLabel("完成批注", { exact: true }).boundingBox())!;
-    const overflowAfter = (await page.getByLabel("更多预览操作", { exact: true }).boundingBox())!;
+    const overflowAfter = (await page.getByLabel("采集", { exact: true }).boundingBox())!;
     t.assertions.assert(annotationAfter.x < overflowAfter.x, "starting annotation reordered the toolbar");
     await frame.locator("#action").click();
     await page.getByRole("textbox", { name: "批注", exact: true }).waitFor();
@@ -113,8 +115,8 @@ defineSpecialty({
     await page.getByRole("textbox", { name: "批注", exact: true }).fill("Keep this section readable");
     await page.getByRole("button", { name: "添加批注", exact: true }).click();
     await page.getByRole("button", { name: "完成批注", exact: true }).click();
-    await page.getByLabel("批注", { exact: true }).click();
-    await page.getByRole("button", { name: "提交批注反馈", exact: true }).click();
+    await page.getByRole("button", { name: "反馈", exact: true }).click();
+    await page.getByRole("button", { name: "写反馈", exact: true }).click();
     await page.getByRole("dialog", { name: "预览反馈", exact: true }).waitFor();
     await page.getByText("Keep this section readable", { exact: true }).waitFor();
     await page.getByRole("button", { name: "提交反馈", exact: true }).click();
@@ -142,12 +144,12 @@ defineSpecialty({
     t.assertions.assert(await page.getByRole("dialog", {name: "文件预览", exact: true}).isVisible(), "external open minimized the original preview");
     await popup.close();
     if (saved?.type !== "previewFeedback" || saved.data.kind !== "receipt") throw new Error("saved receipt missing");
-    await page.getByRole("button", {name: "关闭预览", exact: true}).click();
+    await page.getByRole("button", {name: "返回对话", exact: true}).click();
     opened.mock.script({text: `[Open feedback record](${saved.data.data.workspacePath})`});
     await t.flows.main.sendPrompt(opened.client, session, "Show the saved feedback record.");
     await page.getByRole("link", {name: "Open feedback record", exact: true}).click();
     await page.getByRole("dialog", {name: "文件预览", exact: true}).getByText(/Keep this section readable/).waitFor();
-    await page.getByRole("button", {name: "关闭预览", exact: true}).click();
+    await page.getByRole("button", {name: "返回对话", exact: true}).click();
     await page.getByRole("button", {name: "当前项目", exact: true}).click();
     await page.getByRole("button", {name: "项目菜单", exact: true}).click();
     await page.getByRole("menuitem", {name: "文件", exact: true}).click();

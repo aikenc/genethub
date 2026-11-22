@@ -707,16 +707,10 @@ input:focus-visible {
  * sizing to direct toolbar controls so feedback/share dialogs retain their
  * normal touch targets. Nine controls still fit in a 320px viewport. */
 .gh-preview-toolbar { gap: 2px; padding-inline: 4px; }
-.gh-preview-toolbar-slot { gap: 2px; }
-.genehub-ui .gh-preview-toolbar > button,
-.genehub-ui .gh-preview-toolbar-slot > button,
-.gh-preview-toolbar > button,
-.gh-preview-toolbar-slot > button,
-.gh-preview-toolbar-slot > details > summary {
-  flex-shrink: 0;
+.gh-preview-toolbar :is(button, summary) { flex-shrink: 0; }
+.genehub-ui .gh-preview-toolbar :is([data-preview-slot="navigation"] > button, button[title="返回对话"], button[title="预览信息"], button[aria-label="新窗口打开"], button[aria-label="在浏览器打开预览"], button[aria-label="复制预览链接"]) {
   width: 32px;
   height: 32px;
   min-width: 32px;
   min-height: 32px;
-  padding-inline: 0;
 }
