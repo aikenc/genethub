@@ -80,6 +80,7 @@ pub struct Daemon {
     hook_timer: tokio::task::JoinHandle<()>,
     agent_pushes: tokio::task::JoinHandle<()>,
     space_discovery: tokio::task::JoinHandle<()>,
+    static_preview: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -108,6 +109,7 @@ impl Daemon {
         let mut link = link::Link::new(state.paths.clone(), pty.clone());
         link.attach(&state).await;
         let _ = state.link.set(link);
+        let static_preview = static_preview::Manager::supervise(&state);
 
         let mut remote = remote::Remote::new(state.paths.clone(), pty);
         remote.attach(&state).await;
@@ -183,6 +185,7 @@ impl Daemon {
             hook_timer,
             agent_pushes,
             space_discovery,
+            static_preview,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -219,6 +222,11 @@ impl Daemon {
         let _ = self.hook_timer.await;
         self.agent_pushes.abort();
         let _ = self.agent_pushes.await;
+        if let Some(supervisor) = self.static_preview {
+            supervisor.abort();
+            let _ = supervisor.await;
+            self.state.static_preview.stop().await;
+        }
         // Fence expected Agent exits before either concurrent shutdown branch
         // can close a script host. Otherwise the pump records AgentCrashed,
         // pauses durable inputs, and a successful self-update cannot resume.

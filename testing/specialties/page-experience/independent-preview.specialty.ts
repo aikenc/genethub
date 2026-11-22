@@ -5,6 +5,8 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { createServer, request as httpsRequest } from "node:https";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 
@@ -16,11 +18,11 @@ const suffix = "preview.test";
 const staticSpec: Parameters<typeof defineSpecialty>[0] = {
   id: "specialty.page-experience.independent-preview",
   title: "The two external preview choices keep their original authorization",
-  oracle: "The old preview works. A paired account opens a separate TLS origin without making a share. An anonymous browser can open a scoped share until it is revoked.",
-  catches: ["legacy preview replaced", "share inherits account authority", "copying the resource URL gives access", "TLS terminates before the source"],
+  oracle: "The old preview works. A resident worker is connected before the first open and serves multiple origins after idling. It recovers without an open request. Anonymous shares remain scoped and revocable.",
+  catches: ["legacy preview replaced", "on-demand or duplicate workers", "idle worker exits", "worker is not supervised", "share inherits account authority", "copying the resource URL gives access", "TLS terminates before the source"],
   tags: ["page-experience", "authorization", "preview-feedback"],
   runner: "playwright", requiredRepos: ["cloud"], llm: { default: "mock" },
-  expectedDurationMs: 70_000, timeoutMs: 180_000,
+  expectedDurationMs: 110_000, timeoutMs: 210_000,
   resources: { environments: 1, cpu: 2, memoryMb: 3072, io: 1, browser: 1, pool: "browser" },
   surfaces: ["cloud-console", "cloud-server", "relay", "daemon", "asset-preview"],
   productInterfaces: ["@genehub/workbench", "hub-http", "preview.feedback", "asset.preview"],
@@ -32,6 +34,7 @@ defineSpecialty({
   ...staticSpec,
   id: "specialty.page-experience.independent-preview-service",
   title: "Authorized preview origins carry registered HTTP, streaming and WSS",
+  expectedDurationMs: 70_000, timeoutMs: 180_000,
   oracle: "A Chromium page reaches the registered runner after confirmation. A static view, scoped share, and sibling origin lack service access.",
   catches: ["registered service unavailable on the new origin", "cross-origin service access", "scope escapes registered routes", "different run receives requests"],
   productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
@@ -42,6 +45,7 @@ defineSpecialty({
   ...staticSpec,
   id: "specialty.page-experience.independent-preview-review",
   title: "Independent preview content can be reviewed from the trusted workbench",
+  expectedDurationMs: 70_000, timeoutMs: 180_000,
   oracle: "Paired and shared browsers retain isolation. The visitor reports an element, console logs and a DOM snapshot and the owner retrieves the receipt.",
   catches: ["review disables SharedArrayBuffer", "review grants workbench context to content", "annotation or feedback cannot be submitted on the isolated origin"],
 }, t => exercise(t, "review"));
@@ -50,6 +54,7 @@ defineSpecialty({
   ...staticSpec,
   id: "specialty.page-experience.independent-preview-media",
   title: "Trusted independent review renders registered audio and video",
+  expectedDurationMs: 70_000, timeoutMs: 180_000,
   oracle: "The trusted Workbench receives real media, stops the source session, and keeps media routes outside the preview origin.",
   catches: ["explicit media cannot be opened in the independent review", "the content iframe can call media signalling", "a stopped view leaks the source media session"],
   productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
@@ -70,6 +75,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
   const consoleDir = path.join(t.env.root, "console");
   const cert = path.join(t.env.root, "preview-cert.pem");
   const key = path.join(t.env.root, "preview-key.pem");
+  const databasePath = path.join(t.env.root, "hub.sqlite");
   await run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
     "-subj", `/CN=*.${suffix}`, "-addext", `subjectAltName=DNS:*.${suffix}`, "-keyout", key, "-out", cert]);
   const { stdout: publicKey } = await run("openssl", ["x509", "-in", cert, "-pubkey", "-noout"]);
@@ -81,7 +87,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
   process.env.HUB_PUBLIC_ORIGIN = origin;
   process.env.HUB_PREVIEW_EDGE_TOKEN = token;
   process.env.HUB_PREVIEW_PUBLIC_PORT = String(edgePort);
-  const hub = await startHub({ databasePath: path.join(t.env.root, "hub.sqlite"),
+  const hub = await startHub({ databasePath,
     relayOrigin: `http://127.0.0.1:${relayPort}`, relayToken, consoleDir });
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
   let opened: Awaited<ReturnType<typeof t.flows.main.openWorkspace>> | undefined;
@@ -173,6 +179,12 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
       const status = await opened!.client.call({ type: "hub.status" });
       return status?.type === "hubStatus" && status.data.state === "paired" && status.data.online;
     }, 45_000);
+    // The Hub's relay presence is an independent readiness witness. Do not open
+    // a preview to find out whether the supervisor has already connected.
+    const initialPresence = await waitForPreviewPresence(t, databasePath, device);
+    const resident = mode === undefined ? await previewWorkerPids(cert) : [];
+    if (mode === undefined) t.assertions.assert(resident.length === 1, "expected one worker before the first preview");
+    const idleSince = Date.now();
     browser = await chromium.launch({ args: [
       "--no-proxy-server", `--host-resolver-rules=MAP *.${suffix} 127.0.0.1`, `--ignore-certificate-errors-spki-list=${pin}`,
     ] });
@@ -190,6 +202,10 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     await creator.goto(legacy);
     const old = creator.frameLocator('iframe[title="HTML 文件预览"]');
     await old.getByText("Shared resource loaded").waitFor();
+    if (mode === undefined) {
+      await sleep(Math.max(0, 65_000 - (Date.now() - idleSince)));
+      t.assertions.assert((await previewWorkerPids(cert)).join() === resident.join(), "the idle worker was replaced or stopped");
+    }
     const menu = creator.getByText("独立预览", { exact: true });
     await menu.click();
     const ownPopup = creator.waitForEvent("popup");
@@ -409,6 +425,24 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     const ordinary = await owner.newPage();
     await ordinary.goto(plain.href);
     await ordinary.getByText("Shared resource loaded").waitFor();
+    if (mode === undefined) {
+      t.assertions.assert(new URL(ordinary.url()).host !== new URL(ownPage.url()).host, "two views reused an origin");
+      t.assertions.assert(await ownPage.evaluate(async () => (await fetch("./data.json")).ok), "opening another view interrupted the first");
+      t.assertions.assert((await previewWorkerPids(cert)).join() === resident.join(), "separate views did not share the resident process");
+
+      process.kill(resident[0]!, "SIGKILL");
+      await waitForPreviewPresence(t, databasePath, device, initialPresence);
+      const replacement = await previewWorkerPids(cert);
+      t.assertions.assert(replacement.length === 1 && replacement[0] !== resident[0], "the worker did not recover in the background");
+      t.assertions.assert(!(await ownPage.evaluate(async () => {
+        try { return (await fetch("./data.json", { cache: "no-store" })).ok; } catch { return false; }
+      })), "the replacement accepted a lease issued by the stopped worker");
+      await creator.reload();
+      await old.getByText("Shared resource loaded").waitFor();
+      const recovered = await owner.newPage();
+      await recovered.goto(plain.href);
+      await recovered.getByText("Shared resource loaded").waitFor();
+    }
   } finally {
     if (service && service.exitCode === null && service.signalCode === null) {
       const done = once(service, "exit");
@@ -430,4 +464,39 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     await relay?.stop();
     await hub.stop();
   }
+  if (mode === undefined) {
+    await t.tools.waitUntil(async () => (await previewWorkerPids(cert)).length === 0, 5_000);
+  }
+}
+
+async function waitForPreviewPresence(t: CaseContext, databasePath: string, device: string, previous?: string) {
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const query = db.prepare(`SELECT e.connected_at AS connectedAt FROM preview_relay_nodes n
+      JOIN machines m ON m.id = n.machine_id JOIN fabric_endpoints e ON e.handle = n.endpoint_handle
+      WHERE m.daemon_id = ? AND e.presence_expires_at > ?`);
+    let presence = "";
+    await t.tools.waitUntil(() => {
+      const value = query.get(device, new Date().toISOString())?.connectedAt;
+      if (typeof value !== "string" || value === previous) return false;
+      presence = value;
+      return true;
+    }, 20_000);
+    return presence;
+  } finally {
+    db.close();
+  }
+}
+
+async function previewWorkerPids(cert: string): Promise<number[]> {
+  if (process.platform === "win32") {
+    const { stdout } = await run("powershell.exe", ["-NoProfile", "-Command",
+      "ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process | Select-Object ProcessId, CommandLine) -Compress"]);
+    const processes = JSON.parse(stdout) as { ProcessId: number; CommandLine?: string }[];
+    return processes.filter(item => item.CommandLine?.includes("static-preview-worker")
+      && item.CommandLine.includes(cert)).map(item => item.ProcessId);
+  }
+  const { stdout } = await run("ps", ["-axww", "-o", "pid=,args="]);
+  return stdout.split("\n").filter(line => line.includes("static-preview-worker") && line.includes(cert))
+    .map(line => Number(line.trim().split(/\s+/, 1)[0]));
 }

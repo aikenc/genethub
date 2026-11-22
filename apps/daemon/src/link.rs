@@ -308,6 +308,7 @@ impl Link {
                         catalog_sync: start_catalog_sync(&state, &enrollment),
                         enrollment,
                     };
+                    state.static_preview.enrollment_changed();
                 }
                 Err(error) => {
                     *stage = Stage::Failed {
@@ -338,6 +339,9 @@ impl Link {
     /// keep the enrollment on disk.
     pub async fn unpair(&self) -> Result<()> {
         let previous = std::mem::replace(&mut *self.stage.lock().await, Stage::Unpaired);
+        if let Ok(state) = self.state() {
+            state.static_preview.enrollment_changed();
+        }
         match previous {
             Stage::Paired {
                 enrollment,
