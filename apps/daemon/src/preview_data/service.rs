@@ -29,6 +29,7 @@ use tokio_tungstenite::{
 
 use super::{empty, empty_body, Body, View};
 
+pub(super) const PLAYER_ICE_PATH: &str = "/.well-known/genehub/preview-player-ice";
 const MAX_PACKET: usize = 256 * 1024;
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const CHUNK: usize = 32 * 1024;
@@ -61,6 +62,15 @@ pub(super) struct Run {
     secret: String,
     port: u16,
     routes: Vec<Route>,
+    #[serde(default)]
+    player_ice: Option<PlayerIce>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerIce {
+    ice_servers: Vec<Value>,
+    expires_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +225,34 @@ fn same_origin(headers: &HeaderMap, origin: &HeaderValue, websocket: bool) -> bo
     }
 }
 
+pub(super) fn player_ice(request: &Request<Incoming>, view: &View) -> Response<Body> {
+    if !same_origin(request.headers(), &view.origin, false) {
+        return empty(StatusCode::FORBIDDEN);
+    }
+    let Some(ice) = view.service.as_ref().and_then(|run| run.player_ice.as_ref()) else {
+        return empty(StatusCode::FORBIDDEN);
+    };
+    if request.method() != Method::GET {
+        return empty(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    if let Some(deadline) = ice.expires_at {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_millis();
+        if deadline <= 0 || now >= deadline as u128 {
+            return empty(StatusCode::GONE);
+        }
+    }
+    let body = http_body_util::Full::new(Bytes::from(json!({"iceServers": ice.ice_servers}).to_string()))
+        .map_err(|impossible| match impossible {})
+        .boxed_unsync();
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header("cross-origin-resource-policy", "same-origin")
+        .body(body)
+        .expect("valid player ICE response")
+}
+
 pub(super) async fn respond(
     mut request: Request<Incoming>,
     view: Arc<View>,
@@ -277,8 +315,9 @@ pub(super) async fn respond(
             tokio::select! {
                 _ = revoked.wait_for(|revoked| *revoked) => {}
                 _ = tokio::time::sleep_until(view.deadline) => {}
-                _ = relay_websocket(upgrade, runner) => {}
+                _ = relay_websocket(upgrade, &mut runner) => {}
             }
+            let _ = timeout(WAIT, send_control(&mut runner, json!({"kind":"close"}))).await;
         });
         return Response::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -321,7 +360,7 @@ fn browser_upgrade(request: &Request<Incoming>) -> Option<&[u8]> {
     (STANDARD.decode(key).ok()?.len() == 16).then_some(key)
 }
 
-async fn relay_websocket(upgrade: OnUpgrade, mut runner: Runner) -> Result<()> {
+async fn relay_websocket(upgrade: OnUpgrade, runner: &mut Runner) -> Result<()> {
     let connection = timeout(WAIT, upgrade).await??;
     let mut browser =
         WebSocketStream::from_raw_socket(TokioIo::new(connection), Role::Server, config()).await;
@@ -329,18 +368,17 @@ async fn relay_websocket(upgrade: OnUpgrade, mut runner: Runner) -> Result<()> {
         tokio::select! {
             message = browser.next() => {
                 match message.context("browser connection closed")?? {
-                    Message::Text(text) => send_control(&mut runner, json!({"kind":"text","text":text})).await?,
-                    Message::Binary(bytes) => send_packet(&mut runner, 1, &bytes).await?,
+                    Message::Text(text) => send_control(runner, json!({"kind":"text","text":text})).await?,
+                    Message::Binary(bytes) => send_packet(runner, 1, &bytes).await?,
                     Message::Close(_) => {
                         browser.flush().await?;
-                        send_control(&mut runner, json!({"kind":"close"})).await?;
                         return Ok(());
                     }
                     Message::Ping(_) => browser.flush().await?,
                     _ => {}
                 }
             }
-            packet = receive(&mut runner) => {
+            packet = receive(runner) => {
                 let packet = packet?;
                 let message = if packet[0] == 1 {
                     Message::Binary(packet[1..].to_vec())
@@ -355,14 +393,14 @@ async fn relay_websocket(upgrade: OnUpgrade, mut runner: Runner) -> Result<()> {
                                 code: if code.is_allowed() { code } else { CloseCode::Error },
                                 reason: "".into(),
                             })).await?;
-                            acknowledge(&mut runner).await?;
+                            acknowledge(runner).await?;
                             return Ok(());
                         }
                         _ => bail!("invalid WebSocket packet"),
                     }
                 };
                 browser.send(message).await?;
-                acknowledge(&mut runner).await?;
+                acknowledge(runner).await?;
             }
         }
     }

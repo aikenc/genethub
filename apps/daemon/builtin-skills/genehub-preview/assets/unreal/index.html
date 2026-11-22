@@ -13,10 +13,19 @@ const say = text => { bar.textContent = text; };
 // first message on the signalling socket hands them to signalling.py, which passes them to
 // Unreal before the game creates its side of the connection. Without that, a game behind
 // another network's NAT only offers LAN addresses and the picture never arrives.
+async function loadIce() {
+  if (window.genehubServicePreview) return window.genehubServicePreview.ice();
+  const response = await fetch('/.well-known/genehub/preview-player-ice', { cache: 'no-store' });
+  if (!response.ok) throw new Error('Preview player authorization unavailable');
+  return response.json();
+}
 async function start() {
 let iceServers = null;
-try { ({ iceServers } = await window.genehubServicePreview.ice()); }
-catch { say('预览服务尚未就绪，正在等待连接；可点击上方“重新连接”重试'); return; }
+try { ({ iceServers } = await loadIce()); }
+catch { say('串流授权不可用，请从工作台重新打开并启用本地服务'); return; }
+const signallingUrl = window.genehubServicePreview
+  ? 'wss://preview.invalid/api/ue/ws'
+  : new URL('/api/ue/ws', location.href.replace(/^https:/, 'wss:')).href;
 // Viewers on another machine (including the same company network, whose tunnel blocks direct
 // paths) may need the platform relay, selected automatically by the channel policy.
 // The library reports "connected" before media flows, so the peer connection's own state decides.
@@ -46,7 +55,7 @@ if (iceServers?.length) {
 // address is one relative path through the preview bridge; the runner forwards it to the signalling
 // server. The library only connects when asked: the stock UI layer calls this itself.
 const config = new Config({ useUrlParams: false, initialSettings: {
-  [TextParameters.SignallingServerUrl]: 'wss://preview.invalid/api/ue/ws',
+  [TextParameters.SignallingServerUrl]: signallingUrl,
   // While the game is still starting the library asks for streamers again every few seconds.
   [NumericParameters.MaxReconnectAttempts]: 100,
   [Flags.AutoPlayVideo]: true, [Flags.StartVideoMuted]: true,
@@ -59,6 +68,7 @@ stream.addEventListener('webRtcFailed', () => { clearTimeout(hintTimer); say(rel
 stream.addEventListener('webRtcDisconnected', () => say('游戏连接已断开，正在尝试重连；也可点击上方“重新连接”'));
 stream.addEventListener('playStreamRejected', () => say('点击画面开始播放'));
 stream.connect();
+window.addEventListener('pagehide', () => stream.disconnect(), { once: true });
 document.getElementById('stream').addEventListener('click', () => {
   const video = document.querySelector('video'); if (video) video.muted = false;
 });

@@ -777,6 +777,13 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
             empty(StatusCode::FORBIDDEN)
         };
     }
+    if request.uri().path() == service::PLAYER_ICE_PATH {
+        return if has_view_cookie(request.headers(), &view.cookie) {
+            service::player_ice(&request, &view)
+        } else {
+            empty(StatusCode::FORBIDDEN)
+        };
+    }
     if let Some(run) = view
         .service
         .as_ref()

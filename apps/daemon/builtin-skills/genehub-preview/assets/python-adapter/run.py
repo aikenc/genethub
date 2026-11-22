@@ -202,6 +202,7 @@ async def main():
             pump = None
             counted = None
             upstream = None
+            closing = False
 
             async def raw_receive(timeout=None):
                 message = await asyncio.wait_for(ws.receive(), timeout)
@@ -247,9 +248,15 @@ async def main():
                 owner = asyncio.current_task()
 
                 def cancel_owner(task):
-                    if not task.cancelled():
-                        task.exception()
-                    owner.cancel()
+                    nonlocal closing
+                    if task.cancelled():
+                        return
+                    task.exception()
+                    # Both directions may end together. A second cancellation
+                    # can interrupt the upstream close and leave its viewer alive.
+                    if not closing:
+                        closing = True
+                        owner.cancel()
                 pump.add_done_callback(cancel_owner)
                 async with asyncio.timeout(3600):
                     operation = await control()
@@ -283,12 +290,8 @@ async def main():
                                                   'reason': ''}))
                             await ws.close()  # upstream is gone: end the relay
 
-                        def relay_ended(task):
-                            if not task.cancelled():
-                                task.exception()
-                                owner.cancel()
                         down = asyncio.create_task(upstream_to_client())
-                        down.add_done_callback(relay_ended)
+                        down.add_done_callback(cancel_owner)
                         try:
                             while True:
                                 data = await receive()
@@ -341,6 +344,7 @@ async def main():
                 # Fail closed; never log credentials, SDP or application payloads.
                 pass
             finally:
+                closing = True
                 if counted:
                     counted['viewers'] -= 1
                 connections.discard(ws)

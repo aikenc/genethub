@@ -614,6 +614,7 @@ async fn open_static(
     path: &str,
     peer: Option<crate::dataplane::endpoint::PeerAccess>,
     service_run_id: Option<&str>,
+    player_allow_turn: Option<bool>,
     review: bool,
 ) -> Result<genehub_proto::StaticPreviewGrant> {
     if !crate::static_preview::enabled() {
@@ -642,7 +643,7 @@ async fn open_static(
         if !caller.permits_stream(crate::authz::StreamMethod::ServicePreview) {
             bail!("此连接不能通过独立中转访问服务");
         }
-        crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id, review).await?
+        crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id, review, player_allow_turn).await?
     } else {
         None
     };
@@ -677,7 +678,7 @@ pub(crate) async fn handle(
             authorize_asset(state, caller, workspace, path).await?;
             return Ok(Out::Source(source(state, workspace, path).await?));
         }
-        Op::OpenStatic { path, service_run_id, review } => {
+        Op::OpenStatic { path, service_run_id, player_allow_turn, review } => {
             let state = state.clone();
             let caller = caller.clone();
             let workspace = workspace.clone();
@@ -685,9 +686,10 @@ pub(crate) async fn handle(
             let peer = peer.cloned();
             let service_run_id = service_run_id.clone();
             let review = review.unwrap_or(false);
+            let player_allow_turn = *player_allow_turn;
             // Keep the worker request/reply paired if the launching browser
             // abandons its RPC while a native operation is in flight.
-            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref(), review).await })
+            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref(), player_allow_turn, review).await })
                 .await?.map(Out::StaticPreview);
         }
         Op::Read { id } => {

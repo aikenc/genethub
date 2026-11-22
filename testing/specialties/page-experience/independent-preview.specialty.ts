@@ -1,14 +1,14 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, createPublicKey, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, copyFile, readFile, readdir, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { createServer, request as httpsRequest } from "node:https";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 
 import { allocatePort, BlockedError, daemonEndpoint, defineSpecialty, startHub, startRelay, type CaseContext } from "../../framework/public.ts";
 
@@ -61,10 +61,22 @@ defineSpecialty({
   requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp", "aiortc", "av", "numpy"] }],
 }, t => exercise(t, "media"));
 
-async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
+defineSpecialty({
+  ...staticSpec,
+  id: "specialty.page-experience.independent-preview-player",
+  title: "The engine player streams and accepts input on independent preview origins",
+  expectedDurationMs: 70_000, timeoutMs: 180_000,
+  oracle: "The shipped player opens through both authorized browser menus, decodes a changing WebRTC video, sends a real key press to the peer, and closes that peer on stop. Static previews cannot obtain ICE.",
+  catches: ["engine player requires the old iframe bridge", "engine video plays but input is dropped", "an ordinary view can borrow media access", "stopping leaves the engine player connected"],
+  productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
+  requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
+}, t => exercise(t, "player"));
+
+async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | "player") {
   const withService = mode === "service";
   const withReview = mode === "review";
   const withMedia = mode === "media";
+  const withPlayer = mode === "player";
 
   const [edgePort, publicPort, relayPort] = await Promise.all([allocatePort(), allocatePort(), allocatePort()]);
   const origin = `https://workbench.${suffix}:${publicPort}`;
@@ -96,6 +108,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
   let front: ReturnType<typeof createServer> | undefined;
   let service: ChildProcess | undefined;
   let mediaHealth: string | undefined;
+  let streamerPort: number | undefined;
   try {
     relay = await startRelay({ openRoot: t.openRoot, port: relayPort, control: { origin: hub.origin, token: relayToken } });
     edge = spawn(process.execPath, ["--import", "tsx", "src/preview-edge.ts"], {
@@ -121,11 +134,28 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv: {
       GENEHUB_PREVIEW_ENABLED: "1", GENEHUB_PREVIEW_TLS_CERT: cert, GENEHUB_PREVIEW_TLS_KEY: key,
     } });
-    if (withService || withMedia) {
+    if (withService || withMedia || withPlayer) {
       const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
       if (!python) throw new BlockedError("Python with aiohttp is required by the preview runner");
       const example = path.join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets");
       let args = [path.join(example, "python-adapter/app.py"), "--entry", path.join(t.env.workspace, "index.html")];
+      if (withPlayer) {
+        const httpPort = await allocatePort();
+        streamerPort = await allocatePort();
+        const engine = path.join(example, "unreal");
+        const config = path.join(t.env.workspace, "player.json");
+        await copyFile(path.join(engine, "index.html"), path.join(t.env.workspace, "player.html"));
+        await copyFile(path.join(engine, "pixelstreaming.esm.js"), path.join(t.env.workspace, "pixelstreaming.esm.js"));
+        await writeFile(config, JSON.stringify({
+          entry: "player.html",
+          backends: [{
+            command: [python, path.join(engine, "signalling.py"), "--http-port", String(httpPort), "--streamer-port", String(streamerPort)],
+            origin: `http://127.0.0.1:${httpPort}`, health: "/", routes: [{ prefix: "/api/ue/", websocket: true, maxViewers: 1 }],
+          }],
+          media: { offerPath: "/api/ue/ws", sessionPath: "/api/ue/ws", client: "html", protocol: "pixel-streaming/1" },
+        }));
+        args = [path.join(example, "python-adapter/run.py"), "--config", config];
+      }
       if (withMedia) {
         const [demoPort, mediaPort] = await Promise.all([allocatePort(), allocatePort()]);
         const config = path.join(t.env.workspace, "media.json");
@@ -144,7 +174,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
       }
       service = spawn(python, [...args, "--daemon-root", t.env.data], { stdio: ["ignore", "ignore", "inherit"] });
       const registration = path.join(t.env.data, "service-previews", createHash("sha256")
-        .update(path.join(t.env.workspace, "index.html")).digest("hex") + ".json");
+        .update(path.join(t.env.workspace, withPlayer ? "player.html" : "index.html")).digest("hex") + ".json");
       await t.tools.waitUntil(async () => {
         if (service?.exitCode != null) throw new Error(`runner exited with code ${service.exitCode}`);
         return access(registration).then(() => true, () => false);
@@ -220,6 +250,46 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
     await ownPage.getByText("Shared resource loaded").waitFor();
     if (!await ownPage.evaluate(() => crossOriginIsolated && typeof SharedArrayBuffer === "function" && window.opener === null)) {
       throw new Error("external preview origin or opener isolation failed");
+    }
+    if (withPlayer) {
+      if (!streamerPort) throw new Error("missing signalling port");
+      t.assertions.assert(await ownPage.evaluate(async () =>
+        (await fetch("/.well-known/genehub/preview-player-ice")).status) === 403, "static preview gained ICE access");
+      const streamer = await owner.newPage();
+      await startEnginePeer(streamer, streamerPort);
+      const playerLauncher = legacy.replace(/index\.html$/, "player.html");
+      await creator.goto(playerLauncher);
+      await creator.getByText("引擎串流", { exact: true }).waitFor();
+      await exerciseEngineInput(t, old.locator("video"), streamer, 1);
+      const stop = creator.getByRole("button", { name: "停止观看" });
+      await stop.click();
+      await t.tools.waitUntil(() => stop.isDisabled(), 5_000);
+      await streamer.locator('body[data-closed="1"]').waitFor({ state: "attached", timeout: 10_000 });
+
+      await menu.click();
+      const playerPopup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开并启用本地服务" }).click();
+      const player = await playerPopup;
+      await player.getByRole("button", { name: "启用服务并打开预览" }).click();
+      await exerciseEngineInput(t, player.locator("video"), streamer, 2);
+      await player.close();
+      await streamer.locator('body[data-closed="2"]').waitFor({ state: "attached", timeout: 10_000 });
+
+      await menu.click();
+      const reviewPopup = creator.waitForEvent("popup");
+      await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
+      const review = await reviewPopup;
+      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
+      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      const iframe = review.locator('iframe[title="独立 HTML 预览"]');
+      await exerciseEngineInput(t, iframe.contentFrame().locator("video"), streamer, 3);
+      t.assertions.assert((await iframe.getAttribute("sandbox"))?.includes("allow-pointer-lock"), "engine review blocked mouse capture");
+      await review.getByRole("link", { name: "停止引擎串流" }).click();
+      await streamer.locator('body[data-closed="3"]').waitFor({ state: "attached", timeout: 10_000 });
+      await review.close();
+      await streamer.close();
+      await creator.goto(legacy);
+      await old.getByText("Shared resource loaded").waitFor();
     }
     if (withService) {
       await menu.click();
@@ -480,6 +550,102 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media") {
   if (mode === undefined) {
     await t.tools.waitUntil(async () => (await previewWorkerPids(cert)).length === 0, 5_000);
   }
+}
+
+// A browser is the external engine peer. It uses the shipped signal server,
+// collects the real Epic player's input bytes and renders a moving canvas.
+async function startEnginePeer(page: Page, port: number) {
+  await page.evaluate(async (port) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const peers = new Map<string, RTCPeerConnection>();
+    const pending = new Map<string, RTCIceCandidateInit[]>();
+    const canvas = document.createElement("canvas");
+    canvas.width = 160;
+    canvas.height = 90;
+    const graphics = canvas.getContext("2d")!;
+    let frame = 0;
+    setInterval(() => {
+      graphics.fillStyle = frame++ % 2 ? "#1d9c36" : "#714ddd";
+      graphics.fillRect(0, 0, canvas.width, canvas.height);
+    }, 100);
+    const video = canvas.captureStream(10);
+    let keyDowns = 0;
+    let opened = 0;
+    let closed = 0;
+    let queue = Promise.resolve();
+    ws.onmessage = event => {
+      const message = JSON.parse(event.data);
+      const id: string = message.playerId;
+      queue = queue.then(async () => {
+        switch (message.type) {
+          case "identify":
+            ws.send(JSON.stringify({ type: "endpointId", id: "Preview test engine" }));
+            document.body.dataset.registered = "true";
+            break;
+          case "playerConnected": {
+            if (!message.sendOffer) throw new Error("player did not request an offer");
+            const peer = new RTCPeerConnection({ iceServers: [] });
+            peers.set(id, peer);
+            peer.addTrack(video.getVideoTracks()[0]!, video);
+            const channel = peer.createDataChannel("datachannel");
+            channel.binaryType = "arraybuffer";
+            channel.onopen = () => { document.body.dataset.opened = String(++opened); };
+            channel.onmessage = event => {
+              const bytes = new Uint8Array(event.data);
+              if (bytes[0] === 60 && bytes[1] === 87) document.body.dataset.keys = String(++keyDowns);
+            };
+            peer.onicecandidate = ({ candidate }) => {
+              if (candidate && peers.has(id)) ws.send(JSON.stringify({ type: "iceCandidate", playerId: id, candidate }));
+            };
+            await peer.setLocalDescription(await peer.createOffer());
+            ws.send(JSON.stringify({ type: "offer", playerId: id, sdp: peer.localDescription!.sdp }));
+            break;
+          }
+          case "answer": {
+            const peer = peers.get(id);
+            if (!peer) break;
+            await peer.setRemoteDescription({ type: "answer", sdp: message.sdp });
+            for (const candidate of pending.get(id) ?? []) await peer.addIceCandidate(candidate);
+            pending.delete(id);
+            break;
+          }
+          case "iceCandidate": {
+            const peer = peers.get(id);
+            if (!peer) break;
+            if (peer.remoteDescription) await peer.addIceCandidate(message.candidate);
+            else pending.set(id, [...(pending.get(id) ?? []), message.candidate]);
+            break;
+          }
+          case "playerDisconnected":
+            if (peers.get(id)) {
+              peers.get(id)!.close();
+              peers.delete(id);
+              pending.delete(id);
+              document.body.dataset.closed = String(++closed);
+            }
+            break;
+        }
+      }).catch(error => { document.body.dataset.error = String(error); });
+    };
+  }, port);
+  await page.locator('body[data-registered="true"]').waitFor();
+}
+
+async function exerciseEngineInput(t: CaseContext, video: ReturnType<Page["locator"]>, streamer: Page, expected: number) {
+  await t.tools.waitUntil(async () => {
+    const problem = await streamer.locator("body").getAttribute("data-error");
+    if (problem) throw new Error(problem);
+    if (!await video.count()) return false;
+    return await video.evaluate((node: HTMLVideoElement) =>
+      node.videoWidth === 160 && node.currentTime > 0 && node.readyState >= node.HAVE_CURRENT_DATA);
+  }, 25_000);
+  await streamer.locator(`body[data-opened="${expected}"]`).waitFor({ state: "attached", timeout: 10_000 });
+  await video.click();
+  await video.press("w");
+  await streamer.locator(`body[data-keys="${expected}"]`).waitFor({ state: "attached", timeout: 10_000 });
+  // The browser sends clicks to the game while it has captured the mouse.
+  await video.evaluate(node => node.ownerDocument.exitPointerLock());
+  await t.tools.waitUntil(() => video.evaluate(node => node.ownerDocument.pointerLockElement === null), 5_000);
 }
 
 async function waitForPreviewPresence(t: CaseContext, databasePath: string, device: string, previous?: string) {

@@ -319,9 +319,18 @@ export class ServicePreviewClient {
           ]),
         ).catch(() => {});
       });
+      let closing = false;
       return {
         send: (value) => stream.write(servicePacket(value)),
-        close: () => stream.reset(DataReset.Cancelled),
+        close: () => {
+          if (closing) return;
+          closing = true;
+          const timeout = setTimeout(() => stream.reset(DataReset.Cancelled), 5000);
+          void stream.write(servicePacket({ kind: "close" }))
+            .then(() => stream.finish())
+            .catch(() => stream.reset(DataReset.Cancelled))
+            .finally(() => clearTimeout(timeout));
+        },
       };
     } catch (e) {
       stream.reset(DataReset.Cancelled);
