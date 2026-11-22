@@ -872,6 +872,7 @@ async fn execute(
             let reply = rpc
                 .call(Request::PreviewFeedback(
                     genehub_proto::PreviewFeedbackRequest {
+                        visitor_key: None,
                         workspace_id,
                         operation: genehub_proto::PreviewFeedbackOperation::Read { id },
                     },

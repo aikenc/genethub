@@ -129,7 +129,12 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     }).listen(publicPort, "127.0.0.1");
     await once(front, "listening");
     await writeFile(path.join(t.env.workspace, "index.html"), `<!doctype html><meta charset="utf-8"><p>独立预览样本</p>
-      <p id="data">loading</p><script>console.log('preview started before load'); fetch('./data.json').then(r=>r.json()).then(x=>document.querySelector('#data').textContent=x.message)</script>`);
+      <p id="data">loading</p><output id="saved"></output><button type="button" id="save">保存测试进度</button>
+      <script>
+      const show = () => document.querySelector('#saved').textContent = localStorage.getItem('review-progress') || '未保存';
+      document.querySelector('#save').onclick = () => { localStorage.setItem('review-progress', location.origin === 'null' ? '旧预览进度' : '独立预览进度'); show(); };
+      show();
+      </script><script>console.log('preview started before load'); fetch('./data.json').then(r=>r.json()).then(x=>document.querySelector('#data').textContent=x.message)</script>`);
     await writeFile(path.join(t.env.workspace, "data.json"), '{"message":"Shared resource loaded"}');
     await writeFile(path.join(t.env.workspace, "private.txt"), "outside share");
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv: {
@@ -421,6 +426,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await review.close();
     }
     if (withReview) {
+      await old.getByRole("button", { name: "保存测试进度" }).click();
+      await old.locator("#saved").getByText("旧预览进度", { exact: true }).waitFor();
       await menu.click();
       const popup = creator.waitForEvent("popup");
       await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
@@ -434,6 +441,14 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
           return crossOriginIsolated && typeof SharedArrayBuffer === "function" && parent !== window;
         }
       }), "content lost isolation or can read its parent");
+      await frame.locator("#saved").getByText("旧预览进度", { exact: true }).waitFor();
+      await frame.getByRole("button", { name: "保存测试进度" }).click();
+      await frame.locator("#saved").getByText("独立预览进度", { exact: true }).waitFor();
+      t.note("existing save imported and the first independent view wrote a new value");
+      await review.reload();
+      await frame.locator("#saved").getByText("独立预览进度", { exact: true }).waitFor().catch(async () => {
+        throw new Error("the independent preview did not restore the updated save on reload");
+      });
       await review.close();
     }
     const anonymous = await visitor.newPage();
@@ -472,6 +487,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await review.goto(await shareLink.inputValue());
       const subdomain = review.frameLocator('iframe[title="独立 HTML 预览"]');
       await subdomain.getByText("Shared resource loaded").waitFor();
+      await subdomain.locator("#saved").getByText("未保存", { exact: true }).waitFor();
       const privateStatus = await subdomain.locator("body").evaluate(async () => (await fetch("/private.txt")).status);
       t.assertions.assert(privateStatus === 403, "review changed the share's allowed files");
       await review.getByRole("button", { name: "反馈", exact: true }).click();

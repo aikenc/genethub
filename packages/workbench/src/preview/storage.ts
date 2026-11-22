@@ -57,7 +57,7 @@ export function loadPreviewStore(namespace: string): Record<string, string> {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const store: Record<string, string> = {};
+    const store: Record<string, string> = Object.create(null);
     for (const [key, value] of Object.entries(parsed)) {
       if (typeof value === "string") store[key] = value;
     }
@@ -71,6 +71,44 @@ function storeSize(store: Record<string, string>): number {
   let size = 0;
   for (const [key, value] of Object.entries(store)) size += key.length + value.length;
   return size;
+}
+
+export function readPreviewStoreSnapshot(value: unknown): Record<string, string> | null {
+  if (typeof value !== "string" || value.length > PREVIEW_STORAGE_NAMESPACE_LIMIT * 6 + 2) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const result: Record<string, string> = Object.create(null);
+    for (const [key, item] of Object.entries(parsed)) {
+      if (typeof item !== "string" || key.length > PREVIEW_STORAGE_KEY_LIMIT || item.length > PREVIEW_STORAGE_VALUE_LIMIT) return null;
+      result[key] = item;
+    }
+    return storeSize(result) <= PREVIEW_STORAGE_NAMESPACE_LIMIT ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Apply this document's changes without overwriting untouched keys from another view. */
+export function mergePreviewStoreSnapshot(
+  namespace: string,
+  previous: Record<string, string>,
+  snapshot: Record<string, string>,
+): boolean {
+  try {
+    const store = loadPreviewStore(namespace);
+    for (const key of Object.keys(previous)) {
+      if (!Object.hasOwn(snapshot, key)) delete store[key];
+    }
+    for (const [key, value] of Object.entries(snapshot)) {
+      if (previous[key] !== value) store[key] = value;
+    }
+    if (storeSize(store) > PREVIEW_STORAGE_NAMESPACE_LIMIT) return false;
+    localStorage.setItem(storageKey(namespace), JSON.stringify(store));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export type PreviewStoreMutation =

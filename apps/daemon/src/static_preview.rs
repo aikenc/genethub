@@ -716,6 +716,10 @@ impl Manager {
         service: Option<serde_json::Value>,
         review: bool,
     ) -> Result<StaticPreviewGrant> {
+        let storage_scope = peer.as_ref().map(|peer| {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(peer.principal.as_bytes()))
+        });
         let (share, allowed) = match share {
             Some((id, deadline, files)) => (Some((id, deadline)), Some(files)),
             None => (None, None),
@@ -817,6 +821,7 @@ impl Manager {
         Ok(StaticPreviewGrant {
             action: format!("https://{authority}/.well-known/genehub/preview-bootstrap"),
             code,
+            storage_scope,
         })
     }
 

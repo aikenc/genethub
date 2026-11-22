@@ -512,6 +512,7 @@ async fn dispatch(
                     "session.previewAnnotations.v1".to_string(),
                     "preview.feedback.v1".to_string(),
                     "preview.feedback.list.v1".to_string(),
+                    "preview.feedback.visitor.v1".to_string(),
                     "preview.feedback.media-time.v1".to_string(),
                     "preview.share.view-only.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
@@ -527,6 +528,7 @@ async fn dispatch(
                     .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.v1".to_string()))
                     .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.service.v1".to_string()))
                     .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.review.v1".to_string()))
+                    .chain(crate::static_preview::enabled().then(|| "asset.preview.independent.storage.v1".to_string()))
                     .collect()),
                 isolation: Some(crate::isolation::report()),
             }))

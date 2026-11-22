@@ -37,6 +37,8 @@ struct Share {
 struct Draft {
     data: PreviewFeedbackDraft,
     share_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visitor_digest: Option<String>,
     kind: AssetPreviewKind,
     snapshot: String,
 }
@@ -304,11 +306,21 @@ async fn authorize_entry(
     }
     Ok(())
 }
+fn visitor_digest(key: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let id = uuid::Uuid::parse_str(key).context("invalid preview visitor key")?;
+    if id.get_version() != Some(uuid::Version::Random) {
+        bail!("invalid preview visitor key");
+    }
+    Ok(format!("{:x}", Sha256::digest(id.as_bytes())))
+}
+
 async fn load_draft(
     state: &Shared,
     caller: &Principal,
     workspace: &str,
     id: &str,
+    visitor: Option<&str>,
 ) -> Result<(PathBuf, Draft)> {
     valid_id(id, "pf_")?;
     let dir = home(state, workspace).await?.join("drafts").join(id);
@@ -320,8 +332,15 @@ async fn load_draft(
         bail!("invalid preview feedback draft");
     }
     authorize_entry(state, caller, workspace, &draft.data.source.path).await?;
-    if share_id(caller).is_some() && draft.share_id.as_deref() != share_id(caller) {
-        bail!("preview feedback belongs to another share");
+    if let Some(share) = share_id(caller) {
+        if draft.share_id.as_deref() != Some(share) {
+            bail!("preview feedback belongs to another share");
+        }
+        if let Some(expected) = draft.visitor_digest.as_deref() {
+            if visitor != Some(expected) {
+                bail!("preview feedback belongs to another browser");
+            }
+        }
     }
     Ok((dir, draft))
 }
@@ -355,7 +374,7 @@ pub(crate) async fn resolve_evidence(
     let id = parts[2]
         .to_str()
         .ok_or_else(|| anyhow!("invalid feedback id"))?;
-    let (dir, draft) = load_draft(state, caller, &workspace, id).await?;
+    let (dir, draft) = load_draft(state, caller, &workspace, id, None).await?;
     crate::file_access::resolve(state, &draft.data.source.absolute_path, scope).await?;
     let published = draft.data.receipt.is_some() && path == dir.join("feedback.json")
         || draft.data.bundles.iter().any(|bundle| {
@@ -382,6 +401,7 @@ async fn authorize_scope(
     workspace: &str,
     scope: &str,
     operation: &PreviewFeedbackOperation,
+    visitor: Option<&str>,
 ) -> Result<()> {
     use PreviewFeedbackOperation as Op;
     let path = match operation {
@@ -406,7 +426,7 @@ async fn authorize_scope(
         | Op::AbortArtifact { id, .. }
         | Op::Submit { id, .. }
         | Op::Read { id } => {
-            load_draft(state, caller, workspace, id)
+            load_draft(state, caller, workspace, id, visitor)
                 .await?
                 .1
                 .data
@@ -662,6 +682,12 @@ pub(crate) async fn handle(
     use PreviewFeedbackOperation as Op;
     use PreviewFeedbackResponse as Out;
     let workspace = &request.workspace_id;
+    let visitor = if share_id(caller).is_some() {
+        request.visitor_key.as_deref().map(visitor_digest).transpose()?
+    } else {
+        None
+    };
+    let visitor = visitor.as_deref();
     let workspace_scope = match caller {
         Principal::PreviewShare { .. } => peer.and_then(|peer| peer.workspace_id.as_deref()),
         _ => None,
@@ -670,7 +696,7 @@ pub(crate) async fn handle(
         if !workspace.is_empty() && workspace != scope {
             bail!("feedback workspace mismatch");
         }
-        authorize_scope(state, caller, workspace, scope, &request.operation).await?;
+        authorize_scope(state, caller, workspace, scope, &request.operation, visitor).await?;
     }
     let share = if let Some(id) = share_id(caller) {
         let share = grant(state, workspace, id).await?;
@@ -750,12 +776,12 @@ pub(crate) async fn handle(
             if share_id(caller).is_some() {
                 bail!("share permission does not include project feedback retrieval");
             }
-            let (dir, _) = load_draft(state, caller, workspace, id).await?;
+            let (dir, _) = load_draft(state, caller, workspace, id, visitor).await?;
             return Ok(Out::Receipt(Box::new(read(&dir.join("feedback.json"))?)));
         }
         Op::Draft { id } => {
             return Ok(Out::Draft(Box::new(
-                load_draft(state, caller, workspace, id).await?.1.data,
+                load_draft(state, caller, workspace, id, visitor).await?.1.data,
             )));
         }
         Op::Open {
@@ -764,7 +790,7 @@ pub(crate) async fn handle(
             draft_id: Some(id),
         } => {
             authorize_entry(state, caller, workspace, path).await?;
-            let (_, draft) = load_draft(state, caller, workspace, id).await?;
+            let (_, draft) = load_draft(state, caller, workspace, id, visitor).await?;
             if &draft.data.source.path != path || &draft.data.source.version != version {
                 bail!("preview feedback source mismatch");
             }
@@ -899,11 +925,14 @@ pub(crate) async fn handle(
         } => {
             authorize_entry(state, caller, workspace, &path).await?;
             if let Some(id) = draft_id {
-                let (_, draft) = load_draft(state, caller, workspace, &id).await?;
+                let (_, draft) = load_draft(state, caller, workspace, &id, visitor).await?;
                 if draft.data.source.path != path || draft.data.source.version != version {
                     bail!("preview feedback source mismatch");
                 }
                 return Ok(Out::Draft(Box::new(draft.data)));
+            }
+            if share.is_some() && visitor.is_none() {
+                bail!("refresh this preview to open a browser-bound draft");
             }
             let src = source(state, workspace, &path).await?;
             if src.version != version {
@@ -959,6 +988,7 @@ pub(crate) async fn handle(
                     receipt: None,
                 },
                 share_id: share_id(caller).map(str::to_owned),
+                visitor_digest: visitor.map(str::to_owned),
                 kind,
                 snapshot,
             };
@@ -969,7 +999,7 @@ pub(crate) async fn handle(
             if share_id(caller).is_some() {
                 bail!("share permission does not include project feedback retrieval");
             }
-            let (dir, _) = load_draft(state, caller, workspace, &id).await?;
+            let (dir, _) = load_draft(state, caller, workspace, &id, visitor).await?;
             Ok(Out::Receipt(Box::new(read(&dir.join("feedback.json"))?)))
         }
         operation => {
@@ -984,7 +1014,7 @@ pub(crate) async fn handle(
                 | Op::Submit { id, .. } => id.clone(),
                 _ => unreachable!(),
             };
-            let (dir, mut draft) = load_draft(state, caller, workspace, &id).await?;
+            let (dir, mut draft) = load_draft(state, caller, workspace, &id, visitor).await?;
             if matches!(operation, Op::Draft { .. }) {
                 return Ok(Out::Draft(Box::new(draft.data)));
             }
