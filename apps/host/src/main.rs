@@ -24,9 +24,12 @@ mod load;
 mod process;
 mod pty;
 mod rtc;
+mod scoped_fs;
 mod store;
+mod tls_server;
 mod update;
 mod version;
+mod worker;
 
 use std::env;
 use std::path::PathBuf;

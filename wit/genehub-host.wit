@@ -239,6 +239,51 @@ interface image-preview {
   resize: func(bytes: list<u8>, edge: u16) -> result<job, string>;
 }
 
+/// Bounded control messages for another instance of the active component.
+interface worker {
+  resource instance {
+    id: func() -> u64;
+    closed: func() -> bool;
+    send: func(message: list<u8>) -> result<_, string>;
+    receive: func() -> result<option<list<u8>>, string>;
+  }
+  start: func(entry: string, arguments: list<string>) -> result<instance, string>;
+  receive: func() -> result<option<list<u8>>, string>;
+  send: func(message: list<u8>) -> result<_, string>;
+}
+
+/// Host-side file descriptors. Directory scopes walk without following symlinks.
+interface scoped-fs {
+  enum file-error { forbidden, missing, unavailable }
+  resource file {
+    length: func() -> u64;
+    read-at: func(offset: u64, max-bytes: u32) -> result<list<u8>, file-error>;
+  }
+  resource directory {
+    open: func(path: string) -> result<file, file-error>;
+  }
+  scope: func(workspace: string, root: string) -> result<directory, file-error>;
+}
+
+/// TLS server transport. The component owns HTTP and routing.
+interface tls-server {
+  variant read-result { pending, data(list<u8>), closed }
+  resource connection {
+    poll-server-name: func() -> result<option<string>, string>;
+    read: func(max-bytes: u32) -> result<read-result, string>;
+    write: func(bytes: list<u8>) -> result<u32, string>;
+    flush: func() -> result<bool, string>;
+    shutdown: func() -> result<bool, string>;
+  }
+  resource listener {
+    port: func() -> u16;
+    accept: func() -> result<option<connection>, string>;
+  }
+  transfer: func(conn: connection, target: u64) -> result<_, string>;
+  receive: func() -> result<option<connection>, string>;
+  listen-loopback: func(cert: string, key: string) -> result<listener, string>;
+}
+
 /// The one v2 artifact. A single component carries both entries; the shell
 /// picks one per OS process (`genehub-host-dev run --entry daemon|agent`).
 world daemon {
@@ -250,8 +295,12 @@ world daemon {
   import isolation;
   import component-update;
   import image-preview;
+  import worker;
+  import scoped-fs;
+  import tls-server;
   /// Resident daemon. Returns "reload" or "shutdown".
   export run: func() -> result<string, string>;
   /// Independent OS process: same artifact, agent entry.
   export agent-run: func() -> result<u32, string>;
+  export worker-run: func(entry: string, arguments: list<string>) -> result<_, string>;
 }

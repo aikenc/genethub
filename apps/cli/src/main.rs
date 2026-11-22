@@ -7,6 +7,7 @@
 
 mod control;
 mod invoke;
+#[path = "../../daemon/src/preview_data.rs"]
 mod static_preview;
 mod update;
 mod wasm;

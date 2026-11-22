@@ -265,6 +265,8 @@ impl wit::Host for crate::load::Host {
         cwd: Option<String>,
         independent_session: bool,
     ) -> Result<Resource<ChildHandle>, wit::SpawnError> {
+        self.require_primary_instance()
+            .map_err(|message| wit::SpawnError { message })?;
         let child = ChildHandle::spawn(
             &argv,
             &env,

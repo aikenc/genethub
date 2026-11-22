@@ -33,6 +33,8 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 
 你的机器上只有一个常驻 daemon host 进程：原生 `genehub-host` 装载 `genehub_guest.wasm` 的 daemon 入口；每个内置 agent 由另一个短生命周期 host 进程装载同一制品的 agent 入口。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
 
+独立网页预览启用后，主 daemon WASM 管理视图授权、预览上行与执行实例。常驻预览线程和按登记运行实例分配的服务线程在同一个 host 进程中，各有自己的 Store，执行同一份组件的 worker 入口。静态执行者使用 TLS 握手得到的主机名选取目标。宿主给目标 Store 创建新的连接句柄，应用 TLS、HTTP 和文件授权的生命周期随视图清理。零线程配置在主组件中运行同一服务。
+
 **产品运行时只有 WASM guest。** 不存在可切换的原生 daemon/agent 模式。`genehub-host` 与薄 `genet` 只负责装载和生命周期。缺 host、缺 `genehub_guest.wasm`、或二者 `sha256(wit/genehub-host.wit)` 对不上时，在 instantiate 之前失败，不得改跑原生业务二进制，也不得把原生路径当兼容层保留。
 
 原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
@@ -293,7 +295,7 @@ interface FabricAuthority {
 ```
 apps/daemon      ← Rust：编入 guest 的会话内核 + adapter 层 + 本地 WS + 出站长连接
 apps/agent       ← Rust：编入同一 guest 的内置 Genet Agent
-apps/guest       ← wasm32-wasip2 Component：daemon/agent 双入口
+apps/guest       ← wasm32-wasip2 Component：daemon / agent / worker 入口
 apps/host        ← 原生 Wasmtime/WASI 与 typed OS/RTC 连接层
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
 apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台

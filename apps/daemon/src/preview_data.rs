@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+#[cfg(not(target_family = "wasm"))]
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(not(target_family = "wasm"))]
 use cap_std::fs::{Dir, OpenOptions};
 use futures_util::{StreamExt, TryStreamExt};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, Limited, StreamBody};
@@ -21,21 +23,35 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
+#[cfg(not(target_family = "wasm"))]
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::AsyncReadExt;
+#[cfg(not(target_family = "wasm"))]
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+#[cfg(not(target_family = "wasm"))]
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, RwLock, Semaphore};
 use tokio::time::Instant;
+#[cfg(not(target_family = "wasm"))]
 use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 
+#[cfg(target_family = "wasm")]
+#[path = "preview_data/guest_io.rs"]
+mod guest_io;
+#[path = "preview_data/relay.rs"]
 mod relay;
+#[path = "preview_data/review.rs"]
 mod review;
+#[path = "preview_data/service.rs"]
 mod service;
+#[cfg(target_family = "wasm")]
+use guest_io::{open_file, open_site, Dir};
 
+#[cfg(not(target_family = "wasm"))]
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_ALLOWED_FILES: usize = 4096;
 const MAX_VIEWS: usize = 64;
@@ -141,6 +157,10 @@ enum Control {
     Close {
         host: String,
     },
+    Route {
+        host: String,
+        target: u64,
+    },
     JoinRelay {
         url: String,
         ticket: String,
@@ -148,6 +168,7 @@ enum Control {
     RelayStatus,
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn run(cert: &str, key: &str, suffix: &str) -> Result<()> {
     if suffix.len() > 220 || !suffix.contains('.') || !suffix.split('.').all(valid_label) {
         bail!("invalid preview hostname suffix");
@@ -168,6 +189,7 @@ pub fn run(cert: &str, key: &str, suffix: &str) -> Result<()> {
         .block_on(serve(suffix, TlsAcceptor::from(Arc::new(tls))))
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn serve(suffix: &str, tls: TlsAcceptor) -> Result<()> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let address = listener.local_addr()?;
@@ -179,6 +201,7 @@ async fn serve(suffix: &str, tls: TlsAcceptor) -> Result<()> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, views: &Views) -> Result<()> {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
@@ -194,6 +217,7 @@ async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, views: &Views) -> 
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn control_loop(suffix: &str, views: &Views, address: std::net::SocketAddr) -> Result<()> {
     let mut control = BufReader::new(tokio::io::stdin());
     let mut command = Vec::new();
@@ -206,45 +230,206 @@ async fn control_loop(suffix: &str, views: &Views, address: std::net::SocketAddr
         if !command.ends_with(b"\n") {
             bail!("incomplete or oversized worker command");
         }
-        let result = match serde_json::from_slice::<Control>(&command) {
-            Ok(Control::JoinRelay { url, ticket }) => {
-                match relay::connect(url, ticket, address).await {
-                    Ok(new) => {
-                        if let Some(old) = uplink.replace(new) {
-                            old.abort();
-                        }
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            Ok(Control::RelayStatus) => {
-                if uplink
-                    .as_ref()
-                    .is_some_and(|connection| !connection.is_finished())
-                {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("preview Relay is disconnected"))
-                }
-            }
-            Ok(command) => apply(command, views, suffix).await,
-            Err(_) => Err(anyhow::anyhow!("invalid command")),
-        };
+        let result = handle_command(&command, suffix, views, address, &mut uplink).await;
         command.clear();
-        reply(serde_json::json!({
-            "ok": result.is_ok(),
-            "error": result.err().map(|error| error.to_string()),
-        }))?;
+        reply(reply_value(result))?;
     }
 }
 
+fn reply_value(result: Result<()>) -> serde_json::Value {
+    serde_json::json!({
+        "ok": result.is_ok(),
+        "error": result.err().map(|error| error.to_string()),
+    })
+}
+
+async fn handle_command(
+    command: &[u8],
+    suffix: &str,
+    views: &Views,
+    address: std::net::SocketAddr,
+    uplink: &mut Option<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    match serde_json::from_slice::<Control>(command) {
+        Ok(Control::JoinRelay { url, ticket }) => {
+            if let Some(old) = uplink.take() {
+                old.abort();
+                let _ = old.await;
+            }
+            *uplink = Some(relay::connect(url, ticket, address).await?);
+            Ok(())
+        }
+        Ok(Control::RelayStatus) => {
+            if uplink
+                .as_ref()
+                .is_some_and(|connection| !connection.is_finished())
+            {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("preview Relay is disconnected"))
+            }
+        }
+        Ok(Control::Route { .. }) => Err(anyhow::anyhow!("invalid worker routing command")),
+        Ok(command) => apply(command, views, suffix).await,
+        Err(_) => Err(anyhow::anyhow!("invalid command")),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn reply(value: serde_json::Value) -> Result<()> {
     use std::io::Write;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{value}")?;
     stdout.flush()?;
     Ok(())
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) mod guest_control {
+    use anyhow::{Context, Result};
+    use genet_wasi::wit::genehub::host::worker;
+    use tokio::sync::mpsc;
+
+    pub(crate) enum Port {
+        Thread,
+        Local {
+            incoming: mpsc::Receiver<Vec<u8>>,
+            outgoing: mpsc::Sender<Vec<u8>>,
+        },
+    }
+
+    impl Port {
+        pub(super) async fn receive(&mut self) -> Result<Vec<u8>> {
+            match self {
+                Self::Thread => loop {
+                    if let Some(message) = worker::receive().map_err(anyhow::Error::msg)? {
+                        return Ok(message);
+                    }
+                    genet_wasi::poll::idle().await;
+                },
+                Self::Local { incoming, .. } => {
+                    incoming.recv().await.context("preview manager stopped")
+                }
+            }
+        }
+
+        pub(super) fn reply(&self, value: serde_json::Value) -> Result<()> {
+            let bytes = serde_json::to_vec(&value)?;
+            match self {
+                Self::Thread => worker::send(&bytes).map_err(anyhow::Error::msg),
+                Self::Local { outgoing, .. } => outgoing
+                    .try_send(bytes)
+                    .map_err(|_| anyhow::anyhow!("preview manager stopped reading")),
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn run_guest(
+    cert: &str,
+    key: &str,
+    suffix: &str,
+    mut port: guest_control::Port,
+    accepts_inline: bool,
+) -> Result<()> {
+    use genet_wasi::wit::genehub::host::tls_server;
+    if suffix.len() > 220 || !suffix.contains('.') || !suffix.split('.').all(valid_label) {
+        bail!("invalid preview hostname suffix");
+    }
+    // Transport is negotiated once by the uplink owner. Other workers receive
+    // a freshly granted Store-local handle to the negotiated TLS stream.
+    let listener = accepts_inline
+        .then(|| tls_server::listen_loopback(cert, key))
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let address = std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        listener.as_ref().map_or(0, |value| value.port()),
+    ));
+    port.reply(serde_json::json!({ "port": address.port() }))?;
+    let views = Views::default();
+    let routes = Arc::new(RwLock::new(HashMap::<String, u64>::new()));
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let accept = async {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            while sessions.try_join_next().is_some() {}
+            let connection = match &listener {
+                Some(listener) => listener.accept(),
+                None => tls_server::receive(),
+            }
+            .map_err(anyhow::Error::msg)?;
+            if let Some(connection) = connection {
+                if let Ok(permit) = connections.clone().try_acquire_owned() {
+                    let views = views.clone();
+                    let routes = routes.clone();
+                    sessions.spawn(async move {
+                        let _permit = permit;
+                        let Ok((io, host)) = guest_io::Tls::open(connection).await else {
+                            return;
+                        };
+                        let target = routes.read().await.get(&host).copied();
+                        if let Some(target) = target {
+                            let _ = tls_server::transfer(io.into_connection(), target);
+                        } else {
+                            serve_http(io, host, views).await;
+                        }
+                    });
+                }
+            } else {
+                genet_wasi::poll::idle().await;
+            }
+        }
+    };
+    let control = async {
+        let mut uplink = UplinkTask(None);
+        loop {
+            let message = port.receive().await?;
+            let result = match serde_json::from_slice::<Control>(&message) {
+                Ok(Control::Route { host, target }) if accepts_inline && target != 0 => {
+                    if !host
+                        .strip_suffix(suffix)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+                    {
+                        Err(anyhow::anyhow!("invalid routed host"))
+                    } else {
+                        routes.write().await.insert(host, target);
+                        Ok(())
+                    }
+                }
+                Ok(Control::Close { host }) => {
+                    routes.write().await.remove(&host);
+                    apply(Control::Close { host }, &views, suffix).await
+                }
+                Ok(Control::JoinRelay { .. }) if !accepts_inline => {
+                    Err(anyhow::anyhow!("executor has no uplink"))
+                }
+                _ => handle_command(&message, suffix, &views, address, &mut uplink.0).await,
+            };
+            port.reply(reply_value(result))?;
+        }
+    };
+    let result = tokio::select! {
+        result = accept => result,
+        result = control => result,
+    };
+    for (_, view) in views.write().await.drain() {
+        view.revoked.send_replace(true);
+    }
+    result
+}
+
+#[cfg(target_family = "wasm")]
+struct UplinkTask(Option<tokio::task::JoinHandle<()>>);
+
+#[cfg(target_family = "wasm")]
+impl Drop for UplinkTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 
 fn valid_label(label: &str) -> bool {
@@ -329,7 +514,10 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             }
             let workbench_origin = HeaderValue::from_str(workbench_origin.trim_end_matches('/'))?;
             let frame_policy = if review {
-                HeaderValue::from_str(&format!("frame-ancestors {}; frame-src 'none'", workbench_origin.to_str()?))?
+                HeaderValue::from_str(&format!(
+                    "frame-ancestors {}; frame-src 'none'",
+                    workbench_origin.to_str()?
+                ))?
             } else {
                 FRAME_POLICY
             };
@@ -340,12 +528,19 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             let entry = local_path(&entry, false).context("invalid preview entry")?;
             let scope = FileScope::from_command(scope, &entry)?;
             let path = workspace.join(&root);
+            #[cfg(not(target_family = "wasm"))]
             let (directory, entry) = tokio::task::spawn_blocking(move || {
                 let directory = open_site(&workspace, &root).context("opening preview root")?;
                 open_file(&directory, &entry).context("opening preview entry")?;
                 Ok::<_, anyhow::Error>((directory, entry))
             })
             .await??;
+            #[cfg(target_family = "wasm")]
+            let directory = {
+                let directory = open_site(&workspace, &root).context("opening preview root")?;
+                open_file(&directory, &entry).context("opening preview entry")?;
+                directory
+            };
             let mut views = views.write().await;
             views.retain(|_, view| view.deadline > Instant::now());
             if views.contains_key(&host) || views.len() >= MAX_VIEWS {
@@ -365,7 +560,8 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             let origin = match https_port {
                 None | Some(443) => format!("https://{host}"),
                 Some(port) => format!("https://{host}:{port}"),
-            }.parse()?;
+            }
+            .parse()?;
             views.insert(
                 host,
                 Arc::new(View {
@@ -394,7 +590,9 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                 view.revoked.send_replace(true);
             }
         }
-        Control::JoinRelay { .. } | Control::RelayStatus => unreachable!("handled by control loop"),
+        Control::JoinRelay { .. } | Control::RelayStatus | Control::Route { .. } => {
+            unreachable!("handled by control loop")
+        }
     }
     Ok(())
 }
@@ -466,6 +664,7 @@ fn request_path(raw: &str, entry: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn open_site(workspace: &Path, root: &Path) -> io::Result<Dir> {
     let mut directory = match (workspace.parent(), workspace.file_name()) {
         (Some(parent), Some(name)) => {
@@ -479,6 +678,7 @@ fn open_site(workspace: &Path, root: &Path) -> io::Result<Dir> {
     Ok(directory)
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn open_file(root: &Dir, path: &Path) -> io::Result<(std::fs::File, u64)> {
     let mut directory = root.try_clone()?;
     for component in path.parent().into_iter().flat_map(Path::iter) {
@@ -500,6 +700,7 @@ fn open_file(root: &Dir, path: &Path) -> io::Result<(std::fs::File, u64)> {
     Ok((file.into_std(), metadata.len()))
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn serve_connection(client: TcpStream, tls: TlsAcceptor, views: Views) {
     let Ok(Ok(client)) = tokio::time::timeout(TLS_TIMEOUT, tls.accept(client)).await else {
         return;
@@ -512,6 +713,13 @@ async fn serve_connection(client: TcpStream, tls: TlsAcceptor, views: Views) {
     else {
         return;
     };
+    serve_http(client, host, views).await;
+}
+
+async fn serve_http<I>(client: I, host: String, views: Views)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     let view = views.read().await.get(&host).cloned();
     let Some(view) = view.filter(|view| view.deadline > Instant::now()) else {
         return;
@@ -557,17 +765,23 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     if request.uri().path() == BOOTSTRAP_PATH {
         return bootstrap(request, &view).await;
     }
-    if view.review && request.uri().path() == review::FRAME_PATH && request.method() == Method::GET {
+    if view.review && request.uri().path() == review::FRAME_PATH && request.method() == Method::GET
+    {
         return review::frame(&view);
     }
-    if view.review && request.uri().path() == review::SCRIPT_PATH && request.method() == Method::GET {
+    if view.review && request.uri().path() == review::SCRIPT_PATH && request.method() == Method::GET
+    {
         return if has_view_cookie(request.headers(), &view.cookie) {
             review::script(&view)
         } else {
             empty(StatusCode::FORBIDDEN)
         };
     }
-    if let Some(run) = view.service.as_ref().filter(|_| request.uri().path().starts_with("/api/")) {
+    if let Some(run) = view
+        .service
+        .as_ref()
+        .filter(|_| request.uri().path().starts_with("/api/"))
+    {
         if !has_view_cookie(request.headers(), &view.cookie) {
             return empty(StatusCode::FORBIDDEN);
         }
@@ -613,12 +827,15 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
             permit
         }
     };
+    #[cfg(not(target_family = "wasm"))]
     let opened = tokio::task::spawn_blocking({
         let view = view.clone();
         let path = path.clone();
         move || open_file(&view.directory, &path)
     })
     .await;
+    #[cfg(target_family = "wasm")]
+    let opened: Result<_, tokio::task::JoinError> = Ok(open_file(&view.directory, &path));
     let (file, size) = match opened {
         Ok(Ok(opened)) => opened,
         Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied => {
@@ -658,15 +875,22 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
     let media_type = content_type(&path);
     let review_page = view.review
         && media_type.starts_with("text/html")
-        && request.headers().get("sec-fetch-dest").is_some_and(|dest| dest == "iframe")
+        && request
+            .headers()
+            .get("sec-fetch-dest")
+            .is_some_and(|dest| dest == "iframe")
         && range.is_none();
     let (body, wire_length) = if request.method() == Method::HEAD {
         (empty_body(), length)
     } else {
+        #[cfg(not(target_family = "wasm"))]
         let mut file = tokio::fs::File::from_std(file);
+        #[cfg(not(target_family = "wasm"))]
         if start != 0 && file.seek(io::SeekFrom::Start(start)).await.is_err() {
             return empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
+        #[cfg(target_family = "wasm")]
+        let mut file = file.at(start);
         let (prefix, consumed) = if review_page {
             match review::read_prefix(&mut file, length, &view.workbench_origin).await {
                 Ok((prefix, consumed)) => (Some(prefix), consumed),
@@ -676,15 +900,17 @@ async fn respond(request: Request<Incoming>, view: Arc<View>, host: &str) -> Res
             (None, 0)
         };
         let wire_length = length - consumed + prefix.as_ref().map_or(0, |chunk| chunk.len() as u64);
-        let stream = futures_util::stream::iter(prefix.map(Ok)).chain(
-            ReaderStream::with_capacity(file.take(length - consumed), CHUNK_SIZE),
-        )
-        // Keep the read budget for the lifetime of the HTTP body.
-        .map(move |chunk| {
-            let _permit = &permit;
-            chunk
-        })
-        .map_ok(Frame::data);
+        let stream = futures_util::stream::iter(prefix.map(Ok))
+            .chain(ReaderStream::with_capacity(
+                file.take(length - consumed),
+                CHUNK_SIZE,
+            ))
+            // Keep the read budget for the lifetime of the HTTP body.
+            .map(move |chunk| {
+                let _permit = &permit;
+                chunk
+            })
+            .map_ok(Frame::data);
         (StreamBody::new(stream).boxed_unsync(), wire_length)
     };
     let mut response = Response::builder()

@@ -17,14 +17,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tokio::{net::TcpStream, sync::Semaphore, time::timeout};
+use tokio::{sync::Semaphore, time::timeout};
 use tokio_tungstenite::{
     tungstenite::{
         handshake::derive_accept_key,
         protocol::{frame::coding::CloseCode, CloseFrame, Role, WebSocketConfig},
         Message,
     },
-    MaybeTlsStream, WebSocketStream,
+    WebSocketStream,
 };
 
 use super::{empty, empty_body, Body, View};
@@ -49,7 +49,10 @@ const RESPONSE_HEADERS: &[&str] = &[
     "etag",
 ];
 
-type Runner = WebSocketStream<MaybeTlsStream<TcpStream>>;
+#[cfg(not(target_family = "wasm"))]
+type Runner = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[cfg(target_family = "wasm")]
+type Runner = crate::transport::ws::Socket;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,8 +100,11 @@ impl Run {
 
     async fn connect(&self) -> Result<Runner> {
         let url = format!("ws://127.0.0.1:{}/", self.port);
+        #[cfg(not(target_family = "wasm"))]
         let (mut socket, _) =
             tokio_tungstenite::connect_async_with_config(url, config(), true).await?;
+        #[cfg(target_family = "wasm")]
+        let mut socket = crate::transport::ws::connect(&url, config().unwrap_or_default()).await?;
         let nonce = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),

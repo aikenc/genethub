@@ -119,6 +119,7 @@ impl wit::HostJob for crate::load::Host {
 
 impl wit::Host for crate::load::Host {
     async fn resize(&mut self, bytes: Vec<u8>, edge: u16) -> Result<Resource<Job>, String> {
+        self.require_primary_instance()?;
         if bytes.is_empty() || bytes.len() > MAX_INPUT_BYTES || !matches!(edge, 128 | 1024) {
             return Err("image input exceeds the preview budget".into());
         }
