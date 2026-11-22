@@ -16,6 +16,7 @@ interface Manifest {sourceSha:string;packaging:string;installerCreated:boolean;i
 interface CloudManifest {root:string;sourceSha:string;entry:string;node:{path:string;sha256:string};files:Array<{path:string;sha256:string}>}
 interface NativeProcess {ProcessId:number;ParentProcessId:number;ExecutablePath:string|null;CreationDate:string}
 interface Target {url:string;type:string;webSocketDebuggerUrl:string}
+interface BuildConfiguration {app?:{windows?:Array<{additionalBrowserArgs?:string}>}}
 const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Manifest;
 const cloud=JSON.parse(readFileSync(cloudManifestFile,"utf8")) as CloudManifest;
 const hash = (file:string) => createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -39,6 +40,14 @@ function verify() {
   check(hash(manifest.configuration) === manifest.configurationSha256, "Build configuration changed");
 }
 verify();
+// Elevated WebView2 hosts ignore the environment override. A no-bundle
+// validation build can embed an explicit loopback-only endpoint instead.
+const buildConfiguration=JSON.parse(readFileSync(manifest.configuration,"utf8")) as BuildConfiguration;
+const browserArgs=buildConfiguration.app?.windows?.[0]?.additionalBrowserArgs;
+const debugEndpoint=browserArgs?.match(/^--remote-debugging-address=127\.0\.0\.1 --remote-debugging-port=([1-9]\d{0,4})$/);
+const configuredPort=debugEndpoint ? Number(debugEndpoint[1]) : undefined;
+check(browserArgs===undefined || (configuredPort!==undefined && configuredPort>=1024 && configuredPort<=65535),
+  "Validation browser arguments must specify only a nonprivileged loopback debugger");
 const roaming = ps("[Environment]::GetFolderPath('ApplicationData')");
 const local = ps("[Environment]::GetFolderPath('LocalApplicationData')");
 const dataRoots = [...new Set([join(roaming, manifest.identifier), join(local, manifest.identifier)])];
@@ -95,7 +104,8 @@ function launchOwned(exe:string,args:string[],env:NodeJS.ProcessEnv,cwd:string,v
 function launch(port:number,hubOrigin:string) {
   const env=isolatedEnv();
   env.GENEHUB_LOCAL_HUB_URL=hubOrigin;
-  env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=`--remote-debugging-port=${port}`;
+  delete env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS;
+  if(configuredPort===undefined)env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=`--remote-debugging-port=${port}`;
   child=launchOwned(executable,[],env,repo,true);
 }
 async function listen(server:Server, port=0) {
@@ -104,7 +114,7 @@ async function listen(server:Server, port=0) {
   check(address && typeof address!=="string","Missing bound test port");return address.port;
 }
 async function close(server:Server|undefined) {if(server)await new Promise<void>(ok=>server.close(()=>ok()));}
-async function freePort() { const s=createServer(); const p=await listen(s); await close(s); return p; }
+async function freePort(port=0) { const s=createServer(); const p=await listen(s,port); await close(s); return p; }
 async function page(port:number, accept:(page:Target)=>boolean):Promise<Target> {
   const deadline=Date.now()+45_000; let last="No page";
   while(Date.now()<deadline) {
@@ -160,7 +170,7 @@ try {
   }
   check(ready,"Real Hub did not become ready");
   for(const p of dataRoots) {mkdirSync(p,{recursive:true});writeFileSync(join(p,marker),expectedSource,{flag:"wx"});}
-  const port=await freePort();
+  const port=await freePort(configuredPort);
   await close(reservation);reservation=undefined;
   launch(port,apiOrigin);
   const boot=await page(port,p=>p.url.startsWith("http://tauri.localhost")||p.url.startsWith("tauri://"));
