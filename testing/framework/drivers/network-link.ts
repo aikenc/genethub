@@ -229,12 +229,10 @@ export async function startShapedTcpProxy(input: {
       directions.add(reverse);
       client.resume();
     });
-    const forget = () => {
-      sockets.delete(client);
-      sockets.delete(upstream);
-    };
-    client.once("close", forget);
-    upstream.once("close", forget);
+    // A half-close can leave delayed bytes waiting for the other socket.
+    // Retain each live socket so stop() can close the accepted connection.
+    client.once("close", () => sockets.delete(client));
+    upstream.once("close", () => sockets.delete(upstream));
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
