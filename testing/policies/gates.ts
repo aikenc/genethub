@@ -21,6 +21,11 @@ export function selectForGate(
   if (item.id === "specialty.agent.cli.builtin-agent-tests.claude") {
     return { include: false, reason: "Human-approved temporary Claude replay waiver (2026-11-07, u_ef9dc0c479874bc9b4ab3458bd03deb9); CodeBuddy replay remains required" };
   }
+  // Human u_73c03654930b4cfc85cb90a10679b9a5 approved deferring the
+  // official Cursor installer checks until the Linux runner can reach upstream.
+  if ((gate === "merge" || gate === "beta") && item.tags.includes("cursor-install")) {
+    return { include: false, reason: "Human-approved temporary Cursor installer deferral (2026-11-22, u_73c03654930b4cfc85cb90a10679b9a5); run explicitly once the Linux runner can reach Cursor" };
+  }
   // L13 terminal states never run, even when selected explicitly. They remain
   // registered so plans can report why they are excluded.
   if (item.tags.includes("legacy-suspended")) {
