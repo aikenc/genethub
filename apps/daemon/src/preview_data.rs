@@ -1028,10 +1028,17 @@ async fn bootstrap(request: Request<Incoming>, view: &View) -> Response<Body> {
     let mut response = empty(StatusCode::SEE_OTHER);
     let headers = response.headers_mut();
     headers.insert(header::LOCATION, view.location.clone());
+    // Review lives under an exact, CSP-authorized workbench ancestor. Keep its
+    // cookie scoped to the source host and the browser's embedding site.
+    let cookie_policy = if view.review {
+        "SameSite=None; Partitioned"
+    } else {
+        "SameSite=Lax"
+    };
     headers.insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!(
-            "{COOKIE_NAME}={}; Max-Age={max_age}; Secure; HttpOnly; SameSite=Lax; Path=/",
+            "{COOKIE_NAME}={}; Max-Age={max_age}; Secure; HttpOnly; {cookie_policy}; Path=/",
             view.cookie,
         ))
         .expect("cookie contains only ASCII"),

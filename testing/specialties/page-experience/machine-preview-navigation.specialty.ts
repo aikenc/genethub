@@ -85,9 +85,17 @@ defineSpecialty({
     await page.getByRole("heading", {name: "Install", exact: true}).waitFor();
     const windows = browser.context.pages().length;
     await page.getByRole("link", {name: "Jump to install", exact: true}).click();
-    await t.tools.waitUntil(async () => await page.getByRole("heading", {name: "Install", exact: true}).evaluate(node => {const r=node.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight;}), 5000);
+    await t.tools.waitUntil(async () => await page.getByRole("heading", {name: "Install", exact: true}).evaluate(node => {const r=node.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight;}), 5000).catch(async () => {
+      const geometry = await page.getByRole("heading", {name: "Install", exact: true}).evaluate(node => ({
+        id: node.id, top: node.getBoundingClientRect().top, height: innerHeight,
+        articleScroll: node.closest("article")?.scrollTop,
+      }));
+      throw new Error(`Markdown anchor did not move into the preview viewport: ${JSON.stringify(geometry)}`);
+    });
     t.assertions.assert(browser.context.pages().length === windows, "Markdown anchor opened a new window");
-    await page.getByRole("status").filter({hasText: "页面参数：?mode=read"}).waitFor();
+    await page.getByRole("button", {name: "预览信息", exact: true}).click();
+    await page.getByRole("complementary", {name: "预览信息"}).getByText(/\?mode=read/).waitFor();
+    await page.getByRole("button", {name: "关闭信息", exact: true}).click();
     await page.getByRole("link", {name: "Open source"}).click();
     await page.getByText("source file target", {exact: true}).waitFor();
     await page.getByRole("button", {name: "后退", exact: true}).click();
@@ -102,9 +110,9 @@ defineSpecialty({
     await page.getByRole("button", {name: "后退", exact: true}).click();
     await frame().getByRole("heading", {name: "Start", exact: true}).waitFor();
     await frame().getByRole("button", {name: "Submit externally", exact: true}).click();
-    // A blocked navigation may replace Chromium's iframe with an error document.
-    // Assert the browser's policy violation and the absence of outgoing requests.
-    await t.tools.waitUntil(() => consumer!.errors.some(error => error.includes("form-action 'none'") && error.includes("request has been blocked")), 5_000);
+    await page.getByRole("button", {name: "反馈", exact: true}).click();
+    await page.getByRole("button", {name: "运行日志", exact: true}).click();
+    await page.locator("summary").filter({hasText: "预览已阻止表单提交"}).waitFor({timeout: 10_000});
     t.assertions.assert(formRequests.length === 0, "a form request escaped the Preview policy");
     t.note("Actual local WASI plus Chromium, deployed workbench CSP, opaque iframe, local form button/Enter/required validation with blocked external submission, fetch/XHR/module/HEAD/abort, visible missing file, query/anchor, HTML→Markdown→text and history.");
   } finally { await consumer?.close(); await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }

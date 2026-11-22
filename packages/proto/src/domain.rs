@@ -976,6 +976,11 @@ pub struct PreviewAnnotationSource {
 #[ts(export, export_to = "index.ts")]
 pub enum PreviewAnnotationTarget {
     #[serde(rename_all = "camelCase")]
+    VideoTime {
+        #[ts(type = "number")]
+        time_ms: u64,
+    },
+    #[serde(rename_all = "camelCase")]
     MarkdownLines {
         #[ts(type = "number")]
         start_line: u32,

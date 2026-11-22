@@ -13,7 +13,7 @@ import type { PreviewAnnotation, PreviewAnnotationTarget, PreviewReviewDraft } f
 
 import type { FileFeedbackReview } from "./fileFeedback";
 import type { Client } from "../protocol/client";
-import { PreviewFileFeedbackOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, previewTextButton, PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   MarkdownAnnotationContext,
   MarkdownAnnotationMarksContext,
@@ -22,6 +22,7 @@ import {
 import {
   defaultImageRect,
   PREVIEW_ANNOTATIONS_FEATURE,
+  previewTimeLabel,
   rectFromDisplayBox,
   type NaturalRect,
 } from "./reviewDraft";
@@ -45,6 +46,7 @@ type ReviewContextValue = {
   notes: PreviewAnnotation[];
   pickHtml: (hit: HtmlAnnotationHit) => void;
   pickImage: (rect: NaturalRect) => void;
+  pickVideoTime: (timeMs: number) => void;
   openNote: (id: string) => void;
   htmlSelection: string | null;
   bar: { toggle: () => void; count: number; disabled: boolean; openDraft: () => void } | null;
@@ -75,7 +77,8 @@ export function PreviewReviewChrome({
   fileFeedback?: FileFeedbackReview;
   children: ReactNode;
 }) {
-  const supported = kind === "markdown" || kind === "html" || kind === "image";
+  const supported = kind === "markdown" || kind === "html" || kind === "image"
+    || (kind === "video" && !!fileFeedback && !!client.identity?.features?.includes("preview.feedback.media-time.v1"));
   const available = enabled && supported && (!!fileFeedback || !!client.identity?.features?.includes(PREVIEW_ANNOTATIONS_FEATURE));
   const [draft, setDraft] = useState<PreviewReviewDraft>(emptyDraft);
   const [active, setActive] = useState(false);
@@ -148,6 +151,14 @@ export function PreviewReviewChrome({
       label: "图片区域，编号在保存时确定",
       target: { kind: "imageRect", ...rect },
     });
+    setComment("");
+    setProblem(null);
+  }, []);
+
+  const pickVideoTime = useCallback((timeMs: number) => {
+    setLineRange(null);
+    setPending({ mode: "create", id: `ann-${crypto.randomUUID()}`,
+      label: `视频 ${previewTimeLabel(timeMs)}`, target: { kind: "videoTime", timeMs } });
     setComment("");
     setProblem(null);
   }, []);
@@ -234,6 +245,7 @@ export function PreviewReviewChrome({
     notes,
     pickHtml,
     pickImage,
+    pickVideoTime,
     openNote,
     htmlSelection: pending?.mode === "create" && pending.target.kind === "htmlElement" ? pending.target.selector : null,
     bar: available
@@ -261,7 +273,7 @@ export function PreviewReviewChrome({
       <MarkdownAnnotationContext.Provider value={context.active && kind === "markdown" ? pickMarkdown : null}>
         <MarkdownAnnotationMarksContext.Provider value={markdownMarks}>
         <div className="relative flex min-h-0 flex-1 flex-col">
-          {available ? <PreviewToolbarPortal><PreviewAnnotationBar /></PreviewToolbarPortal> : null}
+          {available ? <PreviewAnnotationBar /> : null}
           {problem && !pending ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}</p> : null}
           {children}
           {pending ? (
@@ -409,103 +421,45 @@ export function ImageAnnotationLayer({ image }: { image: HTMLImageElement | null
   );
 }
 
+export function VideoTimeAnnotation({ video }: { video: HTMLVideoElement | null }) {
+  const review = useContext(PreviewReviewContext);
+  if (!review || !video) return null;
+  const points = review.notes.filter(note => note.target.kind === "videoTime");
+  const pick = () => {
+    if (!Number.isFinite(video.currentTime)) return;
+    video.pause();
+    review.pickVideoTime(Math.round(video.currentTime * 1000));
+  };
+  return <div className="absolute left-2 top-2 flex max-w-[calc(100%-1rem)] flex-wrap gap-1">
+    {review.active ? <button type="button" className="rounded bg-surface px-2 py-1 text-xs text-fg" onClick={pick}>批注当前时间</button> : null}
+    {points.map(note => note.target.kind === "videoTime" ? <button type="button" key={note.id}
+      className="rounded bg-surface px-2 py-1 text-xs text-fg" onClick={() => {
+        if (note.target.kind !== "videoTime") return;
+        video.pause();
+        video.currentTime = note.target.timeMs / 1000;
+        review.openNote(note.id);
+      }}>{previewTimeLabel(note.target.timeMs)}</button> : null)}
+  </div>;
+}
+
 export function PreviewAnnotationBar() {
   const review = useContext(PreviewReviewContext);
   const openFileFeedback = useContext(PreviewFileFeedbackOpenContext);
-  const menuRef = useRef<HTMLDetailsElement>(null);
-  useEffect(() => {
-    const close = (event: PointerEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) menuRef.current.open = false;
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
   if (!review?.bar) return null;
-  const closeMenu = () => {
-    if (menuRef.current) menuRef.current.open = false;
-  };
-  // One stable host so swapping 批注 and 完成 does not reinsert the portal node.
-  return (
-    <div className="flex shrink-0 items-center">
-      {review.active ? (
-        <button
-          type="button"
-          aria-pressed
-          aria-label="完成批注"
-          className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised"
-          onClick={review.bar.toggle}
-        >
-          完成
-        </button>
-      ) : review.bar.disabled ? (
-        <button
-          type="button"
-          aria-label="批注"
-          disabled
-          title="先从会话打开这个文件"
-          className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg disabled:opacity-40"
-        >
-          批注
-        </button>
-      ) : (
-        <details
-          ref={menuRef}
-          className="relative text-xs"
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && event.currentTarget.open) {
-              event.stopPropagation();
-              event.currentTarget.open = false;
-              event.currentTarget.querySelector("summary")?.focus();
-            }
-          }}
-        >
-          <summary
-            aria-label="批注"
-            title="批注"
-            className="flex h-7 cursor-pointer list-none items-center rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised [&::-webkit-details-marker]:hidden"
-          >
-            批注
-          </summary>
-          <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col gap-1 rounded-lg border border-line bg-surface p-2 text-fg shadow-lg">
-            <button
-              type="button"
-              className="rounded px-2 py-1 text-left hover:bg-raised"
-              onClick={() => {
-                closeMenu();
-                review.bar?.toggle();
-              }}
-            >
-              开始批注
-            </button>
-            {review.bar.count > 0 ? (
-              <button
-                type="button"
-                className="rounded px-2 py-1 text-left hover:bg-raised"
-                onClick={() => {
-                  closeMenu();
-                  review.bar?.openDraft();
-                }}
-              >
-                查看批注
-              </button>
-            ) : null}
-            {openFileFeedback ? (
-              <button
-                type="button"
-                className="rounded px-2 py-1 text-left hover:bg-raised"
-                onClick={() => {
-                  closeMenu();
-                  openFileFeedback();
-                }}
-              >
-                提交批注反馈
-              </button>
-            ) : null}
-          </div>
-        </details>
-      )}
+  if (review.active) {
+    return <PreviewToolbarPortal slot="selection"><button type="button" className={previewTextButton}
+      aria-label="完成批注" onClick={review.bar.toggle}>完成</button></PreviewToolbarPortal>;
+  }
+  return <PreviewToolbarPortal slot="feedback">
+    <div className="flex flex-wrap gap-1">
+      <button type="button" data-preview-dismiss className={previewTextButton}
+        disabled={review.bar.disabled} onClick={review.bar.toggle}>点选批注</button>
+      {review.bar.count > 0 ? <button type="button" data-preview-dismiss className={previewTextButton}
+        onClick={review.bar.openDraft}>查看批注 ({review.bar.count})</button> : null}
+      {openFileFeedback ? <button type="button" data-preview-dismiss className={previewTextButton}
+        onClick={openFileFeedback}>写反馈</button> : null}
     </div>
-  );
+  </PreviewToolbarPortal>;
 }
 
 type HtmlMark = { id: string; x: number; y: number; width: number; height: number };
@@ -705,5 +659,6 @@ function describe(item: PreviewAnnotation): string {
   const target = item.target;
   if (target.kind === "markdownLines") return lineLabel(target.startLine, target.endLine);
   if (target.kind === "htmlElement") return `${target.tag} ${target.selector}`;
+  if (target.kind === "videoTime") return previewTimeLabel(target.timeMs);
   return `#${item.markerNo ?? "?"} 区域`;
 }

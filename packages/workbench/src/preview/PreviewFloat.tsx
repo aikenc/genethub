@@ -1,3 +1,4 @@
+import { feedbackReceiptText } from "./fileFeedback";
 import {
   useCallback,
   useContext,
@@ -5,9 +6,10 @@ import {
   useMemo,
   useRef,
   useState,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 
+import { previewIconButton } from "./PreviewToolbar";
+import { CornerUpLeft } from "lucide-react";
 import { PreviewShareButton } from "./PreviewShareButton";
 import type { Host } from "../host";
 import { MachineConnectionsContext } from "../protocol/machine-connection-context";
@@ -17,10 +19,8 @@ import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { isIosStandalonePwa } from "../shell/platform";
 import {
   AssetPreviewPage,
-  PreviewTransferSummary,
   type PreviewMeta,
 } from "./AssetPreviewPage";
-import { PreviewServiceSection } from "./ServiceStatusMenu";
 import {
   createPortablePreviewUrl,
   createPreviewPopoutChannel,
@@ -31,23 +31,6 @@ import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
 import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
 import { assetPreviewUrl } from "./url";
 
-type Mode = "expanded" | "float";
-
-/** Base box; levels are 1× / 1.5× / 3× (small fits maximize + short title + close). */
-const BASE_W = 80;
-const BASE_H = 96;
-const SIZE_FACTORS = [1, 1.5, 3] as const;
-const EDGE = 8;
-const SNAP = 28;
-/** Visual scale of the preview document inside every float size. */
-const THUMB_SCALE = 0.14;
-const CLICK_DELAY_MS = 280;
-
-/**
- * WeChat-style Preview: fullscreen by default; minimize to a free-position
- * float. Single-click cycles float size; double-click maximizes. The preview
- * document stays mounted across mode changes so Fabric reload is avoided.
- */
 export function PreviewFloat({
   source,
   host,
@@ -81,28 +64,8 @@ export function PreviewFloat({
     return () => { controller.abort(); lease?.release(); };
   }, [connections, sameSource, source.deviceHandle]);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
-  const [mode, setMode] = useState<Mode>(source.initialMode === "float" ? "float" : "expanded");
-  useEffect(() => {
-    setMode(source.initialMode === "float" ? "float" : "expanded");
-  }, [source.path, source.initialMode]);
-  const [sizeLevel, setSizeLevel] = useState(0);
-  const [pos, setPos] = useState(() => ({
-    x: Math.max(EDGE, window.innerWidth - Math.round(BASE_W * SIZE_FACTORS[0]) - EDGE),
-    y: Math.round(window.innerHeight * 0.35),
-  }));
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
-  const [infoOpen, setInfoOpen] = useState(false);
-  const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
-  const drag = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-    moved: boolean;
-  } | null>(null);
-  const skipClick = useRef(false);
-  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [popupBlocked, setPopupBlocked] = useState<string>();
   const popouts = useRef(new Map<string, string | null>());
   const popoutBridges = useRef(new Map<string, () => void>());
   const linkedBundles = useRef(new Set<string>());
@@ -116,54 +79,8 @@ export function PreviewFloat({
 
   const externalSource = meta?.location ? {...source, ...meta.location} : source;
   const externalUrl = assetPreviewUrl(externalSource.deviceHandle, externalSource.workspaceHandle, externalSource.path, undefined, undefined, externalSource);
-  const fileName = useMemo(() => basename(source.path), [source.path]);
-  const title = meta?.documentTitle?.trim() || fileName;
-  const factor = SIZE_FACTORS[sizeLevel] ?? SIZE_FACTORS[0];
-  const floatW = Math.round(BASE_W * factor);
-  const floatH = Math.round(BASE_H * factor);
-  const expanded = mode === "expanded";
-  /** Only the large float accepts content input; small/mid are click-to-cycle. */
-  const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
-  const midFloatChrome = mode === "float" && sizeLevel === 1;
-  const largeFloatChrome = contentInteractive;
-  const blockContentGestures = mode === "float" && !contentInteractive;
-  const contentShieldRef = useRef<HTMLDivElement | null>(null);
-
-  const clampPos = useCallback((x: number, y: number, w: number, h: number) => ({
-    x: Math.min(Math.max(EDGE, x), Math.max(EDGE, window.innerWidth - w - EDGE)),
-    y: Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - h - EDGE)),
-  }), []);
-
-  const shrinkToSmallFloat = useCallback(() => {
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-    }
-    const nextW = Math.round(BASE_W * SIZE_FACTORS[0]);
-    const nextH = Math.round(BASE_H * SIZE_FACTORS[0]);
-    setSizeLevel(0);
-    setPos((current) => clampPos(current.x, current.y, nextW, nextH));
-    setMode("float");
-  }, [clampPos]);
-
-  /** Float chrome hit targets; keep left-aligned so mobile does not push controls right. */
-  const chromeBtnLarge =
-    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtnCompact =
-    "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[10px] leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtn = largeFloatChrome ? chromeBtnLarge : chromeBtnCompact;
-  const expandedIconBtn =
-    "flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-muted hover:bg-raised hover:text-fg";
-
-  useEffect(() => {
-    setMode("expanded");
-    setSizeLevel(0);
-    setInfoOpen(false);
-  }, [source.path, source.workspaceHandle, source.deviceHandle]);
-
   useEffect(() => {
     return () => {
-      if (clickTimer.current) clearTimeout(clickTimer.current);
       for (const release of popoutBridges.current.values()) release();
       popoutBridges.current.clear();
     };
@@ -188,117 +105,6 @@ export function PreviewFloat({
     });
     return () => channel.close();
   }, [appendComposerDraftLine]);
-
-  // iOS WebKit still delivers pan gestures into nested iframes even when the
-  // scaled preview has pointer-events:none. Capture touchmove on a shield.
-  useEffect(() => {
-    const shield = contentShieldRef.current;
-    if (!shield || !blockContentGestures) return;
-    const block = (event: TouchEvent) => {
-      event.preventDefault();
-    };
-    shield.addEventListener("touchmove", block, { passive: false });
-    return () => shield.removeEventListener("touchmove", block);
-  }, [blockContentGestures, mode, sizeLevel]);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (infoOpen) {
-          setInfoOpen(false);
-          return;
-        }
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [mode, onClose, infoOpen]);
-
-  useEffect(() => {
-    window.dispatchEvent(
-      new CustomEvent("genehub:preview-diagnostic", {
-        detail: {
-          kind: "log",
-          detail: {
-            topic: "preview-float",
-            path: source.path,
-            workspaceHandle: source.workspaceHandle,
-            phase: mode === "expanded" ? "open" : "minimized",
-            sizeLevel,
-          },
-        },
-      }),
-    );
-  }, [mode, sizeLevel, source.path, source.workspaceHandle]);
-
-  const snapPos = (x: number, y: number, w: number, h: number) => {
-    let nextX = x;
-    if (x <= SNAP) nextX = EDGE;
-    else if (x + w >= window.innerWidth - SNAP) nextX = window.innerWidth - w - EDGE;
-    return clampPos(nextX, y, w, h);
-  };
-
-  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (mode !== "float") return;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    drag.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: pos.x,
-      originY: pos.y,
-      moved: false,
-    };
-  };
-
-  const onDragMove = (event: ReactPointerEvent<HTMLElement>) => {
-    const state = drag.current;
-    if (!state || state.pointerId !== event.pointerId) return;
-    const dx = event.clientX - state.startX;
-    const dy = event.clientY - state.startY;
-    if (Math.hypot(dx, dy) > 4) state.moved = true;
-    setPos(clampPos(state.originX + dx, state.originY + dy, floatW, floatH));
-  };
-
-  const onDragUp = (event: ReactPointerEvent<HTMLElement>) => {
-    const state = drag.current;
-    if (!state || state.pointerId !== event.pointerId) return;
-    drag.current = null;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    setPos((current) => snapPos(current.x, current.y, floatW, floatH));
-    if (state.moved) skipClick.current = true;
-  };
-
-  const cycleSize = () => {
-    setSizeLevel((level) => {
-      const next = (level + 1) % SIZE_FACTORS.length;
-      const nextW = Math.round(BASE_W * SIZE_FACTORS[next]!);
-      const nextH = Math.round(BASE_H * SIZE_FACTORS[next]!);
-      setPos((current) => clampPos(current.x, current.y, nextW, nextH));
-      return next;
-    });
-  };
-
-  const maximize = () => {
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-    }
-    setMode("expanded");
-  };
-
-  const scheduleCycle = () => {
-    if (skipClick.current) {
-      skipClick.current = false;
-      return;
-    }
-    if (clickTimer.current) clearTimeout(clickTimer.current);
-    clickTimer.current = setTimeout(() => {
-      clickTimer.current = null;
-      cycleSize();
-    }, CLICK_DELAY_MS);
-  };
 
   const submitRuntimeArtifact = useCallback<RuntimeArtifactSubmit>(
     async (artifact, onProgress) => {
@@ -348,111 +154,7 @@ export function PreviewFloat({
     }, 4_000);
   }, [client, externalUrl, source.sessionId]);
 
-  const preview = client ? (
-    <AssetPreviewPage
-      source={source}
-      host={host}
-      chrome="embedded"
-      client={client}
-      onMetaChange={setMeta}
-      onRuntimeArtifact={submitRuntimeArtifact}
-      runtimeSessionId={source.sessionId}
-      annotationWrite={expanded}
-      toolbarTarget={toolbarTarget}
-    />
-  ) : (
-    <p role="status" className="m-auto p-6 text-center text-sm text-muted">
-      {connectionError || "正在连接资源所在机器…"}
-    </p>
-  );
-
-  return (
-    <>
-      <div
-        role={expanded ? "dialog" : "button"}
-        aria-modal={expanded ? true : undefined}
-        aria-label={expanded ? "文件预览" : `预览浮窗 ${title}`}
-        tabIndex={expanded ? undefined : 0}
-        className={
-          expanded
-            ? "safe-area-page fixed inset-0 z-40 flex flex-col bg-bg text-fg"
-            : "fixed z-40 flex flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-lg"
-        }
-        style={
-          expanded
-            ? undefined
-            : {
-                top: pos.y,
-                left: pos.x,
-                width: floatW,
-                height: floatH,
-                // Small/mid: block content pan/scroll so it does not fight float drag.
-                ...(blockContentGestures ? { touchAction: "none" as const } : {}),
-              }
-        }
-        onPointerDown={expanded || contentInteractive ? undefined : beginDrag}
-        onPointerMove={expanded || contentInteractive ? undefined : onDragMove}
-        onPointerUp={expanded || contentInteractive ? undefined : onDragUp}
-        onPointerCancel={expanded || contentInteractive ? undefined : onDragUp}
-        onWheel={(event) => {
-          if (!blockContentGestures) return;
-          event.preventDefault();
-        }}
-        onClick={() => {
-          if (expanded || contentInteractive) return;
-          scheduleCycle();
-        }}
-        onDoubleClick={(event) => {
-          if (expanded) return;
-          event.preventDefault();
-          event.stopPropagation();
-          maximize();
-        }}
-        onKeyDown={(event) => {
-          if (expanded) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            maximize();
-          }
-        }}
-      >
-        {expanded ? (
-          <header
-            aria-label="预览工具栏"
-            className="gh-preview-toolbar relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-1.5"
-            // iOS standalone PWA uses viewport-fit=cover; a fixed h-9 header
-            // sits under the status bar and the close control cannot be tapped.
-            style={{ paddingTop: "env(safe-area-inset-top)" }}
-          >
-            <button
-              type="button"
-              aria-label="预览信息"
-              title="预览信息"
-              className={expandedIconBtn}
-              onClick={() => setInfoOpen(true)}
-            >
-              <InfoIcon />
-            </button>
-            <span className="min-w-0 flex-1 truncate text-[12px] leading-none text-fg">
-              {copyState === "copied"
-                ? "链接已复制，粘贴到浏览器打开"
-                : copyState === "failed"
-                  ? "复制失败，请重试"
-                  : copyState === "minting"
-                    ? "正在生成预览链接…"
-                    : title}
-            </span>
-            <div ref={setToolbarTarget} className="gh-preview-toolbar-slot flex shrink-0 items-center gap-1 text-xs" />
-            <button
-              type="button"
-              aria-label="最小化"
-              title="最小化"
-              className={expandedIconBtn}
-              onClick={shrinkToSmallFloat}
-            >
-              <MinimizeIcon />
-            </button>
-            {copyLinkMode && client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={externalSource} resources={meta?.resourcePaths} quick label="在浏览器打开预览" /> : <button
+  const externalOpen = copyLinkMode && client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={externalSource} resources={meta?.resourcePaths} quick label="在浏览器打开预览" /> : <button
                 type="button"
                 aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
                 title={
@@ -460,7 +162,7 @@ export function PreviewFloat({
                     ? "复制预览链接，粘贴到浏览器打开"
                     : "新窗口打开"
                 }
-                className={`${expandedIconBtn} text-accent`}
+                className={`${previewIconButton} text-accent`}
                 disabled={copyLinkMode && copyState === "minting"}
                 onClick={() => {
                   if (copyLinkMode) {
@@ -498,264 +200,39 @@ export function PreviewFloat({
                     popouts.current.delete(popout.id);
                     popoutBridges.current.get(popout.id)?.();
                     popoutBridges.current.delete(popout.id);
-                    maximize();
+                    setPopupBlocked(externalUrl);
                   }
                 }}
               >
                 {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
-              </button>}
-            <button
-              type="button"
-              aria-label="关闭预览"
-              title="关闭"
-              className={expandedIconBtn}
-              onClick={onClose}
-            >
-              <CloseIcon />
-            </button>
-          </header>
-        ) : (
-          <header
-            className={`relative z-20 flex shrink-0 items-center justify-start border-b border-line ${
-              largeFloatChrome
-                ? "h-[1.725rem] cursor-grab gap-0 px-0 active:cursor-grabbing"
-                : "h-5 gap-0 px-0"
-            }`}
-            onPointerDown={contentInteractive ? beginDrag : undefined}
-            onPointerMove={contentInteractive ? onDragMove : undefined}
-            onPointerUp={contentInteractive ? onDragUp : undefined}
-            onPointerCancel={contentInteractive ? onDragUp : undefined}
-            onDoubleClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              maximize();
-            }}
-          >
-            <button
-              type="button"
-              aria-label="最大化预览"
-              title="最大化"
-              className={chromeBtn}
-              onClick={(event) => {
-                event.stopPropagation();
-                maximize();
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <MaximizeIcon compact={!largeFloatChrome} />
-            </button>
-            <span
-              className={`min-w-0 flex-1 truncate text-muted ${
-                largeFloatChrome
-                  ? "px-0.5 text-[11px] leading-none"
-                  : midFloatChrome
-                    ? "px-px text-[11px] leading-none"
-                    : "px-px text-[10px] leading-none"
-              }`}
-            >
-              {title}
-            </span>
-            {largeFloatChrome ? (
-              <button
-                type="button"
-                aria-label="最小化浮窗"
-                title="最小化"
-                className={chromeBtn}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  shrinkToSmallFloat();
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                −
-              </button>
-            ) : null}
-            <button
-              type="button"
-              aria-label="关闭预览"
-              title="关闭"
-              className={chromeBtn}
-              onClick={(event) => {
-                event.stopPropagation();
-                onClose();
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              ×
-            </button>
-          </header>
-        )}
-        <div
-          className={`relative min-h-0 flex-1 overflow-hidden bg-bg ${
-            blockContentGestures ? "touch-none overscroll-none" : ""
-          }`}
-        >
-          <div
-            className={
-              expanded
-                ? "flex h-full min-h-0 flex-col"
-                : `${
-                    contentInteractive ? "" : "pointer-events-none touch-none "
-                  }absolute left-0 top-0 origin-top-left overflow-hidden`
-            }
-            style={
-              expanded
-                ? undefined
-                : {
-                    width: `${(100 / THUMB_SCALE).toFixed(2)}%`,
-                    height: `${(100 / THUMB_SCALE).toFixed(2)}%`,
-                    transform: `scale(${THUMB_SCALE})`,
-                  }
-            }
-          >
-            {preview}
-          </div>
-          {blockContentGestures ? (
-            <div
-              ref={contentShieldRef}
-              data-testid="preview-content-shield"
-              className="absolute inset-0 z-10 touch-none"
-              aria-hidden="true"
-            />
-          ) : null}
-        </div>
-      </div>
-      {infoOpen ? (
-        <PreviewInfoDialog
-          path={source.path}
-          title={title}
-          meta={meta}
-          onClose={() => setInfoOpen(false)}
-        />
-      ) : null}
-    </>
-  );
+              </button>;
+
+  return <div role="dialog" aria-modal="true" aria-label="文件预览"
+    className="safe-area-page fixed inset-0 z-40 flex flex-col bg-bg text-fg"
+    onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) onClose(); }}>
+    {popupBlocked ? <p role="status" className="px-2 py-1 text-xs">
+      浏览器阻止了新窗口。 <a className="underline" href={popupBlocked} target="_blank" rel="noopener">打开预览链接</a>
+    </p> : null}
+    {connectionError ? <p role="alert" className="px-2 py-1 text-xs text-danger">{connectionError}</p> : null}
+    <AssetPreviewPage
+      source={source}
+      host={host}
+      client={client}
+      onMetaChange={setMeta}
+      onRuntimeArtifact={submitRuntimeArtifact}
+      runtimeSessionId={source.sessionId}
+      onAddFeedbackToChat={sameSource && source.sessionId
+        ? receipt => appendComposerDraftLine(source.sessionId!, feedbackReceiptText(receipt))
+        : undefined}
+      annotationWrite
+      navigation={<>
+        <button type="button" aria-label="返回对话" title="返回对话" className={previewIconButton} onClick={onClose}><CornerUpLeft size={16} /></button>
+        {externalOpen}
+      </>}
+    />
+  </div>;
 }
 
-function PreviewInfoDialog({
-  path,
-  title,
-  meta,
-  onClose,
-}: {
-  path: string;
-  title: string;
-  meta: PreviewMeta | null;
-  onClose(): void;
-}) {
-  const lines = meta?.infoLines?.length
-    ? meta.infoLines
-    : ["预览信息尚未就绪，请稍候再打开。"];
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
-      role="presentation"
-      onClick={onClose}
-    >
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="预览信息"
-        className="flex max-h-[min(80vh,36rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-2 border-b border-line px-4 py-3">
-          <h2 className="min-w-0 flex-1 truncate text-sm font-medium">预览信息</h2>
-          <button
-            type="button"
-            aria-label="关闭信息"
-            className="rounded px-2 text-lg leading-none text-muted hover:bg-raised"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
-          <dl className="space-y-2 text-xs">
-            <div>
-              <dt className="text-faint">标题</dt>
-              <dd className="break-words text-fg">{title}</dd>
-            </div>
-            <div>
-              <dt className="text-faint">路径</dt>
-              <dd className="break-all font-mono text-fg">{meta?.sourceInfo?.displayPath ?? basename(path)}</dd>
-            </div>
-            {meta?.sourceInfo ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{meta.sourceInfo.machineName}：{meta.sourceInfo.absolutePath}</dd></div> : null}
-          </dl>
-          {meta?.service ? <PreviewServiceSection service={meta.service} /> : null}
-          {meta?.transfer ? <PreviewTransferSummary stats={meta.transfer} /> : null}
-          <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
-            {lines.map((line) => (
-              <li key={line} className="break-words">
-                {line}
-              </li>
-            ))}
-          </ul>
-          {meta?.storage ? (
-            <div className="mt-4 flex items-center gap-3 border-t border-line pt-3 text-xs">
-              <span className="min-w-0 flex-1 text-muted">
-                本地存储：{meta.storage.count} 项（沙箱 shim，已持久化到本浏览器）
-              </span>
-              <button
-                type="button"
-                disabled={meta.storage.count === 0}
-                className="shrink-0 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
-                onClick={meta.storage.onClear}
-              >
-                清除
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.25" />
-      <path
-        d="M8 7v4.5M8 5.25h.01"
-        stroke="currentColor"
-        strokeWidth="1.25"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function MaximizeIcon({ compact }: { compact?: boolean }) {
-  const size = compact ? 8 : 11;
-  return (
-    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" aria-hidden="true">
-      <rect
-        x="1.5"
-        y="1.5"
-        width="9"
-        height="9"
-        rx="1"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
-function MinimizeIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <path d="M3 7h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-/**
- * Mints a one-time Hub ticket for the connected machine and packs it into a
- * copyable Preview link. Requires Hub pairing: without it there is no
- * forwarding layer for the ticket to ride on.
- */
 async function mintPortablePreviewUrl(
   client: Client,
   externalUrl: string,
@@ -813,22 +290,4 @@ function ExternalLinkIcon() {  return (
       />
     </svg>
   );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <path
-        d="M4 4l6 6M10 4l-6 6"
-        stroke="currentColor"
-        strokeWidth="1.35"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function basename(path: string): string {
-  const parts = path.split("/");
-  return parts[parts.length - 1] || path;
 }

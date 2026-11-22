@@ -73,6 +73,11 @@ pub fn validate_shape(annotation: &PreviewAnnotation) -> Result<()> {
         bail!("多根工作区的预览批注尚未开放，请使用主目录中的文件");
     }
     match &annotation.target {
+        PreviewAnnotationTarget::VideoTime { time_ms } => {
+            if *time_ms > 86_400_000 {
+                bail!("视频时间点无效");
+            }
+        }
         PreviewAnnotationTarget::MarkdownLines {
             start_line,
             end_line,
@@ -142,6 +147,9 @@ pub fn ensure_kind(annotation: &PreviewAnnotation, kind: AssetPreviewKind) -> Re
         ) | (
             PreviewAnnotationTarget::ImageRect { .. },
             AssetPreviewKind::Image
+        ) | (
+            PreviewAnnotationTarget::VideoTime { .. },
+            AssetPreviewKind::Video
         )
     );
     if ok {

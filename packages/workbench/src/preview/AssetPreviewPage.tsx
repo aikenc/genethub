@@ -1,10 +1,12 @@
+import { PreviewVideo } from "./PreviewVideo";
+import { PreviewReceivedFeedback } from "./PreviewReceivedFeedback";
 import previewReviewBridge from "./previewReviewBridge.js?raw";
 import { previewFeedback, useFileFeedback, type FileFeedbackReview } from "./fileFeedback";
 import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
 import { IndependentPreviewMenu } from "./IndependentPreviewMenu";
 import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext } from "./PreviewToolbar";
-import type { PreviewSourceInfo } from "@genehub/proto";
+import type { PreviewFeedbackRecord, PreviewSourceInfo } from "@genehub/proto";
 import { ServicePreviewClient, classifyServiceFailure, htmlServiceMedia } from "./serviceClient";
 import { previewServiceInfo, PreviewServiceSection, type PreviewServiceInfo, type ServiceMark } from "./ServiceStatusMenu";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
@@ -42,15 +44,14 @@ import {
 } from "./storage";
 import {
   PreviewRuntimeControls,
-  ProductFeedbackOverflow,
   type PreviewDomSnapshot,
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
 import type { PixelSnapshot } from "./runtimeCapture";
-import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
+import { assetPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { uploadSessionArtifact } from "./sessionArtifactUpload";
-import { PreviewToolbarContext, PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewNavigation, PreviewShareAction, PreviewShell, PreviewToolbarContext, PreviewToolbarPortal } from "./PreviewToolbar";
 
 type ViewState =
   | { kind: "loading" }
@@ -89,6 +90,8 @@ export function AssetPreviewPage({
   toolbarTarget = null,
   shareAccess = false,
   feedbackAccessScope = "owner",
+  navigation,
+  onAddFeedbackToChat,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -114,13 +117,14 @@ export function AssetPreviewPage({
   toolbarTarget?: HTMLElement | null;
   shareAccess?: boolean;
   feedbackAccessScope?: string;
+  navigation?: React.ReactNode;
+  onAddFeedbackToChat?: (receipt: PreviewFeedbackRecord) => void;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const resources = useRef(new Set<string>());
-  const [feedbackSource, setFeedbackSource] = useState<{path: string; version: string} | null>(null);
+  const [feedbackSource, setFeedbackSource] = useState<{path: string; version: string; kind: AssetPreviewMetadata["kind"]} | null>(null);
   const [folders, setFolders] = useState<Array<{root: string; rootHandle: string}>>([]);
   const [sourceInfo, setSourceInfo] = useState<PreviewSourceInfo | null>(null);
-  const [pageInfoOpen, setPageInfoOpen] = useState(false);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const legacyAbort = useRef<AbortController | null>(null);
   const [pageToolbarTarget, setPageToolbarTarget] = useState<HTMLDivElement | null>(null);
@@ -160,7 +164,6 @@ export function AssetPreviewPage({
     legacyAbort.current = null;
     serviceRef.current = null;
     publishMeta(null);
-    setPageInfoOpen(false);
   }, [source.path, source.workspaceHandle, source.deviceHandle, publishMeta]);
 
   const connections = useContext(MachineConnectionsContext);
@@ -312,8 +315,17 @@ export function AssetPreviewPage({
     [onRuntimeArtifactSaved, runtimeSessionId, state],
   );
 
+  useEffect(() => {
+    const previous = document.title;
+    const title = meta?.documentTitle?.trim() || basenamePath(source.path);
+    document.title = title;
+    return () => { if (document.title === title) document.title = previous; };
+  }, [meta?.documentTitle, source.path]);
+
   const feedbackClient = state.kind === "ready" ? state.client : null;
-  const fileFeedbackEnabled = !!feedbackClient?.identity?.features?.includes("preview.feedback.v1");
+  const fileFeedbackAvailable = !!feedbackClient?.identity?.features?.includes("preview.feedback.v1");
+  const fileFeedbackEnabled = fileFeedbackAvailable && (!shareAccess ||
+    (sourceInfo ? sourceInfo.feedbackWritable !== false : !feedbackClient?.identity?.features?.includes("preview.share.view-only.v1")));
   const [openFileFeedback, setOpenFileFeedback] = useState<(() => void) | null>(null);
   const bindFileFeedback = useCallback((open: (() => void) | null) => {
     setOpenFileFeedback(() => open);
@@ -322,7 +334,9 @@ export function AssetPreviewPage({
   const bindShare = useCallback((open: (() => void) | null) => {
     setOpenShare(() => open);
   }, []);
-  const annotatable = state.kind === "ready" && (state.result.metadata.kind === "markdown" || state.result.metadata.kind === "html" || state.result.metadata.kind === "image");
+  const currentKind = feedbackSource?.kind ?? (state.kind === "ready" ? state.result.metadata.kind : undefined);
+  const annotatable = currentKind === "markdown" || currentKind === "html" || currentKind === "image"
+    || (currentKind === "video" && !!feedbackClient?.identity?.features?.includes("preview.feedback.media-time.v1"));
   const feedback = useFileFeedback(feedbackClient, isAbsoluteFilePath(feedbackSource?.path ?? source.path) ? "" : source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
   useEffect(() => {
     if (!feedbackClient || !fileFeedbackEnabled || !feedbackSource || feedbackSource.path === source.path) return;
@@ -336,7 +350,7 @@ export function AssetPreviewPage({
     const bundle = await feedback.upload(artifact, ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes));
     return { relativePath: bundle.relativePath, addedToDraft: false, feedbackSaved: true };
   }, [feedback.upload]);
-  const runtimeArtifactSubmit = fileFeedbackEnabled ? submitFileArtifact :
+  const runtimeArtifactSubmit = fileFeedbackEnabled ? submitFileArtifact : shareAccess ? undefined :
     onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
 
   return (
@@ -344,21 +358,20 @@ export function AssetPreviewPage({
     <PreviewShareOpenContext.Provider value={fileFeedbackEnabled ? openShare : null}>
     <PreviewToolbarContext.Provider value={toolbarTarget ?? pageToolbarTarget}>
     <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
-      {chrome === "page" ? (
-        <header aria-label="预览工具栏" className="gh-preview-toolbar relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2 py-1">
-          <button
-            type="button"
-            aria-label="预览信息"
-            title="预览信息"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
-            onClick={() => setPageInfoOpen(true)}
-          >
-            <PageInfoIcon />
-          </button>
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">{sourceInfo?.displayPath ?? basenamePath(source.path)}</span>
-          <div ref={setPageToolbarTarget} className="gh-preview-toolbar-slot flex shrink-0 items-center gap-1 text-xs" />
-        </header>
-      ) : null}
+      <PreviewShell bindTools={setPageToolbarTarget} readOnly={shareAccess && !fileFeedbackEnabled} navigation={navigation} information={
+        <PreviewInformation
+          path={meta?.location?.path ?? sourceInfo?.displayPath ?? source.path}
+          query={meta?.location?.docQuery ?? source.docQuery}
+          fragment={meta?.location?.docFragment ?? source.docFragment}
+          absolutePath={!shareAccess && sourceInfo ? `${sourceInfo.machineName}：${sourceInfo.absolutePath}` : undefined}
+          title={meta?.documentTitle?.trim() || basenamePath(source.path)}
+          lines={meta?.infoLines ?? []}
+          transfer={meta?.transfer}
+          storage={meta?.storage}
+          service={meta?.service}
+        />
+      }>
+      <PreviewShareAction />
       {state.kind === "loading" ? (
         <p role="status" className="m-auto text-sm text-muted">正在安全读取文件…</p>
       ) : state.kind === "legacy-image" ? (
@@ -392,6 +405,8 @@ export function AssetPreviewPage({
           docQuery={source.docQuery}
           docFragment={source.docFragment}
           storageAccessScope={feedbackAccessScope}
+          shareAccess={shareAccess}
+          allowCapture={!shareAccess || fileFeedbackEnabled}
           deviceHandle={source.deviceHandle}
           workspaceHandle={source.workspaceHandle}
           client={state.client}
@@ -399,16 +414,20 @@ export function AssetPreviewPage({
           onRuntimeArtifact={runtimeArtifactSubmit}
           runtimeSessionId={runtimeSessionId}
           onRuntimeReady={onRuntimeReady}
-          annotationWrite={fileFeedbackEnabled || annotationWrite}
+          annotationWrite={fileFeedbackEnabled || (annotationWrite && !shareAccess)}
           fileFeedback={fileFeedbackEnabled ? feedback.review : undefined}
           onSourceChange={setFeedbackSource}
           onServiceChange={reportService}
           resourcePaths={resources.current}
         />
       )}
-      {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
+      {fileFeedbackEnabled && !shareAccess && feedbackClient?.identity?.features?.includes("preview.feedback.list.v1") ? <PreviewReceivedFeedback
+        onAddToChat={onAddFeedbackToChat} key={`received:${feedbackSource?.path ?? source.path}`} client={feedbackClient} path={feedbackSource?.path ?? source.path}
+        version={feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : "")}
+        workspaceId={isAbsoluteFilePath(feedbackSource?.path ?? source.path) ? "" : source.workspaceHandle} /> : null}
+      {fileFeedbackEnabled ? <PreviewFeedbackPanel key={`compose:${feedbackSource?.path ?? source.path}`} feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
       {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path, siteEntryPath: meta?.location?.siteEntryPath ?? source.siteEntryPath ?? source.path}} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
-      {fileFeedbackEnabled && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
+      {fileFeedbackAvailable && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
       {independentClient && /\.html?$/i.test(source.path) ? (
           <IndependentPreviewMenu
             client={independentClient}
@@ -417,18 +436,7 @@ export function AssetPreviewPage({
             canShare={state.kind === "ready"}
           />
         ) : null}
-      {chrome === "page" && pageInfoOpen ? (
-        <EmbeddedInfoDialog
-          path={sourceInfo?.displayPath ?? basenamePath(source.path)}
-          absolutePath={sourceInfo ? `${sourceInfo.machineName}：${sourceInfo.absolutePath}` : undefined}
-          title={meta?.documentTitle?.trim() || basenamePath(source.path)}
-          lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
-          transfer={meta?.transfer}
-          storage={meta?.storage}
-          service={meta?.service}
-          onClose={() => setPageInfoOpen(false)}
-        />
-      ) : null}
+      </PreviewShell>
     </main>
     </PreviewToolbarContext.Provider>
     </PreviewShareOpenContext.Provider>
@@ -444,6 +452,8 @@ function PreviewDocument({
   docQuery = "",
   docFragment = "",
   storageAccessScope,
+  shareAccess,
+  allowCapture,
   deviceHandle,
   workspaceHandle,
   client,
@@ -464,6 +474,8 @@ function PreviewDocument({
   docQuery?: string;
   docFragment?: string;
   storageAccessScope: string;
+  shareAccess: boolean;
+  allowCapture: boolean;
   deviceHandle: string;
   workspaceHandle: string;
   client: Client;
@@ -473,7 +485,7 @@ function PreviewDocument({
   onRuntimeReady?: () => void;
   annotationWrite?: boolean;
   fileFeedback?: FileFeedbackReview;
-  onSourceChange?: (source: {path: string; version: string}) => void;
+  onSourceChange?: (source: {path: string; version: string; kind: AssetPreviewMetadata["kind"]}) => void;
   onServiceChange?: (service: PreviewServiceInfo | null) => void;
   resourcePaths?: Set<string>;
 }) {
@@ -481,6 +493,7 @@ function PreviewDocument({
   const [history, setHistory] = useState<Visit[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [linkProblem, setLinkProblem] = useState<string | null>(null);
+  const [newWindowLink, setNewWindowLink] = useState<string>();
   const followGeneration = useRef(0);
   const followAbort = useRef<AbortController | null>(null);
   const documentRef = useRef<HTMLElement | null>(null);
@@ -490,12 +503,12 @@ function PreviewDocument({
   useEffect(() => {
     followGeneration.current += 1;
     followAbort.current?.abort();
-    setHistory([]); setHistoryIndex(-1); setLinkProblem(null); scrollPositions.current.clear();
+    setHistory([]); setHistoryIndex(-1); setLinkProblem(null); setNewWindowLink(undefined); scrollPositions.current.clear();
     return () => { followAbort.current?.abort(); };
   }, [path, result]);
   const shown = history[historyIndex] ?? {path, result, query: docQuery, fragment: docFragment, siteEntryPath};
   const {metadata, bytes, transfer} = shown.result;
-  useEffect(() => { onSourceChange?.({path: shown.path, version: metadata.version}); }, [shown.path, metadata.version, onSourceChange]);
+  useEffect(() => { onSourceChange?.({path: shown.path, version: metadata.version, kind: metadata.kind}); }, [shown.path, metadata.version, metadata.kind, onSourceChange]);
   const openFile = useCallback(async (nextPath: string, query = "", fragment = "") => {
     const generation = ++followGeneration.current;
     followAbort.current?.abort();
@@ -510,6 +523,9 @@ function PreviewDocument({
       // Store this per visit so back/forward and popout keep the same identity.
       const siteDirectory = shown.siteEntryPath.slice(0, shown.siteEntryPath.lastIndexOf('/') + 1);
       const nextSiteEntryPath = nextPath.startsWith(siteDirectory) ? shown.siteEntryPath : nextPath;
+      for (const index of scrollPositions.current.keys()) {
+        if (index >= prior.length) scrollPositions.current.delete(index);
+      }
       setHistory([...prior, {path: nextPath, result: loaded, query, fragment, siteEntryPath: nextSiteEntryPath}]);
       setHistoryIndex(prior.length);
       if (nextPath !== shown.path) { resourcePaths?.clear(); resourcePaths?.add(nextPath); }
@@ -526,9 +542,19 @@ function PreviewDocument({
     if (!node) return;
     const saved = scrollPositions.current.get(visitKey);
     if (saved) { node.scrollTo(saved.x, saved.y); return; }
-    node.scrollTo(0, 0);
-    let id: string; try { id = decodeURIComponent(shown.fragment.replace(/^#/, "")); } catch { return; }
-    if (id) Array.from(node.querySelectorAll("[id]")).find(target => target.id === id)?.scrollIntoView();
+    const scroll = requestAnimationFrame(() => {
+      let id: string;
+      try { id = decodeURIComponent(shown.fragment.replace(/^#/, "")); }
+      catch { id = ""; }
+      const target = id && Array.from(node.querySelectorAll("[id]")).find(element => element.id === id);
+      if (target) {
+        const offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        node.scrollTo(0, node.scrollTop + offset);
+      } else {
+        node.scrollTo(0, 0);
+      }
+    });
+    return () => cancelAnimationFrame(scroll);
   }, [shown.path, shown.fragment, metadata.kind, visitKey]);
   const publishDocumentMeta = useCallback((meta: PreviewMeta | null) => {
     onMetaChange?.(meta ? {...meta, location: {path: shown.path, docQuery: shown.query, docFragment: shown.fragment, siteEntryPath: shown.siteEntryPath}} : null);
@@ -613,8 +639,20 @@ function PreviewDocument({
         onScroll={rememberScroll}
         onMetaChange={publishDocumentMeta}
         onRuntimeArtifact={onRuntimeArtifact}
+        allowCapture={allowCapture}
         onRuntimeReady={onRuntimeReady}
-        onOpenHtml={(next, query, fragment) => void openFile(next, query, fragment)}
+        onOpenHtml={(next, query, fragment, newWindow) => {
+          if (!newWindow) {
+            setNewWindowLink(undefined);
+            void openFile(next, query, fragment);
+            return;
+          }
+          const url = new URL(assetPreviewUrl(deviceHandle, workspaceHandle, next, undefined, undefined, {
+            docQuery: query, docFragment: fragment, siteEntryPath: shown.siteEntryPath,
+          }), window.location.href);
+          if (shareAccess) url.hash = window.location.hash;
+          setNewWindowLink(url.href);
+        }}
         onServiceChange={onServiceChange}
       />
     </>
@@ -623,7 +661,8 @@ function PreviewDocument({
       二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
     </p>
   ) : (
-    <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={shown.path} />
+    <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={shown.path}
+      allowCapture={allowCapture} onRuntimeArtifact={onRuntimeArtifact} />
   );
   return (
     <PreviewReviewChrome
@@ -636,11 +675,14 @@ function PreviewDocument({
       kind={shown.result.metadata.kind}
       sourceText={text}
     >
-      {history.length > 0 ? <nav aria-label="预览浏览记录" className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1 text-xs"><button disabled={historyIndex <= 0} onClick={() => navigateHistory(historyIndex - 1)}>后退</button><button disabled={historyIndex >= history.length - 1} onClick={() => navigateHistory(historyIndex + 1)}>前进</button><span className="truncate">{shown.path}{shown.query}{shown.fragment}</span></nav> : null}
+      <PreviewNavigation back={historyIndex > 0 ? () => navigateHistory(historyIndex - 1) : undefined}
+        forward={historyIndex >= 0 && historyIndex < history.length - 1 ? () => navigateHistory(historyIndex + 1) : undefined} />
+      {newWindowLink ? <div className="flex items-center gap-2 border-b border-line px-3 py-1 text-xs">
+        <a href={newWindowLink} target="_blank" rel="noopener noreferrer" className="text-accent underline">在新窗口打开目标页</a>
+        <button type="button" className="rounded px-2 py-1 hover:bg-raised" onClick={() => setNewWindowLink(undefined)}>取消</button>
+      </div> : null}
       {linkProblem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{linkProblem}</p> : null}
-      {shown.query ? <p role="status" className="px-3 py-1 text-xs text-muted">页面参数：{shown.query}（srcdoc 的原生 location.search 不可改写；页面可读取 genehubPreviewLocation.search）</p> : null}
       {body}
-      {shown.result.metadata.kind === "html" ? null : <ProductFeedbackOverflow />}
     </PreviewReviewChrome>
   );
 }
@@ -651,12 +693,16 @@ function BlobDocument({
   client,
   workspaceHandle,
   path,
+  allowCapture,
+  onRuntimeArtifact,
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   client: Client;
   workspaceHandle: string;
   path: string;
+  allowCapture: boolean;
+  onRuntimeArtifact?: RuntimeArtifactSubmit;
 }) {
   const [original, setOriginal] = useState<AssetPreviewResult | null>(null);
   const [originalLoading, setOriginalLoading] = useState(false);
@@ -720,11 +766,8 @@ function BlobDocument({
         </div>
       </div>
     </div>
-  ) : (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-black p-4">
-      <video src={url} controls className="max-h-full max-w-full" />
-    </div>
-  );
+  ) : <PreviewVideo key={url} url={url} path={path} version={metadata.version}
+    allowCapture={allowCapture} onSubmit={onRuntimeArtifact} />;
 }
 
 function serviceMark(client: ServicePreviewClient): ServiceMark {
@@ -832,6 +875,7 @@ export function HtmlDocument({
   onRuntimeArtifact,
   onRuntimeReady,
   onOpenHtml,
+  allowCapture,
   service = null,
   servicePolicy,
 }: {
@@ -853,7 +897,8 @@ export function HtmlDocument({
   onRuntimeArtifact?: RuntimeArtifactSubmit;
   onRuntimeReady?: () => void;
   /** Opens another HTML file from this site without leaving the sandbox. */
-  onOpenHtml?: (path: string, query?: string, fragment?: string) => void;
+  allowCapture?: boolean;
+  onOpenHtml?: (path: string, query?: string, fragment?: string, newWindow?: boolean) => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [frameReady, setFrameReady] = useState(false);
@@ -989,11 +1034,10 @@ export function HtmlDocument({
         detail?: unknown;
       };
       if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "open-path") {
-        const url = data.detail && typeof data.detail === "object"
-          ? String((data.detail as { url?: unknown }).url ?? "")
-          : "";
+        const detail = data.detail as { url?: unknown; newWindow?: unknown } | undefined;
+        const url = typeof detail?.url === "string" && detail.url.length <= 4096 ? detail.url : "";
         const next = url ? resolveSiteReference(entryPath, url, siteEntryPath) : null;
-        if (next) onOpenHtmlRef.current?.(next.path, url.startsWith("#") ? docQuery : next.query, next.fragment);
+        if (next) onOpenHtmlRef.current?.(next.path, url.startsWith("#") ? docQuery : next.query, next.fragment, detail?.newWindow === true);
         return;
       }
       if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "dom-snapshot") {
@@ -1089,7 +1133,7 @@ export function HtmlDocument({
           -1_000,
         );
         eventsRef.current = next;
-        setEventCount(next.length);
+        setEventCount(count => count + 1);
         emitPreviewDiagnostic(data.kind, {
           surface: "html-preview-iframe",
           ...detail,
@@ -1214,7 +1258,7 @@ export function HtmlDocument({
     <div className="flex min-h-0 flex-1 flex-col">
       {srcDoc ? (
         <>
-          <PreviewRuntimeControls
+          <PreviewRuntimeControls allowCapture={allowCapture}
             frameRef={frameRef}
             ready={frameReady && collectorReady}
             entryPath={entryPath}
@@ -1267,50 +1311,18 @@ function basenamePath(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-function EmbeddedInfoDialog({
-  path,
-  absolutePath,
-  title,
-  lines,
-  transfer,
-  storage,
-  service,
-  onClose,
-}: {
+function PreviewInformation({ path, query, fragment, absolutePath, title, lines, transfer, storage, service }: {
   path: string;
+  query?: string;
+  fragment?: string;
   absolutePath?: string;
   title: string;
   lines: string[];
   transfer?: PreviewMeta["transfer"];
   storage?: PreviewMeta["storage"];
   service?: PreviewServiceInfo | null;
-  onClose(): void;
 }) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
-      role="presentation"
-      onClick={onClose}
-    >
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="预览信息"
-        className="flex max-h-[min(80vh,36rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-2 border-b border-line px-4 py-3">
-          <h2 className="min-w-0 flex-1 truncate text-sm font-medium">预览信息</h2>
-          <button
-            type="button"
-            aria-label="关闭信息"
-            className="rounded px-2 text-lg leading-none text-muted hover:bg-raised"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+  return <>
           <dl className="space-y-2 text-xs">
             <div>
               <dt className="text-faint">标题</dt>
@@ -1318,7 +1330,7 @@ function EmbeddedInfoDialog({
             </div>
             <div>
               <dt className="text-faint">路径</dt>
-              <dd className="break-all font-mono text-fg">{path}</dd>
+              <dd className="break-all font-mono text-fg">{path}{query}{fragment}</dd>
             </div>
             {absolutePath ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{absolutePath}</dd></div> : null}
           </dl>
@@ -1346,16 +1358,10 @@ function EmbeddedInfoDialog({
               </button>
             </div>
           ) : null}
-        </div>
-      </section>
-    </div>
-  );
+  </>;
 }
 
-const TRANSFER_TRANSPORT_LABELS: Record<
-  AssetPreviewTransferStats["transport"],
-  string
-> = {
+const TRANSFER_TRANSPORT_LABELS: Record<AssetPreviewTransferStats["transport"], string> = {
   websocket: "WebSocket 直连",
   fabric: "Fabric Relay",
   rtc: "WebRTC 直连",
@@ -1448,20 +1454,6 @@ function formatTransferDuration(milliseconds: number): string {
   const duration = Math.max(0, milliseconds);
   if (duration < 1_000) return `${Math.round(duration)} ms`;
   return `${(duration / 1_000).toFixed(duration < 10_000 ? 2 : 1)} s`;
-}
-
-function PageInfoIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.25" />
-      <path
-        d="M8 7v4.5M8 5.25h.01"
-        stroke="currentColor"
-        strokeWidth="1.25"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
 }
 
 export function isolatedHtml(

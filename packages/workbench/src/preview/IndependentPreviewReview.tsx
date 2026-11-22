@@ -1,3 +1,4 @@
+import { PreviewReceivedFeedback } from "./PreviewReceivedFeedback";
 import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PreviewSourceInfo, StaticPreviewGrant } from "@genehub/proto";
@@ -11,11 +12,12 @@ import {
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
-import { PreviewFileFeedbackOpenContext, PreviewToolbarContext } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import type { ServicePreviewClient } from "./serviceClient";
 import type { PixelSnapshot } from "./runtimeCapture";
-import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
+import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
+import { independentPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 
 type Request = {
   resolve(detail: unknown): void;
@@ -111,10 +113,19 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
   const [eventCount, setEventCount] = useState(0);
   const [ready, setReady] = useState(false);
   const [problem, setProblem] = useState("");
+  const [openShare, setOpenShare] = useState<(() => void) | null>(null);
+  const bindShare = useCallback((open: (() => void) | null) => setOpenShare(() => open), []);
+  const [documentTitle, setDocumentTitle] = useState("");
+  const [navigation, setNavigation] = useState({ at: -1, length: 0 });
+  const trail = useRef<{ entries: string[]; at: number; pending?: number }>({ entries: [], at: -1 });
+  const [route, setRoute] = useState("");
+  const initialRelatedPage = useRef(new URLSearchParams(window.location.search).get("previewPath"));
+  const [newWindowLink, setNewWindowLink] = useState<{ url: string; label: string }>();
   const [openFeedback, setOpenFeedback] = useState<(() => void) | null>(null);
   const bindFeedback = useCallback((open: (() => void) | null) => setOpenFeedback(() => open), []);
   const workspaceId = isAbsoluteFilePath(filePath) ? "" : source.workspaceHandle;
   const version = info?.path === filePath ? info.version : "";
+  const mayWrite = !!version && info?.feedbackWritable !== false;
   const feedback = useFileFeedback(client, workspaceId, filePath, version, feedbackScope);
 
   useEffect(() => {
@@ -134,10 +145,64 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
         const events = eventsRef.current;
         if (events.length >= 1_000) events.shift();
         events.push({ at: Date.now(), kind, detail: sanitized });
-        setEventCount(events.length);
+        setEventCount(count => count + 1);
         return;
       }
       if (protocol !== "genehub-preview-runtime") return;
+      if (kind === "review-new-window") {
+        const urlText = detail?.url;
+        if (typeof urlText !== "string" || urlText.length > 4096) return;
+        let target: URL;
+        try { target = new URL(urlText); } catch { return; }
+        if (!["https:", "http:"].includes(target.protocol) || target.username || target.password) return;
+        if (target.origin !== origin) {
+          setNewWindowLink({ url: target.href, label: `打开外部网站 ${target.host}` });
+          return;
+        }
+        if (!viewedPath(origin, source.path, target.href)) return;
+        const url = new URL(independentPreviewUrl(source));
+        url.searchParams.set("review", "1");
+        url.searchParams.set("previewPath", target.pathname + target.search + target.hash);
+        if (feedbackScope !== "owner") url.hash = window.location.hash;
+        setNewWindowLink({ url: url.href, label: "在新窗口打开目标页" });
+        return;
+      }
+      if (kind === "review-location") {
+        const urlText = detail?.url;
+        if (typeof urlText !== "string" || urlText.length > 4096) return;
+        let url: URL;
+        try { url = new URL(urlText); } catch { return; }
+        if (url.origin !== origin || url.username || url.password || url.pathname.startsWith("/.well-known/")) return;
+        const initial = initialRelatedPage.current;
+        initialRelatedPage.current = null;
+        if (initial?.startsWith("/") && initial.length <= 4096) {
+          try {
+            const related = new URL(initial, origin);
+            if (related.href !== url.href && viewedPath(origin, source.path, related.href)) {
+              frame.current?.contentWindow?.postMessage({
+                source: "genehub-preview-runtime-command", command: "review-go", url: related.href,
+              }, origin);
+              return;
+            }
+          } catch { /* Ignore an invalid linked page and retain the entry. */ }
+        }
+        const history = trail.current;
+        const pendingIndex = history.pending;
+        if (pendingIndex !== undefined && url.href === history.entries[pendingIndex]) {
+          history.at = pendingIndex;
+        } else if (url.href !== history.entries[history.at]) {
+          if (detail.action === "replace" && history.at >= 0) history.entries[history.at] = url.href;
+          else {
+            history.entries = [...history.entries.slice(0, history.at + 1), url.href].slice(-100);
+            history.at = history.entries.length - 1;
+          }
+        }
+        history.pending = undefined;
+        setNavigation({ at: history.at, length: history.entries.length });
+        setRoute(url.pathname + url.search + url.hash);
+        setDocumentTitle(typeof detail.title === "string" ? detail.title.slice(0, 500) : "");
+        return;
+      }
       if (kind !== "dom-snapshot" && kind !== "render-snapshot") return;
       const request = pending.get(requestId);
       if (!request) return;
@@ -158,7 +223,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       }
       pending.clear();
     };
-  }, [grant.code, origin, source.path]);
+  }, [feedbackScope, grant.code, origin, source]);
 
   useEffect(() => {
     if (ready) return;
@@ -179,6 +244,27 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       .catch(error => { if (current) setProblem(String(error)); });
     return () => { current = false; };
   }, [client, filePath, ready, workspaceId]);
+
+  useEffect(() => {
+    if (!documentTitle) return;
+    const previous = document.title;
+    document.title = documentTitle;
+    return () => { if (document.title === documentTitle) document.title = previous; };
+  }, [documentTitle]);
+
+  const go = (index: number) => {
+    const url = trail.current.entries[index];
+    if (!url || index === trail.current.at || !frame.current?.contentWindow) return;
+    trail.current.pending = index;
+    for (const request of requests.current.values()) {
+      clearTimeout(request.timer);
+      request.reject(new Error("预览页面已切换"));
+    }
+    requests.current.clear();
+    frame.current.contentWindow.postMessage({
+      source: "genehub-preview-runtime-command", command: "review-go", url,
+    }, origin);
+  };
 
   const queryFrame = useCallback((command: "snapshot-dom" | "snapshot-render", timeout: number) => {
     const target = frame.current?.contentWindow;
@@ -208,27 +294,37 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
     <PreviewToolbarContext.Provider value={toolbar}>
       <PreviewFileFeedbackOpenContext.Provider value={openFeedback}>
         <main className="flex h-dvh flex-col overflow-hidden bg-bg text-fg">
-          <header className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-1">
-            <span className="truncate text-sm">{filePath.slice(filePath.lastIndexOf("/") + 1)}</span>
-            <div className="flex items-center gap-2">
-              {serviceUrl ? <a href={serviceUrl} className="rounded border border-line px-2 py-1 text-xs">启用本地服务</a> : null}
-              {stopPlayerUrl ? <a href={stopPlayerUrl} className="rounded border border-line px-2 py-1 text-xs">停止引擎串流</a> : null}
-              <div ref={setToolbar} className="flex items-center gap-2" />
-            </div>
-          </header>
+          <PreviewShareOpenContext.Provider value={openShare}>
+          <PreviewShell bindTools={setToolbar} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
+            <div><dt className="text-muted">页面</dt><dd className="break-words">{documentTitle}</dd></div>
+            <div><dt className="text-muted">页面地址</dt><dd className="break-all font-mono">{route}</dd></div>
+            {feedbackScope === "owner" && info ? <div><dt className="text-muted">源文件</dt><dd className="break-all">{info.displayPath}</dd></div> : null}
+            <div><dt className="text-muted">访问权限</dt><dd>{feedbackScope === "owner" ? "已有权限" : info?.feedbackWritable === false ? "仅观看" : "限时分享"}</dd></div>
+          </dl>}>
+          <PreviewNavigation back={navigation.at > 0 ? () => go(navigation.at - 1) : undefined}
+            forward={navigation.at >= 0 && navigation.at + 1 < navigation.length ? () => go(navigation.at + 1) : undefined} />
+          <PreviewShareAction />
+          <PreviewToolbarPortal>
+            {serviceUrl ? <a href={serviceUrl} className="truncate rounded px-1 text-xs">启用本地服务</a> : null}
+            {stopPlayerUrl ? <a href={stopPlayerUrl} className="truncate rounded px-1 text-xs">停止引擎串流</a> : null}
+          </PreviewToolbarPortal>
+          {newWindowLink ? <div className="flex gap-2 border-b border-line px-3 py-1 text-xs">
+            <a href={newWindowLink.url} target="_blank" rel="noopener noreferrer" className="text-accent underline">{newWindowLink.label}</a>
+            <button type="button" className="rounded px-2 py-1 hover:bg-raised" onClick={() => setNewWindowLink(undefined)}>取消</button>
+          </div> : null}
           {problem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}</p> : null}
           <form ref={form} hidden method="post" target={frameName} action={grant.action}>
             <input type="hidden" name="code" value={grant.code} />
           </form>
           <PreviewReviewChrome
             client={client} sessionId={null} path={filePath} version={version} kind="html"
-            enabled={!!version} fileFeedback={feedback.review}
+            enabled={mayWrite} fileFeedback={mayWrite ? feedback.review : undefined}
           >
             <PreviewRuntimeControls
               frameRef={frame} ready={ready} entryPath={filePath} sourceVersion={version}
               eventCount={eventCount} eventsRef={eventsRef}
               requestDomSnapshot={requestDomSnapshot} requestRenderedSnapshot={requestRenderedSnapshot}
-              onSubmit={version ? save : undefined}
+              onSubmit={mayWrite ? save : undefined} allowCapture={feedbackScope === "owner" || mayWrite}
             />
             {media ? <ServiceMediaPanel service={media} /> : null}
             <div className="relative min-h-0 flex-1 overflow-hidden">
@@ -240,7 +336,14 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
               <HtmlAnnotationOverlay frameRef={frame} frameReady={ready} origin={origin} />
             </div>
           </PreviewReviewChrome>
-          <PreviewFeedbackPanel feedback={feedback} bindOpen={bindFeedback} />
+          {feedbackScope === "owner" && client.identity?.features?.includes("preview.feedback.list.v1") ? <PreviewReceivedFeedback
+            key={`received:${filePath}`} client={client} workspaceId={workspaceId} path={filePath} version={version} /> : null}
+          {mayWrite ? <PreviewFeedbackPanel key={`compose:${filePath}`} feedback={feedback} bindOpen={bindFeedback} /> : null}
+          {feedbackScope === "owner"
+            ? <PreviewShareButton client={client} source={source} trigger={false} bindOpen={bindShare} independent allowReview />
+            : <PreviewShareCopyButton trigger={false} bindOpen={bindShare} />}
+          </PreviewShell>
+          </PreviewShareOpenContext.Provider>
         </main>
       </PreviewFileFeedbackOpenContext.Provider>
     </PreviewToolbarContext.Provider>

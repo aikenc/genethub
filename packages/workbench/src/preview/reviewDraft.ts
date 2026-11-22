@@ -83,6 +83,7 @@ function anchorLabel(item: PreviewAnnotation): string {
   if (target.kind === "htmlElement") {
     return `元素 ${target.tag} ${target.selector}；摘录：「${target.excerpt}」`;
   }
+  if (target.kind === "videoTime") return `视频 ${previewTimeLabel(target.timeMs)}`;
   return `#${item.markerNo ?? "?"} (${target.x},${target.y},${target.width},${target.height})`;
 }
 
@@ -93,4 +94,9 @@ function clamp01(value: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+export function previewTimeLabel(timeMs: number): string {
+  const seconds = Math.floor(timeMs / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.${String(timeMs % 1000).padStart(3, "0")}`;
 }

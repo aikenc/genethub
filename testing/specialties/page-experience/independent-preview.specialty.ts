@@ -79,7 +79,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
   const withPlayer = mode === "player";
 
   const [edgePort, publicPort, relayPort] = await Promise.all([allocatePort(), allocatePort(), allocatePort()]);
-  const origin = `https://workbench.${suffix}:${publicPort}`;
+  const workbenchHost = withReview || withMedia ? "workbench.workbench.test" : `workbench.${suffix}`;
+  const origin = `https://${workbenchHost}:${publicPort}`;
   const token = randomBytes(32).toString("base64url");
   const relayToken = randomBytes(32).toString("base64url");
   const cloudRoot = process.env.TESTCTL_CLOUD_ROOT!;
@@ -89,7 +90,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
   const key = path.join(t.env.root, "preview-key.pem");
   const databasePath = path.join(t.env.root, "hub.sqlite");
   await run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-    "-subj", `/CN=*.${suffix}`, "-addext", `subjectAltName=DNS:*.${suffix}`, "-keyout", key, "-out", cert]);
+    "-subj", `/CN=*.${suffix}`, "-addext", `subjectAltName=DNS:*.${suffix},DNS:${workbenchHost}`, "-keyout", key, "-out", cert]);
   const { stdout: publicKey } = await run("openssl", ["x509", "-in", cert, "-pubkey", "-noout"]);
   const publicDer = createPublicKey(publicKey).export({ type: "spki", format: "der" });
   const pin = createHash("sha256").update(publicDer).digest("base64");
@@ -222,7 +223,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     }
     const idleSince = Date.now();
     browser = await chromium.launch({ args: [
-      "--no-proxy-server", `--host-resolver-rules=MAP *.${suffix} 127.0.0.1`, `--ignore-certificate-errors-spki-list=${pin}`,
+      "--no-proxy-server", `--host-resolver-rules=MAP *.${suffix} 127.0.0.1, MAP ${workbenchHost} 127.0.0.1`, `--ignore-certificate-errors-spki-list=${pin}`,
     ] });
     const owner = await browser.newContext();
     const visitor = await browser.newContext();
@@ -444,6 +445,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     await anonymous.getByRole("alert").getByText("请使用已经获准连接目标设备的浏览器打开").waitFor();
     await menu.click();
     await creator.getByRole("button", { name: "创建限时分享" }).click();
+    const reviewOption = creator.getByLabel("打开批注和运行日志", { exact: true });
+    if (await reviewOption.isVisible()) await reviewOption.uncheck();
     await creator.getByLabel("分享授权时间").selectOption("3600");
     await creator.getByRole("button", { name: "生成链接" }).click();
     const shareLink = creator.getByRole("textbox", { name: "预览分享链接" });
@@ -471,20 +474,20 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await subdomain.getByText("Shared resource loaded").waitFor();
       const privateStatus = await subdomain.locator("body").evaluate(async () => (await fetch("/private.txt")).status);
       t.assertions.assert(privateStatus === 403, "review changed the share's allowed files");
-      await review.getByLabel("批注", { exact: true }).click();
-      await review.getByRole("button", { name: "开始批注", exact: true }).click();
+      await review.getByRole("button", { name: "反馈", exact: true }).click();
+      await review.getByRole("button", { name: "点选批注", exact: true }).click();
       await subdomain.locator("#data").click();
       await review.getByRole("textbox", { name: "批注", exact: true }).fill("Independent visitor annotation");
       await review.getByRole("button", { name: "添加批注", exact: true }).click();
       await review.getByRole("button", { name: "完成批注", exact: true }).click();
-      await review.getByLabel("更多预览操作", { exact: true }).click();
+      await review.getByLabel("采集", { exact: true }).click();
       await review.getByRole("button", { name: "截图", exact: true }).click();
       await review.getByText(/已截取 Preview 画面 .* 和 DOM 状态/).waitFor();
       await review.getByRole("button", { name: "保存运行产物", exact: true }).click();
-      await review.getByText("已保存到文件反馈草稿，请从批注菜单选择并提交").waitFor();
+      await review.getByText("已保存到文件反馈草稿，请在反馈中选择并提交").waitFor();
       await review.keyboard.press("Escape");
-      await review.getByLabel("批注", { exact: true }).click();
-      await review.getByRole("button", { name: "提交批注反馈", exact: true }).click();
+      await review.getByRole("button", { name: "反馈", exact: true }).click();
+      await review.getByRole("button", { name: "写反馈", exact: true }).click();
       await review.getByRole("textbox", { name: "反馈说明" }).fill("Private origin feedback");
       await review.getByRole("button", { name: "提交反馈", exact: true }).click();
       const receipt = review.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
@@ -499,6 +502,15 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const dom = await readFile(path.join(bundles[0]!.workspacePath, "dom.jsonl"), "utf8");
       t.assertions.assert(log.includes("preview started before load") && dom.includes("Shared resource loaded"), "source startup or DOM evidence was lost");
       t.assertions.assert(bundles[0]!.files.some(file => file.name.endsWith(".webp")), "screenshot was not retained with feedback");
+      const authorReview = await owner.newPage();
+      await authorReview.goto(legacy);
+      await authorReview.getByRole("button", { name: "反馈", exact: true }).click();
+      await authorReview.getByText("收到的反馈", { exact: true }).click();
+      await authorReview.getByRole("button", { name: /Private origin feedback/ }).click();
+      const authorReceipt = await authorReview.getByRole("textbox", { name: "收到的反馈内容" }).inputValue();
+      t.assertions.assert(authorReceipt.includes(id) && authorReceipt.includes("Independent visitor annotation"),
+        "the author could not read the same visitor receipt from the product UI");
+      await authorReview.close();
       await review.close();
     }
     await creator.getByRole("button", { name: "撤销分享" }).click();
@@ -507,6 +519,20 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       try { return (await fetch("./data.json")).ok; } catch { return false; }
     });
     t.assertions.assert(!afterRevoke, "a revoked view continued to read");
+    if (withReview) {
+      await creator.getByLabel("仅观看", { exact: true }).check();
+      await creator.getByRole("button", { name: "生成链接", exact: true }).click();
+      await shareLink.waitFor();
+      const viewer = await visitor.newPage();
+      await viewer.goto(await shareLink.inputValue());
+      await viewer.frameLocator('iframe[title="独立 HTML 预览"]').getByText("Shared resource loaded").waitFor();
+      await viewer.getByRole("button", { name: "日志", exact: true }).click();
+      await viewer.getByRole("searchbox", { name: "搜索运行日志" }).waitFor();
+      t.assertions.assert(await viewer.getByRole("button", { name: "点选批注" }).count() === 0
+        && await viewer.getByLabel("采集", { exact: true }).count() === 0, "the viewing-only share displayed write tools");
+      await creator.getByRole("button", { name: "撤销分享" }).click();
+      await viewer.close();
+    }
     await old.getByText("Shared resource loaded").waitFor();
     const ordinary = await owner.newPage();
     await ordinary.goto(plain.href);

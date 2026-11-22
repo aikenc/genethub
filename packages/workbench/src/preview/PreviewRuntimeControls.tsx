@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import { PreviewProductFeedbackContext, PreviewShareOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewProductFeedbackContext, previewTextButton, PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   PreviewPixelCapture,
   supportsDisplayCapture,
@@ -88,12 +88,13 @@ export function PreviewRuntimeControls({
   entryPath,
   sourceVersion,
   eventsRef,
-  eventCount: _eventCount,
+  eventCount,
   requestDomSnapshot,
   requestRenderedSnapshot,
   onSubmit,
+  allowCapture = true,
 }: {
-  frameRef: React.RefObject<HTMLIFrameElement>;
+  frameRef: React.RefObject<HTMLElement>;
   ready: boolean;
   entryPath: string;
   sourceVersion?: string;
@@ -102,9 +103,9 @@ export function PreviewRuntimeControls({
   requestDomSnapshot(): Promise<PreviewDomSnapshot>;
   requestRenderedSnapshot(): Promise<PixelSnapshot>;
   onSubmit?: RuntimeArtifactSubmit;
+  allowCapture?: boolean;
 }) {
   const reportProduct = useContext(PreviewProductFeedbackContext);
-  const openShare = useContext(PreviewShareOpenContext);
   const captureHandle = useMemo(
     () => runtimeId("capture"),
     [entryPath, sourceVersion],
@@ -135,6 +136,9 @@ export function PreviewRuntimeControls({
   const [recording, setRecording] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [recordingResult, setRecordingResult] = useState<RuntimeRecording | null>(null);
+  const [latestScreenshot, setLatestScreenshot] = useState<PixelSnapshot>();
+  const [screenshotUrl, setScreenshotUrl] = useState<string>();
+  const [showCaptures, setShowCaptures] = useState(false);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState("正在连接日志采集…");
 
@@ -155,10 +159,14 @@ export function PreviewRuntimeControls({
     });
     engineRef.current = engine;
     framesRef.current = [];
+    recordingRef.current = false;
+    setRecording(false);
     captureStrategyRef.current = supportsDisplayCapture() ? "display" : "dom-render";
     recordingKindRef.current = null;
     setFrameCount(0);
     setCaptureActive(false);
+    setLatestScreenshot(undefined);
+    setShowCaptures(false);
     setRecordingResult(null);
     setRecordingUrl(null);
     setNotice("正在连接日志采集…");
@@ -188,6 +196,16 @@ export function PreviewRuntimeControls({
     setRecordingUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [recordingResult]);
+
+  useEffect(() => {
+    if (!latestScreenshot) {
+      setScreenshotUrl(undefined);
+      return;
+    }
+    const url = URL.createObjectURL(latestScreenshot.blob);
+    setScreenshotUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [latestScreenshot]);
 
   const captureFrame = useCallback(
     async (
@@ -225,6 +243,7 @@ export function PreviewRuntimeControls({
           failedDomSnapshot(error, target),
         );
         const [{ pixel, error }, dom] = await Promise.all([pixelPromise, domPromise]);
+        if (engineRef.current !== engine) return null;
         if (!pixel && !allowDomOnly) throw error;
         const frame = {
           at: Date.now(),
@@ -254,6 +273,8 @@ export function PreviewRuntimeControls({
     try {
       const frame = await captureFrame("manual");
       if (frame?.pixel) {
+        setLatestScreenshot(frame.pixel);
+        setShowCaptures(true);
         setCaptureActive(Boolean(engineRef.current?.active));
         setNotice(
           frame.pixel.mode === "dom-render"
@@ -294,9 +315,11 @@ export function PreviewRuntimeControls({
       recordingRef.current = false;
       recordingKindRef.current = null;
       setRecording(false);
+      if (menuRef.current) menuRef.current.open = true;
       setCaptureActive(Boolean(engineRef.current?.active));
       if (result) {
         setRecordingResult(result);
+        setShowCaptures(true);
         setNotice(
           result.kind === "video"
             ? `体验录制完成：${formatSeconds(result.durationMs)}，视频 ${displayFps(result)}，DOM 1fps`
@@ -333,6 +356,10 @@ export function PreviewRuntimeControls({
           displayCapture = false;
         }
       }
+      if (engineRef.current !== engine) {
+        engine.dispose();
+        return;
+      }
       recordingKindRef.current = displayCapture ? "video" : "frame-sequence";
       setCaptureActive(displayCapture);
       recordingStartedAt.current = Date.now();
@@ -341,6 +368,7 @@ export function PreviewRuntimeControls({
       setElapsedSeconds(0);
       setRecordingResult(null);
       await captureFrame("recording-start", { allowDomOnly: true });
+      if (engineRef.current !== engine || !recordingRef.current) return;
       sampleTimer.current = window.setInterval(() => {
         void captureFrame("recording-sample", { allowDomOnly: true }).catch((error) =>
           setNotice(errorMessage(error)),
@@ -364,6 +392,7 @@ export function PreviewRuntimeControls({
       engine.dispose();
       setCaptureActive(false);
       setNotice(errorMessage(error));
+      if (menuRef.current) menuRef.current.open = true;
     } finally {
       setBusy(null);
     }
@@ -408,7 +437,7 @@ export function PreviewRuntimeControls({
       setCaptureActive(false);
       setNotice(
         saved.feedbackSaved
-          ? "已保存到文件反馈草稿，请从批注菜单选择并提交"
+          ? "已保存到文件反馈草稿，请在反馈中选择并提交"
           : saved.addedToDraft
           ? `已保存到 ${saved.relativePath}，已加入输入框`
           : `已保存到 ${saved.relativePath}；${saved.draftError ?? "未加入输入框"}`,
@@ -430,28 +459,27 @@ export function PreviewRuntimeControls({
       : "webm";
 
   return (
-    <PreviewToolbarPortal>
-      {recording ? <button type="button" className="h-7 shrink-0 rounded border border-red-500/60 px-2 text-xs text-red-500" disabled={busy !== null} onClick={() => void stopRecording()}>停止 · {elapsedSeconds}s</button> : null}
-      <details ref={menuRef} className="relative text-xs text-muted" onKeyDown={(event) => {
+    <>
+    <PreviewToolbarPortal slot="logs">
+      <PreviewRuntimeLogList eventCount={eventCount} eventsRef={eventsRef} onAttach={onSubmit && (async event => {
+        const artifact = await buildRuntimeArtifactSubmission({ entryPath, sourceVersion, events: [event], frames: [], recording: null });
+        await onSubmit(artifact, () => {});
+      })} />
+    </PreviewToolbarPortal>
+    {reportProduct ? <PreviewToolbarPortal slot="feedback"><button type="button" data-preview-dismiss className={previewTextButton}
+      onClick={reportProduct}>报告预览问题</button></PreviewToolbarPortal> : null}
+    {allowCapture ? <PreviewToolbarPortal slot="capture">
+      {recording ? <button type="button" className="h-7 shrink-0 rounded border border-red-500/60 px-2 text-xs text-red-500" aria-label="停止录制" disabled={busy !== null} onClick={() => void stopRecording()}>停止 · {elapsedSeconds}s</button> : null}
+      <details hidden={recording} ref={menuRef} className="relative text-xs text-muted" onKeyDown={(event) => {
         if (event.key === "Escape" && event.currentTarget.open) {
           event.stopPropagation();
           event.currentTarget.open = false;
           event.currentTarget.querySelector("summary")?.focus();
         }
       }}>
-      <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
-      <div className="absolute right-0 top-full z-50 mt-1 flex w-40 max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-lg border border-line bg-surface p-2 text-fg shadow-lg">
+      <summary aria-label="采集" title="截图、录制和采集记录" className="flex h-8 px-2 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">采集</summary>
+      <div className="absolute right-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] w-48 max-w-[calc(100vw-1rem)] flex-col overflow-y-auto gap-1 rounded-lg border border-line bg-surface p-2 text-fg shadow-lg">
       {idleNotice ? null : <span className="break-words px-2 py-1 text-muted" role="status">{notice}</span>}
-      {recordingUrl ? (
-        <a
-          className={menuItem}
-          href={recordingUrl}
-          download={`preview-experience-${Date.now()}.${videoExtension}`}
-          title="保存完整高帧率体验视频"
-        >
-          保存视频
-        </a>
-      ) : null}
       {captureActive && !recording ? (
         <button
           type="button"
@@ -484,7 +512,10 @@ export function PreviewRuntimeControls({
         type="button"
         className={menuItem}
         disabled={!ready || busy !== null}
-        onClick={() => void (recording ? stopRecording() : startRecording())}
+        onClick={() => {
+          if (menuRef.current) menuRef.current.open = false;
+          void startRecording();
+        }}
         title={
           recording
             ? "停止体验录制"
@@ -493,8 +524,30 @@ export function PreviewRuntimeControls({
               : "以 1fps 采集 Preview 画面和 DOM，日志持续记录"
         }
       >
-        {recording ? "停止" : "录制"}
+        开始录制
       </button>
+      <button type="button" className={menuItem} aria-expanded={showCaptures}
+        onClick={() => setShowCaptures(previous => !previous)}>采集记录</button>
+      {showCaptures ? <div className="space-y-1 border-t border-line p-1">
+        {!latestScreenshot && !recordingResult ? <p className="text-muted">还没有采集画面</p> : null}
+        {screenshotUrl && latestScreenshot ? <>
+          <img src={screenshotUrl} className="max-h-36 w-full rounded object-contain" alt="最近一张截图" />
+          <a className={`${menuItem} block`} href={screenshotUrl}
+            download={`preview-${latestScreenshot.capturedAt}.${imageExtension(latestScreenshot.blob.type)}`}>保存截图</a>
+        </> : null}
+      {recordingUrl ? <>
+        <video controls playsInline preload="metadata" src={recordingUrl} className="w-full rounded" aria-label="回放本次录制" />
+        <a
+          className={menuItem}
+          href={recordingUrl}
+          download={`preview-experience-${Date.now()}.${videoExtension}`}
+          title="保存完整高帧率体验视频"
+        >
+          保存视频
+        </a>
+      </> : null}
+        {recordingResult?.kind === "frame-sequence" ? <p className="px-2 py-1 text-muted">已记录画面帧，可保存为运行产物。</p> : null}
+      </div> : null}
       <button
         type="button"
         className={menuItem}
@@ -510,95 +563,58 @@ export function PreviewRuntimeControls({
       >
         保存运行产物
       </button>
-      {openShare ? (
-        <button
-          type="button"
-          className={menuItem}
-          onClick={() => {
-            if (menuRef.current) menuRef.current.open = false;
-            openShare();
-          }}
-        >
-          分享预览
-        </button>
-      ) : null}
-      {reportProduct ? (
-        <button
-          type="button"
-          className={menuItem}
-          onClick={() => {
-            if (menuRef.current) menuRef.current.open = false;
-            reportProduct();
-          }}
-        >
-          反馈问题
-        </button>
-      ) : null}
       </div>
       </details>
-    </PreviewToolbarPortal>
+    </PreviewToolbarPortal> : null}
+    </>
   );
 }
 
-/** Overflow for previews that have no runtime menu, so product feedback stays reachable. */
-export function ProductFeedbackOverflow() {
-  const reportProduct = useContext(PreviewProductFeedbackContext);
-  const openShare = useContext(PreviewShareOpenContext);
-  const menuRef = useRef<HTMLDetailsElement>(null);
-  useEffect(() => {
-    const close = (event: PointerEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) menuRef.current.open = false;
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
-  if (!reportProduct && !openShare) return null;
-  const closeMenu = () => {
-    if (menuRef.current) menuRef.current.open = false;
+function PreviewRuntimeLogList({ eventCount, eventsRef, onAttach }: {
+  eventCount: number;
+  eventsRef: React.MutableRefObject<PreviewRuntimeEvent[]>;
+  onAttach?: (event: PreviewRuntimeEvent) => Promise<void>;
+}) {
+  const [query, setQuery] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [frozen, setFrozen] = useState<PreviewRuntimeEvent[]>();
+  const [status, setStatus] = useState("");
+  const [attaching, setAttaching] = useState(false);
+  const rows = (frozen ?? eventsRef.current).filter(event =>
+    (!errorsOnly || ["error", "resource", "csp"].includes(event.kind))
+    && JSON.stringify(event.detail).toLowerCase().includes(query.toLowerCase())
+  ).slice(-100).reverse();
+  const attach = async (event: PreviewRuntimeEvent) => {
+    if (attaching || !onAttach) return;
+    setAttaching(true);
+    try {
+      await onAttach(event);
+      setStatus("已加入反馈附件，可在「意见」中打开反馈并提交。");
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setAttaching(false);
+    }
   };
-  return (
-    <PreviewToolbarPortal>
-      <details
-        ref={menuRef}
-        className="relative text-xs text-muted"
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && event.currentTarget.open) {
-            event.stopPropagation();
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector("summary")?.focus();
-          }
-        }}
-      >
-        <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
-        <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col rounded-lg border border-line bg-surface p-2 shadow-lg">
-          {openShare ? (
-            <button
-              type="button"
-              className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
-              onClick={() => {
-                closeMenu();
-                openShare();
-              }}
-            >
-              分享预览
-            </button>
-          ) : null}
-          {reportProduct ? (
-            <button
-              type="button"
-              className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
-              onClick={() => {
-                closeMenu();
-                reportProduct();
-              }}
-            >
-              反馈问题
-            </button>
-          ) : null}
-        </div>
-      </details>
-    </PreviewToolbarPortal>
-  );
+  return <>
+    <input type="search" aria-label="搜索运行日志" placeholder="搜索本次运行日志" value={query}
+      onChange={event => setQuery(event.target.value)} className="w-full rounded border border-line bg-bg p-2" />
+    <div className="my-1 flex flex-wrap items-center gap-1">
+      <button type="button" className={previewTextButton} aria-pressed={errorsOnly} onClick={() => setErrorsOnly(!errorsOnly)}>错误</button>
+      <button type="button" className={previewTextButton} onClick={() => setFrozen(frozen ? undefined : [...eventsRef.current])}>{frozen ? "继续更新" : "暂停更新"}</button>
+      <span className="text-muted">{frozen?.length ?? eventCount} 条</span>
+    </div>
+    {status ? <p className="my-2 text-muted" role="status">{status}</p> : null}
+    {rows.length === 0 ? <p className="text-muted">暂无匹配日志</p> : null}
+    {rows.map((event, index) => {
+      const summary = String(event.detail.message ?? event.detail.topic ?? event.kind).slice(0, 160);
+      return <details key={`${event.at}-${index}`} className="border-b border-line py-2">
+        <summary className="cursor-pointer break-words"><time>{new Date(event.at).toLocaleTimeString()}</time> · {summary}</summary>
+        <pre className="my-2 whitespace-pre-wrap break-all">{JSON.stringify(event.detail, null, 2)}</pre>
+        {onAttach ? <button type="button" className={previewTextButton} disabled={attaching} onClick={() => void attach(event)}>附进反馈</button> : null}
+      </details>;
+    })}
+  </>;
 }
 
 export async function buildRuntimeArtifactSubmission({
