@@ -62,11 +62,13 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [reviewClient, setReviewClient] = useState<Client>();
   const [reviewService, setReviewService] = useState<ServicePreviewClient>();
+  const [serviceOffer, setServiceOffer] = useState<StaticPreviewGrant>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [allowTurn, setAllowTurn] = useState(false);
   const { deviceHandle, path, workspaceHandle } = source;
+  const serviceWorkspace = isAbsoluteFilePath(path) ? "" : workspaceHandle;
   useEffect(() => {
     if (withService && !confirmed) return;
     const cancellation = new AbortController();
@@ -103,7 +105,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         if (!connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
           throw new Error("目标设备未启用独立服务预览");
         }
-        enabledService = await ServicePreviewClient.discover(connection, workspaceHandle, path);
+        enabledService = await ServicePreviewClient.discover(connection, serviceWorkspace, path);
         signal.throwIfAborted();
         if (!enabledService) throw new Error("这个入口没有已登记的服务");
       }
@@ -112,7 +114,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
-          workspaceId: isAbsoluteFilePath(path) ? "" : workspaceHandle,
+          workspaceId: serviceWorkspace,
           operation: {
             kind: "openStatic", path,
             ...(serviceRunId ? { serviceRunId } : {}),
@@ -150,13 +152,24 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       enabledService?.close();
       owned?.close();
     };
-  }, [allowTurn, client, confirmed, deviceHandle, host, path, review, withService, workspaceHandle]);
+  }, [allowTurn, client, confirmed, deviceHandle, host, path, review, serviceWorkspace, withService]);
 
   useEffect(() => { if (grant && !review) form.current?.submit(); }, [grant, review]);
+  useEffect(() => {
+    if (!grant || !review || !reviewClient || withService || feedbackScope !== "owner"
+      || !reviewClient.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE)) return;
+    let active = true;
+    // Look up this entry after the static grant so a service probe never delays
+    // opening ordinary HTML. The explicit connection still rechecks the run.
+    void ServicePreviewClient.discover(reviewClient, serviceWorkspace, path).then(candidate => {
+      candidate?.close();
+      if (active && candidate && reviewClient.connectionState === "ready") setServiceOffer(grant);
+    }).catch(() => { /* No reachable registration to offer. */ });
+    return () => { active = false; };
+  }, [feedbackScope, grant, path, review, reviewClient, serviceWorkspace, withService]);
+
   if (grant && review && reviewClient) {
-    const mayEnableService = feedbackScope === "owner" && !withService
-      && reviewClient.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
-    const serviceUrl = mayEnableService ? new URL(window.location.href) : undefined;
+    const serviceUrl = serviceOffer === grant ? new URL(window.location.href) : undefined;
     serviceUrl?.searchParams.set("service", "1");
     const player = reviewService && htmlServiceMedia(reviewService.descriptor)?.protocol === "pixel-streaming/1";
     const stopUrl = player ? new URL(window.location.href) : undefined;
@@ -172,13 +185,13 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       <meta name="referrer" content="strict-origin" />
       {withService && !confirmed ? (
         <>
-          <p>允许这个页面访问源机器上为它登记的本地服务？</p>
+          <p>允许这个页面连接源电脑为它登记的服务？</p>
           <label className="mt-3 flex items-center justify-center gap-2">
             <input type="checkbox" checked={allowTurn} onChange={event => setAllowTurn(event.target.checked)} />
             允许引擎串流使用媒体中继
           </label>
           <button type="button" className="mt-3 rounded border border-line px-3 py-2" onClick={() => setConfirmed(true)}>
-            启用服务并打开预览
+            连接服务并打开预览
           </button>
         </>
       ) : <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>}

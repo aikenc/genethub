@@ -9,11 +9,12 @@ import { independentPreviewUrl, type AssetPreviewLocation } from "./url";
 export const INDEPENDENT_REVIEW_FEATURE = "asset.preview.independent.review.v1";
 export const INDEPENDENT_SERVICE_FEATURE = "asset.preview.independent.service.v1";
 
-export function IndependentPreviewMenu({ client, source, resources, canShare }: {
+export function IndependentPreviewMenu({ client, source, resources, canShare, hasRegisteredService }: {
   client: Client;
   source: AssetPreviewLocation;
   resources: Iterable<string>;
   canShare: boolean;
+  hasRegisteredService: boolean;
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
   const [openShare, setOpenShare] = useState<(() => void) | null>(null);
@@ -31,7 +32,7 @@ export function IndependentPreviewMenu({ client, source, resources, canShare }: 
   const reviewUrl = new URL(url);
   reviewUrl.searchParams.set("review", "1");
   const supportsReview = !!client.identity?.features?.includes(INDEPENDENT_REVIEW_FEATURE);
-  const supportsService = client.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
+  const supportsService = hasRegisteredService && client.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
   const open = (event: React.MouseEvent<HTMLAnchorElement>) => {
     if (menu.current) menu.current.open = false;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || client.connectionState !== "ready") return;
@@ -62,7 +63,7 @@ export function IndependentPreviewMenu({ client, source, resources, canShare }: 
           <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col rounded-lg border border-line bg-surface p-2 shadow-lg">
             <a className={item} href={url} target="_blank" rel="noopener" onClick={open}>用已有权限打开</a>
             {supportsService ? (
-              <a className={item} href={serviceUrl.href} target="_blank" rel="noopener" onClick={open}>打开并启用本地服务</a>
+              <a className={item} href={serviceUrl.href} target="_blank" rel="noopener" onClick={open}>打开并连接已登记服务</a>
             ) : null}
             {supportsReview ? (
               <a className={item} href={reviewUrl.href} target="_blank" rel="noopener" onClick={() => {
