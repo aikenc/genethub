@@ -35,7 +35,7 @@ defineSpecialty({
   id: "specialty.page-experience.independent-preview-service",
   title: "Authorized preview origins carry registered HTTP, streaming and WSS",
   expectedDurationMs: 70_000, timeoutMs: 180_000,
-  oracle: "A Chromium page reaches the registered runner after confirmation. A static view, scoped share, and sibling origin lack service access.",
+  oracle: "An authorized Chromium page immediately reaches its registered runner. Static-only views, scoped shares, and sibling origins lack service access.",
   catches: ["registered service unavailable on the new origin", "cross-origin service access", "scope escapes registered routes", "different run receives requests"],
   productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
   requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
@@ -56,7 +56,7 @@ defineSpecialty({
   title: "Trusted independent review renders registered audio and video",
   expectedDurationMs: 70_000, timeoutMs: 180_000,
   oracle: "The trusted Workbench receives real media, stops the source session, and keeps media routes outside the preview origin.",
-  catches: ["explicit media cannot be opened in the independent review", "the content iframe can call media signalling", "a stopped view leaks the source media session"],
+  catches: ["media does not connect automatically in the independent review", "the content iframe can call media signalling", "a stopped view leaks the source media session"],
   productInterfaces: [...(staticSpec.productInterfaces ?? []), "service.preview"],
   requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp", "aiortc", "av", "numpy"] }],
 }, t => exercise(t, "media"));
@@ -241,9 +241,19 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     const creator = await owner.newPage();
     const locator = [device, opened.workspaceId, opened.rootHandle, "index.html"].map(encodeURIComponent).join("/");
     const legacy = `${origin}/assets/preview/v2/${locator}`;
+    const plain = new URL(`${origin}/assets/independent-preview/v2/${locator}`);
     await creator.goto(legacy);
     const old = creator.frameLocator('iframe[title="HTML 文件预览"]');
     await old.getByText("Shared resource loaded").waitFor();
+    if (withMedia) {
+      const legacyMedia = creator.getByRole("region", { name: "服务音视频" });
+      await legacyMedia.locator("video").waitFor();
+      await t.tools.waitUntil(async () => (await (await fetch(mediaHealth!)).json()).sessions === 1, 20_000);
+      await legacyMedia.getByRole("button", { name: "停止", exact: true }).click();
+      await t.tools.waitUntil(async () => (await (await fetch(mediaHealth!)).json()).sessions === 0, 10_000)
+        .catch(() => { throw new Error("stopping the opening media preview did not release its source session"); });
+      t.note("Stopping a pending media preview released the source session");
+    }
     if (mode === undefined) {
       await sleep(Math.max(0, 65_000 - (Date.now() - idleSince)));
       t.assertions.assert((await previewThreads(daemonPid)).join() === resident.join(), "the idle worker was replaced or stopped");
@@ -259,7 +269,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     const ownPopup = creator.waitForEvent("popup");
     await creator.getByRole("link", { name: "用已有权限打开" }).click();
     const ownPage = await ownPopup;
-    await ownPage.getByText("Shared resource loaded").waitFor();
+    const ownerContent = withMedia ? ownPage.frameLocator('iframe[title="独立 HTML 预览"]') : ownPage;
+    await ownerContent.getByText("Shared resource loaded").waitFor();
     if (!await ownPage.evaluate(() => crossOriginIsolated && typeof SharedArrayBuffer === "function" && window.opener === null)) {
       throw new Error("external preview origin or opener isolation failed");
     }
@@ -280,9 +291,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
 
       await menu.click();
       const playerPopup = creator.waitForEvent("popup");
-      await creator.getByRole("link", { name: "打开并连接已登记服务" }).click();
+      await creator.getByRole("link", { name: "用已有权限打开" }).click();
       const player = await playerPopup;
-      await player.getByRole("button", { name: "连接服务并打开预览" }).click();
       await exerciseEngineInput(t, player.locator("video"), streamer, 2);
       await player.close();
       await streamer.locator('body[data-closed="2"]').waitFor({ state: "attached", timeout: 10_000 });
@@ -291,11 +301,13 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const reviewPopup = creator.waitForEvent("popup");
       await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
       const review = await reviewPopup;
-      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
-      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const iframe = review.locator('iframe[title="独立 HTML 预览"]');
       await exerciseEngineInput(t, iframe.contentFrame().locator("video"), streamer, 3);
       t.assertions.assert((await iframe.getAttribute("sandbox"))?.includes("allow-pointer-lock"), "engine review blocked mouse capture");
+      await review.getByRole("button", { name: "预览信息", exact: true }).click();
+      await review.getByText("媒体直连", { exact: false }).waitFor();
+      t.assertions.assert(await review.getByRole("checkbox", { name: "仅直连" }).count() === 0,
+        "the engine still required choosing a transport");
       await review.getByRole("link", { name: "停止引擎串流" }).click();
       await streamer.locator('body[data-closed="3"]').waitFor({ state: "attached", timeout: 10_000 });
       await review.close();
@@ -304,15 +316,12 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await old.getByText("Shared resource loaded").waitFor();
     }
     if (withService) {
-      await menu.click();
-      const servicePopup = creator.waitForEvent("popup");
-      await creator.getByRole("link", { name: "打开并连接已登记服务" }).click();
-      const page = await servicePopup;
-      await page.getByRole("button", { name: "连接服务并打开预览" }).click();
-      const ready = page.getByText("Shared resource loaded");
-      const failed = page.getByRole("alert");
-      await ready.or(failed).waitFor();
-      if (await failed.isVisible()) throw new Error(await failed.innerText());
+      const page = ownPage;
+      const staticPage = await owner.newPage();
+      const staticUrl = new URL(plain);
+      staticUrl.searchParams.set("service", "0");
+      await staticPage.goto(staticUrl.href);
+      await staticPage.getByText("Shared resource loaded").waitFor();
       const executingThreads = await previewThreads(daemonPid);
       if (process.platform === "linux") {
         const staticCount = Number(process.env.GENEHUB_PREVIEW_THREADS ?? "1");
@@ -365,7 +374,7 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
         const request = httpsRequest({
           host: "127.0.0.1", port: endpoint.port, servername: endpoint.hostname, ca: certificate,
           path: endpoint.pathname, method: "POST", headers: {
-            Host: endpoint.host, Origin: new URL(ownPage.url()).origin, "Sec-Fetch-Site": "same-site",
+            Host: endpoint.host, Origin: new URL(staticPage.url()).origin, "Sec-Fetch-Site": "same-site",
             Cookie: `${lease.name}=${lease.value}`,
           },
         }, response => { response.resume(); resolve(response.statusCode); });
@@ -373,54 +382,40 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
         request.end();
       });
       t.assertions.assert(foreign === 403, "another preview origin was able to invoke the runner");
-      const staticStatus = await ownPage.evaluate(async () => (await fetch("/api/demo/echo", { method: "POST" })).status);
-      t.assertions.assert(staticStatus === 405, "opening a static preview also granted service access");
+      const staticStatus = await staticPage.evaluate(async () => (await fetch("/api/demo/echo", { method: "POST" })).status);
+      t.assertions.assert(staticStatus === 405, "the static-only preview granted service access");
+      await staticPage.close();
       await menu.click();
       const reviewPopup = creator.waitForEvent("popup");
       await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
       const review = await reviewPopup;
       const reviewFrame = review.frameLocator('iframe[title="独立 HTML 预览"]');
-      const staticReview = reviewFrame.getByText("Shared resource loaded");
-      await staticReview.waitFor();
-      t.assertions.assert(await staticReview.evaluate(async () =>
-        (await fetch("/api/demo/echo", { method: "POST" })).status) === 405,
-        "discovering a service granted access before confirmation");
-      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
-      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const loadedInReview = reviewFrame.getByText("Shared resource loaded");
       await loadedInReview.waitFor();
       const combined = await loadedInReview.evaluate(async () => {
         const response = await fetch("/api/demo/status");
         return crossOriginIsolated && response.ok && (await response.json()).ready === true;
       });
-      t.assertions.assert(combined, "review mode cannot access the confirmed service");
+      t.assertions.assert(combined, "authorized review did not connect to the service automatically");
       t.assertions.assert((await previewThreads(daemonPid)).join() === executingThreads.join(),
         "two viewers of the same run did not share its preview worker");
       await review.close();
-      service?.kill();
-      await t.tools.waitUntil(async () => (await page.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
-      await page.close();
     }
     if (withMedia) {
-      await menu.click();
-      const popup = creator.waitForEvent("popup");
-      await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
-      const review = await popup;
+      const review = ownPage;
       const content = review.frameLocator('iframe[title="独立 HTML 预览"]');
-      await content.getByText("Shared resource loaded").waitFor();
-      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
-      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const loaded = content.getByText("Shared resource loaded");
-      await loaded.waitFor();
       const panel = review.getByRole("region", { name: "服务音视频" });
-      await panel.getByLabel("仅直连").check();
-      await panel.getByRole("button", { name: "连接音视频" }).click();
       const element = panel.locator("video");
       await t.tools.waitUntil(() => element.evaluate((node: HTMLVideoElement) => {
         const stream = node.srcObject;
         return stream instanceof MediaStream && stream.getAudioTracks().some(track => track.readyState === "live")
           && node.videoWidth > 0 && node.readyState >= node.HAVE_CURRENT_DATA;
       }), 25_000);
+      await review.getByRole("button", { name: "预览信息", exact: true }).click();
+      await review.getByRole("region", { name: "媒体连接状态" }).getByText("媒体直连", { exact: false }).waitFor();
+      t.assertions.assert(await panel.getByRole("checkbox", { name: "仅直连" }).count() === 0,
+        "the media viewer still required choosing a transport");
       const paths = await loaded.evaluate(async () => {
         const ordinary = await fetch("/api/demo/health");
         const offer = await fetch("/api/media/offer", { method: "POST" });
@@ -431,7 +426,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const active = await (await fetch(mediaHealth!)).json();
       t.assertions.assert(active.sessions === 1, "source did not have exactly one live session");
       await panel.getByRole("button", { name: "停止", exact: true }).click();
-      await t.tools.waitUntil(async () => (await (await fetch(mediaHealth!)).json()).sessions === 0, 5000);
+      await t.tools.waitUntil(async () => (await (await fetch(mediaHealth!)).json()).sessions === 0, 5000)
+        .catch(() => { throw new Error("stopping the connected independent media did not release its source session"); });
       t.assertions.assert(await element.evaluate((node: HTMLVideoElement) => node.srcObject === null), "stopped media remained attached");
       await review.close();
     }
@@ -466,7 +462,6 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await review.close();
     }
     const anonymous = await visitor.newPage();
-    const plain = new URL(`${origin}/assets/independent-preview/v2/${locator}`);
     const launch = await anonymous.goto(plain.href);
     const contentPolicy = launch?.headers()["content-security-policy"];
     t.assertions.assert(contentPolicy?.includes(`form-action https://*.${suffix}:${edgePort}`),
@@ -569,10 +564,17 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await creator.getByRole("button", { name: "撤销分享" }).click();
       await viewer.close();
     }
+    if (withService) {
+      service?.kill();
+      await t.tools.waitUntil(async () =>
+        (await ownPage.evaluate(async () => (await fetch("/api/demo/stream")).status)) === 502, 5_000);
+      await ownPage.close();
+    }
     await old.getByText("Shared resource loaded").waitFor();
     const ordinary = await owner.newPage();
     await ordinary.goto(plain.href);
-    await ordinary.getByText("Shared resource loaded").waitFor();
+    const ordinaryContent = withMedia ? ordinary.frameLocator('iframe[title="独立 HTML 预览"]') : ordinary;
+    await ordinaryContent.getByText("Shared resource loaded").waitFor();
     if (mode === undefined) {
       t.assertions.assert(new URL(ordinary.url()).host !== new URL(ownPage.url()).host, "two views reused an origin");
       t.assertions.assert(await ownPage.evaluate(async () => (await fetch("./data.json")).ok), "opening another view interrupted the first");

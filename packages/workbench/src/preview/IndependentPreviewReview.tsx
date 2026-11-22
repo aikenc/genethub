@@ -17,6 +17,7 @@ import {
 } from "./PreviewRuntimeControls";
 import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, previewIconButton, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
+import { formatPreviewMediaPath } from "./ServiceStatusMenu";
 import type { ServicePreviewClient } from "./serviceClient";
 import type { PixelSnapshot } from "./runtimeCapture";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
@@ -94,12 +95,12 @@ function expectPixels(value: unknown): PixelSnapshot {
   };
 }
 
-export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceUrl, stopPlayerUrl, media }: {
+export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceName, stopPlayerUrl, media }: {
   client: Client;
   source: AssetPreviewLocation;
   grant: StaticPreviewGrant;
   feedbackScope: string;
-  serviceUrl?: string;
+  serviceName?: string;
   stopPlayerUrl?: string;
   media?: ServicePreviewClient;
 }) {
@@ -135,6 +136,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
   const [navigation, setNavigation] = useState({ at: -1, length: 0 });
   const trail = useRef<{ entries: string[]; at: number; pending?: number }>({ entries: [], at: -1 });
   const [route, setRoute] = useState("");
+  const [mediaPath, setMediaPath] = useState("");
   const initialRelatedPage = useRef(new URLSearchParams(window.location.search).get("previewPath"));
   const [newWindowLink, setNewWindowLink] = useState<{ url: string; label: string }>();
   const [openFeedback, setOpenFeedback] = useState<(() => void) | null>(null);
@@ -153,6 +155,10 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
     };
     const receive = (event: MessageEvent) => {
       if (event.origin !== origin || event.source !== frame.current?.contentWindow) return;
+      if (stopPlayerUrl && event.data?.source === "genehub-service-v1" && event.data.kind === "media-path") {
+        setMediaPath(formatPreviewMediaPath(event.data.detail));
+        return;
+      }
       if (storageNamespace && event.data?.source === "genehub-preview-storage-waiting") {
         sendStorage();
         return;
@@ -276,7 +282,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       }
       pending.clear();
     };
-  }, [feedbackScope, grant.code, origin, sendStorage, source, storageNamespace]);
+  }, [feedbackScope, grant.code, origin, sendStorage, source, stopPlayerUrl, storageNamespace]);
 
   useEffect(() => {
     if (ready) return;
@@ -369,13 +375,14 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
                 setStorageCount(0);
               }}>清除</button> : null}</dd></div> : null}
             {storageProblem ? <p role="status">{storageProblem}</p> : null}
+            {serviceName ? <div><dt className="text-muted">登记服务</dt><dd>{serviceName} · 已接入</dd></div> : null}
+            {stopPlayerUrl ? <div><dt className="text-muted">媒体连接</dt><dd>{mediaPath || "等待媒体连接"}</dd></div> : null}
             <div><dt className="text-muted">访问权限</dt><dd>{feedbackScope === "owner" ? "已有权限" : info?.feedbackWritable === false ? "仅观看" : "限时分享"}</dd></div>
           </dl>}>
           <PreviewNavigation back={navigation.at > 0 ? () => go(navigation.at - 1) : undefined}
             forward={navigation.at >= 0 && navigation.at + 1 < navigation.length ? () => go(navigation.at + 1) : undefined} />
           <PreviewShareAction />
           <PreviewToolbarPortal>
-            {serviceUrl ? <a href={serviceUrl} className="truncate rounded px-1 text-xs">连接已登记服务</a> : null}
             {stopPlayerUrl ? <a href={stopPlayerUrl} className="truncate rounded px-1 text-xs">停止引擎串流</a> : null}
           </PreviewToolbarPortal>
           {newWindowLink ? <div className="flex gap-2 border-b border-line px-3 py-1 text-xs">

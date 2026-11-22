@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PreviewToolbarPortal } from "./PreviewToolbar";
+import { formatPreviewMediaPath } from "./ServiceStatusMenu";
 import type { ServicePreviewClient } from "./serviceClient";
 
 /** Trusted UI owns both permission gestures and the native media objects. No
@@ -9,16 +11,15 @@ export function ServiceMediaPanel({
   service: ServicePreviewClient;
 }) {
   const [status, setStatus] = useState("尚未连接");
-  const [connected, setConnected] = useState(false);
+  const [active, setActive] = useState(false);
   const [mic, setMic] = useState(false);
-  const [allowTurn, setAllowTurn] = useState(true);
   const [path, setPath] = useState("");
   const video = useRef<HTMLVideoElement>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
   const capture = useRef<MediaStream | null>(null);
   const epoch = useRef(0);
   const session = useRef<string | null>(null);
-  const releaseSession = () => {
+  const releaseSession = useCallback(() => {
     const id = session.current;
     session.current = null;
     const path = service.descriptor.media?.stopPath;
@@ -31,9 +32,9 @@ export function ServiceMediaPanel({
         })
         .then((r) => r.body?.cancel())
         .catch(() => {});
-  };
+  }, [service]);
   const abort = useRef<AbortController | null>(null);
-  const stop = () => {
+  const stop = useCallback(() => {
     releaseSession();
     epoch.current++;
     abort.current?.abort();
@@ -43,22 +44,13 @@ export function ServiceMediaPanel({
     capture.current?.getTracks().forEach((t) => t.stop());
     capture.current = null;
     if (video.current) video.current.srcObject = null;
-    setConnected(false);
+    setActive(false);
     setMic(false);
     setPath("");
-  };
-  useEffect(
-    () => () => {
-      releaseSession();
-      epoch.current++;
-      abort.current?.abort();
-      pc.current?.close();
-      capture.current?.getTracks().forEach((t) => t.stop());
-    },
-    [service],
-  );
-  const connect = async (withMic: boolean) => {
+  }, [releaseSession]);
+  const connect = useCallback(async (withMic: boolean) => {
     stop();
+    setActive(true);
     const id = epoch.current;
     const controller = new AbortController();
     abort.current = controller;
@@ -82,22 +74,17 @@ export function ServiceMediaPanel({
         capture.current = local;
         setMic(true);
       }
-      const iceConfig = await service.ice(allowTurn);
+      const iceConfig = await service.ice(true);
       if (!current()) return;
       const iceServers = iceConfig
         .map((s) => ({
           urls: (Array.isArray(s.urls) ? s.urls : [s.urls]).filter((u) =>
-            allowTurn ? /^(stun|turn|turns):/.test(u) : /^stun:/.test(u),
+            /^(stun|turn|turns):/.test(u),
           ),
           ...(s.username ? { username: s.username } : {}),
           ...(s.credential ? { credential: s.credential } : {}),
         }))
         .filter((s) => s.urls.length);
-      if (
-        allowTurn &&
-        !iceServers.some((s) => s.urls.some((u) => /^turns?:/.test(u)))
-      )
-        throw new Error("此运行未配置可用的 TURN 凭证");
       const peer = new RTCPeerConnection({ iceServers });
       pc.current = peer;
       const remote = new MediaStream();
@@ -133,7 +120,6 @@ export function ServiceMediaPanel({
             ? "媒体已连接"
             : `媒体：${peer.connectionState}`,
         );
-        setConnected(peer.connectionState === "connected");
         if (peer.connectionState === "failed") {
           stop();
           setStatus("媒体连接失败，可重新连接");
@@ -173,7 +159,9 @@ export function ServiceMediaPanel({
           type: "offer",
           iceServers,
         }),
-        signal: controller.signal,
+        // Once sent, retain the bounded offer response even if the user
+        // stops. A late answer is how we obtain and release its session ID.
+        signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) throw new Error(`媒体信令返回 ${response.status}`);
       const answer = await response.json();
@@ -196,14 +184,12 @@ export function ServiceMediaPanel({
         session.current = answer.sessionId;
       if (typeof answer.sdp !== "string" || answer.sdp.length > 256 * 1024)
         throw new Error("媒体信令没有返回有效 SDP");
-      if (!allowTurn && /a=candidate:.* typ relay(?: |\r?$)/m.test(answer.sdp))
-        throw new Error("仅直连模式拒绝远端中继候选");
       if (!current()) return;
       await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
       const deadline = setTimeout(() => {
         if (current() && peer.connectionState !== "connected") {
           stop();
-          setStatus("媒体建连超时，直连可能不可达");
+          setStatus("媒体连接超时，可重新连接");
         }
       }, 25000);
       const stats = setInterval(() => {
@@ -216,16 +202,12 @@ export function ServiceMediaPanel({
                 const pair = report.get(row.selectedCandidatePairId);
                 const a = report.get(pair?.localCandidateId);
                 const b = report.get(pair?.remoteCandidateId);
-                const relayed =
-                  a?.candidateType === "relay" || b?.candidateType === "relay";
-                if (relayed && !allowTurn) {
-                  stop();
-                  setStatus("已阻止仅直连模式的中继路径");
-                  return;
+                if (a?.candidateType && b?.candidateType) {
+                  setPath(formatPreviewMediaPath({
+                    route: a.candidateType === "relay" || b.candidateType === "relay" ? "relay" : "direct",
+                    rttMs: typeof pair?.currentRoundTripTime === "number" ? pair.currentRoundTripTime * 1000 : undefined,
+                  }));
                 }
-                setPath(
-                  `${relayed ? "TURN 中继" : "媒体直连"} · RTT ${Math.round((pair?.currentRoundTripTime ?? 0) * 1000)} ms`,
-                );
               }
             });
           })
@@ -245,23 +227,33 @@ export function ServiceMediaPanel({
         setStatus(e instanceof Error ? e.message : "媒体连接失败");
       }
     }
-  };
+  }, [service, stop]);
+  useEffect(() => {
+    if (!service.descriptor.media) return;
+    void connect(false);
+    return stop;
+  }, [connect, service, stop]);
+
   if (!service.descriptor.media) return null;
   return (
     <section
       className="shrink-0 border-b border-line bg-surface p-3"
       aria-label="服务音视频"
     >
+      <PreviewToolbarPortal slot="information">
+        <section aria-label="媒体连接状态" className="mt-4 border-t border-line pt-3">
+          <h3 className="font-medium">媒体连接</h3>
+          <p role="status">{status}{path ? ` · ${path}` : ""}</p>
+        </section>
+      </PreviewToolbarPortal>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <strong>{service.descriptor.name}</strong>
-        <span role="status">{status}</span>
-        <span>{path}</span>
-        <button
+        {!active ? <button
           className="rounded border border-line px-2 py-1"
           onClick={() => void connect(false)}
         >
-          连接音视频
-        </button>
+          重新连接音视频
+        </button> : null}
         {service.descriptor.media.microphone === "webrtc" ? (
           <button
             className="rounded border border-line px-2 py-1"
@@ -279,23 +271,13 @@ export function ServiceMediaPanel({
         >
           停止
         </button>
-        <label>
-          <input
-            type="checkbox"
-            checked={!allowTurn}
-            disabled={connected || mic}
-            onChange={(e) => {
-              stop();
-              setAllowTurn(!e.target.checked);
-            }}
-          />
-          仅直连
-        </label>
         {mic ? <span className="text-red-500">麦克风正在使用</span> : null}
       </div>
       <video
         ref={video}
         controls
+        autoPlay
+        muted
         playsInline
         className="mt-2 max-h-64 w-full bg-black"
       />

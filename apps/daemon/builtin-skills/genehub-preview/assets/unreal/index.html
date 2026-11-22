@@ -8,7 +8,7 @@
 import { Config, PixelStreaming, Flags, NumericParameters, TextParameters } from './pixelstreaming.esm.js';
 const bar = document.getElementById('bar');
 const say = text => { bar.textContent = text; };
-// The platform supplies channel ICE (STUN/TURN unless direct-only was selected). Both ends
+// The platform supplies channel ICE (STUN and TURN when available). Both ends
 // use them: they replace what the signalling server's config names for this page, and the
 // first message on the signalling socket hands them to signalling.py, which passes them to
 // Unreal before the game creates its side of the connection. Without that, a game behind
@@ -22,7 +22,7 @@ async function loadIce() {
 async function start() {
 let iceServers = null;
 try { ({ iceServers } = await loadIce()); }
-catch { say('串流授权不可用，请从工作台重新打开并连接已登记服务'); return; }
+catch { say('串流连接不可用，请从工作台重新打开'); return; }
 const signallingUrl = window.genehubServicePreview
   ? 'wss://preview.invalid/api/ue/ws'
   : new URL('/api/ue/ws', location.href.replace(/^https:/, 'wss:')).href;
@@ -36,11 +36,43 @@ const peerState = pc => {
   if (pc.connectionState === 'connected') { clearTimeout(hintTimer); say('已连接。点击画面开始，Esc 退出鼠标锁定，点击画面可开启声音'); }
   else if (pc.connectionState === 'failed') { clearTimeout(hintTimer); say(relayGranted ? '媒体连接失败，请点击上方“重新连接”重试' : relayHint); }
 };
+// Only route and latency leave this frame. The trusted shell matches the
+// reporting window to the registered player.
+let statsTimer = 0;
+function reportMediaPath(detail) {
+  if (parent !== window) parent.postMessage({ source: 'genehub-service-v1', kind: 'media-path', detail }, '*');
+}
+async function reportSelectedPath(peer) {
+  try {
+    const stats = await peer.getStats();
+    if (peer.connectionState !== 'connected') return;
+    for (const item of stats.values()) {
+      if (item.type !== 'transport' || !item.selectedCandidatePairId) continue;
+      const pair = stats.get(item.selectedCandidatePairId);
+      const a = stats.get(pair?.localCandidateId)?.candidateType;
+      const b = stats.get(pair?.remoteCandidateId)?.candidateType;
+      if (!a || !b) continue;
+      reportMediaPath({ route: a === 'relay' || b === 'relay' ? 'relay' : 'direct',
+        rttMs: typeof pair.currentRoundTripTime === 'number' ? pair.currentRoundTripTime * 1000 : undefined });
+      break;
+    }
+  } catch {}
+}
+window.addEventListener('pagehide', () => clearInterval(statsTimer), { once: true });
 const Native = window.RTCPeerConnection;
 window.RTCPeerConnection = class extends Native {
   constructor(cfg = {}) {
     super(iceServers?.length ? { ...cfg, iceServers } : cfg);
-    this.addEventListener('connectionstatechange', () => peerState(this));
+    this.addEventListener('connectionstatechange', () => {
+      peerState(this);
+      clearInterval(statsTimer);
+      if (this.connectionState === 'connected') {
+        void reportSelectedPath(this);
+        statsTimer = setInterval(() => void reportSelectedPath(this), 2000);
+      } else {
+        reportMediaPath(null);
+      }
+    });
     clearTimeout(hintTimer);
     if (!relayGranted) hintTimer = setTimeout(() => say(relayHint), 12000);
   }

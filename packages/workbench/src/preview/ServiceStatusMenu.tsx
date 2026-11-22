@@ -1,3 +1,13 @@
+export function formatPreviewMediaPath(value: unknown): string {
+  const path = value as { route?: unknown; rttMs?: unknown } | null;
+  if (path?.route !== "direct" && path?.route !== "relay") return "";
+  const rttMs = path.rttMs;
+  const latency = typeof rttMs === "number" && Number.isFinite(rttMs) && rttMs >= 0 && rttMs < 60_000
+    ? ` · RTT ${Math.round(rttMs)} ms`
+    : "";
+  return (path.route === "relay" ? "TURN 中继" : "媒体直连") + latency;
+}
+
 export type ServiceMark =
   | { state: "absent" }
   | { state: "reachable"; name: string; policy: string }

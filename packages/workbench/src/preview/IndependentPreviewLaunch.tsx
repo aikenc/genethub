@@ -51,26 +51,23 @@ function waitForIdentity(client: Client, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function IndependentPreviewLaunch({ source, client, host, withService = false, review = false, feedbackScope = "owner" }: {
+export function IndependentPreviewLaunch({ source, client, host, staticOnly = false, review = false, feedbackScope = "owner" }: {
   source: AssetPreviewLocation;
   client: Client | null;
   host?: Host;
-  withService?: boolean;
+  staticOnly?: boolean;
   review?: boolean;
   feedbackScope?: string;
 }) {
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [reviewClient, setReviewClient] = useState<Client>();
   const [reviewService, setReviewService] = useState<ServicePreviewClient>();
-  const [serviceOffer, setServiceOffer] = useState<StaticPreviewGrant>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
-  const [confirmed, setConfirmed] = useState(false);
-  const [allowTurn, setAllowTurn] = useState(false);
   const { deviceHandle, path, workspaceHandle } = source;
   const serviceWorkspace = isAbsoluteFilePath(path) ? "" : workspaceHandle;
+  const compatibility = assetPreviewUrl(deviceHandle, workspaceHandle, path, undefined, undefined, source);
   useEffect(() => {
-    if (withService && !confirmed) return;
     const cancellation = new AbortController();
     const signal = cancellation.signal;
     const deadline = setTimeout(() => cancellation.abort(new Error("开启独立预览超时")), 40_000);
@@ -101,16 +98,30 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         throw new Error("目标设备未启用独立评审");
       }
 
-      if (withService) {
-        if (!connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
-          throw new Error("目标设备未启用独立服务预览");
-        }
-        enabledService = await ServicePreviewClient.discover(connection, serviceWorkspace, path);
+      if (feedbackScope === "owner" && !staticOnly && connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
+        // The device independently authorizes discovery and the scoped run
+        // binding. Static pages also open when the registered process is offline.
+        enabledService = await ServicePreviewClient.discover(connection, serviceWorkspace, path).catch(() => null);
         signal.throwIfAborted();
-        if (!enabledService) throw new Error("这个入口没有已登记的服务");
       }
-      const serviceRunId = enabledService?.descriptor.runId;
-      const player = enabledService && htmlServiceMedia(enabledService.descriptor)?.protocol === "pixel-streaming/1";
+      const descriptor = enabledService?.descriptor;
+      const htmlMedia = descriptor && htmlServiceMedia(descriptor);
+      const player = htmlMedia?.protocol === "pixel-streaming/1";
+      // HTML desktop control and source-only data transports use the original
+      // sandbox bridge. Trusted audio/video needs the shell around the iframe.
+      if (descriptor && (htmlMedia?.protocol === "remote-desktop/1"
+        || (descriptor.dataPolicy === "direct-only" && (player || !descriptor.media)))) {
+        window.location.replace(compatibility);
+        return;
+      }
+      if (!review && descriptor?.media && !player
+        && connection.identity.features?.includes(INDEPENDENT_REVIEW_FEATURE)) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("review", "1");
+        window.location.replace(url.href);
+        return;
+      }
+      const serviceRunId = descriptor?.runId;
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
@@ -118,7 +129,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
           operation: {
             kind: "openStatic", path,
             ...(serviceRunId ? { serviceRunId } : {}),
-            ...(player ? { playerAllowTurn: allowTurn } : {}),
+            ...(player ? { playerAllowTurn: true } : {}),
             ...(review ? { review } : {}),
           },
         },
@@ -152,51 +163,25 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       enabledService?.close();
       owned?.close();
     };
-  }, [allowTurn, client, confirmed, deviceHandle, host, path, review, serviceWorkspace, withService]);
+  }, [client, compatibility, deviceHandle, feedbackScope, host, path, review, serviceWorkspace, staticOnly]);
 
   useEffect(() => { if (grant && !review) form.current?.submit(); }, [grant, review]);
-  useEffect(() => {
-    if (!grant || !review || !reviewClient || withService || feedbackScope !== "owner"
-      || !reviewClient.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE)) return;
-    let active = true;
-    // Look up this entry after the static grant so a service probe never delays
-    // opening ordinary HTML. The explicit connection still rechecks the run.
-    void ServicePreviewClient.discover(reviewClient, serviceWorkspace, path).then(candidate => {
-      candidate?.close();
-      if (active && candidate && reviewClient.connectionState === "ready") setServiceOffer(grant);
-    }).catch(() => { /* No reachable registration to offer. */ });
-    return () => { active = false; };
-  }, [feedbackScope, grant, path, review, reviewClient, serviceWorkspace, withService]);
-
   if (grant && review && reviewClient) {
-    const serviceUrl = serviceOffer === grant ? new URL(window.location.href) : undefined;
-    serviceUrl?.searchParams.set("service", "1");
     const player = reviewService && htmlServiceMedia(reviewService.descriptor)?.protocol === "pixel-streaming/1";
     const stopUrl = player ? new URL(window.location.href) : undefined;
-    stopUrl?.searchParams.delete("service");
+    stopUrl?.searchParams.set("service", "0");
     return <IndependentPreviewReview key={grant.action} client={reviewClient} source={source} grant={grant}
-      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} stopPlayerUrl={stopUrl?.href}
+      feedbackScope={feedbackScope} serviceName={reviewService?.descriptor.name} stopPlayerUrl={stopUrl?.href}
       media={reviewService?.descriptor.media && !player ? reviewService : undefined} />;
   }
-  const compatibility = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, undefined, undefined, source));
-  if (feedbackScope !== "owner") compatibility.hash = location.hash;
+  const fallbackUrl = new URL(compatibility);
+  if (feedbackScope !== "owner") fallbackUrl.hash = location.hash;
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
       <meta name="referrer" content="strict-origin" />
-      {withService && !confirmed ? (
-        <>
-          <p>允许这个页面连接源电脑为它登记的服务？</p>
-          <label className="mt-3 flex items-center justify-center gap-2">
-            <input type="checkbox" checked={allowTurn} onChange={event => setAllowTurn(event.target.checked)} />
-            允许引擎串流使用媒体中继
-          </label>
-          <button type="button" className="mt-3 rounded border border-line px-3 py-2" onClick={() => setConfirmed(true)}>
-            连接服务并打开预览
-          </button>
-        </>
-      ) : <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>}
+      <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>
       {problem ? <a className="mt-3 inline-block text-accent underline"
-        href={compatibility.href}>使用兼容预览打开</a> : null}
+        href={fallbackUrl.href}>使用兼容预览打开</a> : null}
       {grant ? (
         <form ref={form} method="post" action={grant.action}>
           <input type="hidden" name="code" value={grant.code} />
