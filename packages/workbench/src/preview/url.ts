@@ -136,7 +136,7 @@ export function parseAssetPreviewPath(
 }
 
 /** Vite replaces this for each embedding build, including Cloud subpaths. */
-function previewBasePath(): string {
+export function previewBasePath(): string {
   const configured = import.meta.env.BASE_URL || "/";
   // The standalone/Tauri bundle deliberately uses `./`; portable HTTP links
   // are rooted at the origin in that build. Cloud supplies an absolute base.

@@ -1,4 +1,43 @@
   var reviewParentOrigin = document.currentScript?.dataset.parentOrigin || "*";
+  if (reviewParentOrigin !== "*") {
+    try {
+      const store = localStorage;
+      const baseSet = Storage.prototype.setItem;
+      const baseRemove = Storage.prototype.removeItem;
+      const baseClear = Storage.prototype.clear;
+      let previous = "";
+      function saveStorage() {
+        const snapshot = Object.create(null);
+        let size = 0;
+        for (let n = 0; n < store.length; n += 1) {
+          const key = store.key(n);
+          const value = store.getItem(key);
+          if (key.length > 1024 || value.length > 128000) return;
+          size += key.length + value.length;
+          if (size > 400000) return;
+          snapshot[key] = value;
+        }
+        const serialized = JSON.stringify(snapshot);
+        if (serialized === previous) return;
+        previous = serialized;
+        parent.postMessage({source:"genehub-preview-storage-native", snapshot:serialized}, reviewParentOrigin);
+      }
+      function wrapStorage(method) {
+        return function() {
+          const result = method.apply(this, arguments);
+          if (this === store) saveStorage();
+          return result;
+        };
+      }
+      Storage.prototype.setItem = wrapStorage(baseSet);
+      Storage.prototype.removeItem = wrapStorage(baseRemove);
+      Storage.prototype.clear = wrapStorage(baseClear);
+      window.addEventListener("pagehide", saveStorage);
+      // Detect the property assignment form of the native Storage API.
+      window.setInterval(saveStorage, 1000);
+      saveStorage();
+    } catch (e) { /* Storage may be unavailable inside this browser's frame. */ }
+  }
   var mutationCount = 0;
   var scrollTimer = 0;
   function send(kind, detail){
@@ -308,6 +347,10 @@
     var data = event.data;
     if (!data || data.source !== "genehub-preview-runtime-command") return;
     var requestId = String(data.requestId || "");
+    if (data.command === "clear-native-storage" && reviewParentOrigin !== "*") {
+      try { localStorage.clear(); } catch (e) {}
+      return;
+    }
     if (data.command === "review-go" && reviewParentOrigin !== "*") {
       try {
         var next = new URL(data.url);

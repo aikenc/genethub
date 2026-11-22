@@ -1,3 +1,6 @@
+import { assetPreviewUrl, previewBasePath } from "./url";
+import { clearPreviewStore, loadPreviewStore, mergePreviewStoreSnapshot, previewStorageNamespace, readPreviewStoreSnapshot } from "./storage";
+import { CornerUpLeft } from "lucide-react";
 import { PreviewReceivedFeedback } from "./PreviewReceivedFeedback";
 import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -12,7 +15,7 @@ import {
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
-import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, previewIconButton, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import type { ServicePreviewClient } from "./serviceClient";
 import type { PixelSnapshot } from "./runtimeCapture";
@@ -105,6 +108,19 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
   const requests = useRef(new Map<string, Request>());
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
   const origin = new URL(grant.action).origin;
+  const storageNamespace = grant.storageScope ? previewStorageNamespace({
+    deviceHandle: source.deviceHandle, workspaceHandle: source.workspaceHandle,
+    accessScope: feedbackScope, principalScope: grant.storageScope,
+  }, source.siteEntryPath ?? source.path) : null;
+  const previousStorage = useRef<Record<string, string>>({});
+  const storageSeeded = useRef(false);
+  const [storageCount, setStorageCount] = useState(0);
+  const [storageProblem, setStorageProblem] = useState("");
+  const sendStorage = useCallback(() => {
+    if (!storageNamespace || submitted.current === grant.code) return;
+    previousStorage.current = loadPreviewStore(storageNamespace);
+    frame.current?.contentWindow?.postMessage({source: "genehub-preview-storage-seed", state: previousStorage.current}, origin);
+  }, [grant.code, origin, storageNamespace]);
   const [frameName] = useState(() => `genehub-review-${crypto.randomUUID()}`);
   const submitted = useRef<string>();
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
@@ -130,8 +146,39 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
 
   useEffect(() => {
     const pending = requests.current;
+    const submit = () => {
+      if (submitted.current === grant.code || !form.current) return;
+      submitted.current = grant.code;
+      form.current.submit();
+    };
     const receive = (event: MessageEvent) => {
       if (event.origin !== origin || event.source !== frame.current?.contentWindow) return;
+      if (storageNamespace && event.data?.source === "genehub-preview-storage-waiting") {
+        sendStorage();
+        return;
+      }
+      if (storageNamespace && event.data?.source === "genehub-preview-storage-seeded") {
+        if (submitted.current === grant.code) return;
+        storageSeeded.current = event.data.restored === true;
+        if (!storageSeeded.current) {
+          setStorageProblem("浏览器限制了独立域存储。本次对存档的改动可能无法保留。");
+        }
+        setStorageCount(Object.keys(previousStorage.current).length);
+        submit();
+        return;
+      }
+      if (storageNamespace && event.data?.source === "genehub-preview-storage-native") {
+        if (!storageSeeded.current || submitted.current !== grant.code) return;
+        const snapshot = readPreviewStoreSnapshot(event.data.snapshot);
+        if (!snapshot) return;
+        if (mergePreviewStoreSnapshot(storageNamespace, previousStorage.current, snapshot)) {
+          previousStorage.current = snapshot;
+          setStorageCount(Object.keys(snapshot).length);
+        } else {
+          setStorageProblem("存档未写入。请检查浏览器存储空间。");
+        }
+        return;
+      }
       const { source: protocol, kind, requestId, detail } = event.data ?? {};
       if (protocol === "genehub-preview-diag" && ["console", "error", "resource", "csp", "log"].includes(kind)) {
         const sanitized = runtimeDetail(detail);
@@ -211,11 +258,17 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       request.resolve(detail);
     };
     window.addEventListener("message", receive);
-    if (submitted.current !== grant.code) {
-      submitted.current = grant.code;
-      form.current?.submit();
-    }
+    // Older daemons have no storage handshake. If the browser blocks the
+    // handshake, still attempt opening the page without clearing old saves.
+    const storageTimeout = storageNamespace ? window.setTimeout(() => {
+      if (submitted.current === grant.code) return;
+      setStorageProblem("独立域存档连接超时，本次打开保留之前的存档。");
+      submit();
+    }, 2500) : undefined;
+    if (storageNamespace) sendStorage();
+    else submit();
     return () => {
+      window.clearTimeout(storageTimeout);
       window.removeEventListener("message", receive);
       for (const request of pending.values()) {
         clearTimeout(request.timer);
@@ -223,7 +276,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       }
       pending.clear();
     };
-  }, [feedbackScope, grant.code, origin, source]);
+  }, [feedbackScope, grant.code, origin, sendStorage, source, storageNamespace]);
 
   useEffect(() => {
     if (ready) return;
@@ -290,15 +343,32 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
     return { relativePath: bundle.relativePath, addedToDraft: false, feedbackSaved: true };
   }, [feedback.upload]);
 
+  const returnUrl = new URLSearchParams(window.location.search).get("workbenchReturn");
+  const base = previewBasePath().replace(/\/$/, "");
+  const mayReturn = feedbackScope === "owner" && returnUrl?.startsWith(base + "/")
+    && !returnUrl.startsWith("//") && !returnUrl.includes("\\");
+  const legacyUrl = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, undefined, undefined, source));
+  if (feedbackScope !== "owner") legacyUrl.hash = window.location.hash;
   return (
     <PreviewToolbarContext.Provider value={toolbar}>
       <PreviewFileFeedbackOpenContext.Provider value={openFeedback}>
         <main className="flex h-dvh flex-col overflow-hidden bg-bg text-fg">
           <PreviewShareOpenContext.Provider value={openShare}>
-          <PreviewShell bindTools={setToolbar} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
+          <PreviewShell bindTools={setToolbar}
+            navigation={mayReturn ? <a className={previewIconButton} href={returnUrl ?? undefined} aria-label="返回对话" title="返回对话"><CornerUpLeft size={16} /></a> : null} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
             <div><dt className="text-muted">页面</dt><dd className="break-words">{documentTitle}</dd></div>
             <div><dt className="text-muted">页面地址</dt><dd className="break-all font-mono">{route}</dd></div>
             {feedbackScope === "owner" && info ? <div><dt className="text-muted">源文件</dt><dd className="break-all">{info.displayPath}</dd></div> : null}
+            {storageNamespace ? <div><dt className="text-muted">作品存档</dt><dd>{storageCount} 项
+              {storageCount && storageSeeded.current ? <button type="button" className="ml-2 underline" onClick={() => {
+                clearPreviewStore(storageNamespace);
+                previousStorage.current = {};
+                frame.current?.contentWindow?.postMessage({
+                  source: "genehub-preview-runtime-command", command: "clear-native-storage",
+                }, origin);
+                setStorageCount(0);
+              }}>清除</button> : null}</dd></div> : null}
+            {storageProblem ? <p role="status">{storageProblem}</p> : null}
             <div><dt className="text-muted">访问权限</dt><dd>{feedbackScope === "owner" ? "已有权限" : info?.feedbackWritable === false ? "仅观看" : "限时分享"}</dd></div>
           </dl>}>
           <PreviewNavigation back={navigation.at > 0 ? () => go(navigation.at - 1) : undefined}
@@ -312,7 +382,8 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             <a href={newWindowLink.url} target="_blank" rel="noopener noreferrer" className="text-accent underline">{newWindowLink.label}</a>
             <button type="button" className="rounded px-2 py-1 hover:bg-raised" onClick={() => setNewWindowLink(undefined)}>取消</button>
           </div> : null}
-          {problem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}</p> : null}
+          {problem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}
+            <a className="ml-2 underline" href={legacyUrl.href}>使用兼容预览打开</a></p> : null}
           <form ref={form} hidden method="post" target={frameName} action={grant.action}>
             <input type="hidden" name="code" value={grant.code} />
           </form>
@@ -329,6 +400,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             {media ? <ServiceMediaPanel service={media} /> : null}
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <iframe ref={frame} title="独立 HTML 预览" name={frameName} src={origin + "/.well-known/genehub/preview-frame"}
+                onLoad={sendStorage}
                 sandbox={`allow-scripts allow-same-origin${stopPlayerUrl ? " allow-pointer-lock" : ""}`}
                 allow={`cross-origin-isolated; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'${stopPlayerUrl ? "; autoplay 'src'" : ""}`}
                 referrerPolicy="no-referrer" className="absolute inset-0 h-full w-full border-0 bg-white"

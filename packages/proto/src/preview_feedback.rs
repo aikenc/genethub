@@ -28,6 +28,9 @@ pub struct PreviewSourceInfo {
 #[ts(export, export_to = "index.ts")]
 pub struct PreviewFeedbackRequest {
     pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub visitor_key: Option<String>,
     pub operation: PreviewFeedbackOperation,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -146,6 +149,9 @@ pub struct PreviewShareLink {
 pub struct StaticPreviewGrant {
     pub action: String,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub storage_scope: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

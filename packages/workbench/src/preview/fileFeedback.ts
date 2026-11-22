@@ -3,18 +3,35 @@ import type { PreviewAnnotation, PreviewFeedbackDraft, PreviewFeedbackOperation,
 import { ConnectionOutcomeUnknownError, type Client } from "../protocol/client";
 import type { RuntimeArtifactSubmission } from "./PreviewRuntimeControls";
 import type { ArtifactUploadProgress } from "./sessionArtifactUpload";
-export async function previewFeedback(client: Client, workspaceId: string, operation: PreviewFeedbackOperation): Promise<PreviewFeedbackResponse> {
-    const reply = await client.call({ type: "preview.feedback", payload: { workspaceId, operation } });
+export async function previewFeedback(client: Client, workspaceId: string, operation: PreviewFeedbackOperation, visitorKey?: string): Promise<PreviewFeedbackResponse> {
+    const reply = await client.call({ type: "preview.feedback", payload: { workspaceId, operation, ...(visitorKey ? { visitorKey } : {}) } });
     if (reply?.type !== "previewFeedback")
         throw new Error("设备没有确认预览反馈请求");
     return reply.data;
 }
+// This key stays on the trusted shell origin. A share grants access to the
+// work, while this key grants access to the browser's own feedback drafts.
+let transientVisitorKey: string | undefined;
+function previewVisitorKey(): string {
+    const storage = "genehub:preview-feedback:visitor-key:v1";
+    try {
+        const prior = localStorage.getItem(storage);
+        if (prior && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(prior)) return prior;
+        const key = crypto.randomUUID();
+        localStorage.setItem(storage, key);
+        return key;
+    } catch {
+        return transientVisitorKey ??= crypto.randomUUID();
+    }
+}
+
 export function useFileFeedback(client: Client | null, workspaceId: string, path: string, version: string, accessScope = "owner") {
     const [draft, setDraft] = useState<PreviewFeedbackDraft | null>(null);
     const [resetVersion, setResetVersion] = useState(0);
     const current = useRef<PreviewFeedbackDraft | null>(null);
     const opening = useRef<Promise<PreviewFeedbackDraft> | null>(null);
     const scope = `${client?.identity?.machineId ?? ""}:${accessScope}:${workspaceId}:${path}:${version}`;
+    const bindVisitor = accessScope !== "owner" && !!client?.identity?.features?.includes("preview.feedback.visitor.v1");
     const generation = useRef(0);
     const storageKey = `genehub:preview-feedback:${scope}`;
     useEffect(() => { generation.current += 1; current.current = null; opening.current = null; setDraft(null); }, [client, scope]);
@@ -33,7 +50,7 @@ export function useFileFeedback(client: Client | null, workspaceId: string, path
                 draftId = localStorage.getItem(storageKey);
             }
             catch { /* storage may be disabled */ }
-            const response = await previewFeedback(client, workspaceId, { kind: "open", path, version, draftId });
+            const response = await previewFeedback(client, workspaceId, { kind: "open", path, version, draftId }, bindVisitor ? previewVisitorKey() : undefined);
             if (response.kind !== "draft")
                 throw new Error("无法打开文件反馈草稿");
             if (generation.current !== epoch)
@@ -52,19 +69,19 @@ export function useFileFeedback(client: Client | null, workspaceId: string, path
             if (opening.current === promise)
                 opening.current = null;
         }
-    }, [client, workspaceId, path, version, storageKey, accept]);
+    }, [client, workspaceId, path, version, storageKey, accept, bindVisitor]);
     const operation = useCallback(async (op: PreviewFeedbackOperation) => {
         if (!client)
             throw new Error("设备尚未连接");
         const epoch = generation.current;
-        const result = await previewFeedback(client, workspaceId, op);
+        const result = await previewFeedback(client, workspaceId, op, bindVisitor ? previewVisitorKey() : undefined);
         if (generation.current !== epoch) throw new Error("预览文件已切换，操作结果已保存在原文件反馈");
         if (result.kind === "draft")
             accept(result.data);
         if (result.kind === "receipt" && current.current?.id === result.data.id)
             accept({ ...current.current, receipt: result.data });
         return result;
-    }, [client, workspaceId, accept]);
+    }, [client, workspaceId, accept, bindVisitor]);
     const review = useMemo(() => ({
         async load(): Promise<PreviewReviewDraft> { return (await ensure()).review; },
         async upsert(annotation: PreviewAnnotation, expectedRevision: number): Promise<PreviewReviewDraft> {

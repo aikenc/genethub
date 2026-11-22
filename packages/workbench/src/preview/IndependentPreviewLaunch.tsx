@@ -4,7 +4,7 @@ import type { StaticPreviewGrant } from "@genehub/proto";
 import { browserHost, type Host } from "../host";
 import type { Client } from "../protocol/client";
 import { connectPreview, endpointForDevice } from "./AssetPreviewPage";
-import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
+import { assetPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { INDEPENDENT_REVIEW_FEATURE, INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
 import { IndependentPreviewReview } from "./IndependentPreviewReview";
 import { htmlServiceMedia, ServicePreviewClient } from "./serviceClient";
@@ -19,7 +19,8 @@ export function validateStaticPreviewGrant(grant: StaticPreviewGrant): StaticPre
     || !/^[a-f0-9]{64}$/.test(grant.code)) {
     throw new Error("设备返回了无效的独立预览凭证");
   }
-  return { action: action.href, code: grant.code };
+  const storageScope = typeof grant.storageScope === "string" && /^[a-f0-9]{64}$/.test(grant.storageScope) ? grant.storageScope : undefined;
+  return { action: action.href, code: grant.code, ...(storageScope ? { storageScope } : {}) };
 }
 
 function waitForIdentity(client: Client, signal: AbortSignal): Promise<void> {
@@ -164,6 +165,8 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} stopPlayerUrl={stopUrl?.href}
       media={reviewService?.descriptor.media && !player ? reviewService : undefined} />;
   }
+  const compatibility = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, undefined, undefined, source));
+  if (feedbackScope !== "owner") compatibility.hash = location.hash;
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
       <meta name="referrer" content="strict-origin" />
@@ -179,6 +182,8 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
           </button>
         </>
       ) : <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>}
+      {problem ? <a className="mt-3 inline-block text-accent underline"
+        href={compatibility.href}>使用兼容预览打开</a> : null}
       {grant ? (
         <form ref={form} method="post" action={grant.action}>
           <input type="hidden" name="code" value={grant.code} />

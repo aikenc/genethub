@@ -1147,7 +1147,7 @@ export type PreviewFeedbackOperation = { "kind": "source", path: string, } | { "
 
 export type PreviewFeedbackRecord = { id: string, source: PreviewSourceInfo, description: string, annotations: Array<PreviewAnnotation>, bundles: Array<SessionArtifactBundle>, submittedAtMs: number, workspacePath: string, trust: string, };
 
-export type PreviewFeedbackRequest = { workspaceId: string, operation: PreviewFeedbackOperation, };
+export type PreviewFeedbackRequest = { workspaceId: string, visitorKey?: string, operation: PreviewFeedbackOperation, };
 
 export type PreviewFeedbackResponse = { "kind": "source", "data": PreviewSourceInfo } | { "kind": "share", "data": PreviewShareLink } | { "kind": "staticPreview", "data": StaticPreviewGrant } | { "kind": "draft", "data": PreviewFeedbackDraft } | { "kind": "upload", "data": SessionArtifactUpload } | { "kind": "artifact", "data": SessionArtifactBundle } | { "kind": "receipt", "data": PreviewFeedbackRecord } | { "kind": "list", "data": Array<PreviewFeedbackSummary> } | { "kind": "ack" };
 
@@ -2058,7 +2058,7 @@ acceptPartial: boolean, };
  */
 export type SpeechUncertainSpan = { spanId: string, startChar: number, endChar: number, alternatives: Array<SpeechSpanAlternative>, defaultAlternativeId: string, };
 
-export type StaticPreviewGrant = { action: string, code: string, };
+export type StaticPreviewGrant = { action: string, code: string, storageScope?: string, };
 
 /**
  * One daemon-owned diagnostic fact. Values are intentionally categorical.

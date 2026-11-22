@@ -53,19 +53,40 @@ pub(super) fn headers(headers: &mut HeaderMap, view: &View) {
 }
 
 pub(super) fn frame(view: &View) -> Response<Body> {
-    document(
-        view,
-        "text/html; charset=utf-8",
-        "<!doctype html><title>预览</title>",
-    )
+    // The random source origin has no application content until the shell
+    // submits the one-time grant. Restore only this site's saved state first.
+    let parent = view.workbench_origin.to_str().expect("validated HTTPS origin");
+    let html = format!(r#"<!doctype html><meta charset="utf-8"><title>预览</title>
+<script data-origin="{parent}">
+(() => {{
+  const origin = document.currentScript.dataset.origin;
+  let seeded = false;
+  window.addEventListener("message", event => {{
+    if (seeded || event.source !== parent || event.origin !== origin ||
+        event.data?.source !== "genehub-preview-storage-seed") return;
+    const state = event.data.state;
+    if (!state || typeof state !== "object" || Array.isArray(state)) return;
+    const items = Object.entries(state);
+    if (items.some(([key, value]) => key.length > 1024 || typeof value !== "string" || value.length > 128000) ||
+        items.reduce((total, [key, value]) => total + key.length + value.length, 0) > 400000) return;
+    seeded = true;
+    let restored = true;
+    try {{ for (const [key, value] of items) localStorage.setItem(key, value); }}
+    catch {{ restored = false; }}
+    parent.postMessage({{source:"genehub-preview-storage-seeded", restored}}, origin);
+  }});
+  parent.postMessage({{source:"genehub-preview-storage-waiting"}}, origin);
+}})();
+</script>"#);
+    document(view, "text/html; charset=utf-8", html)
 }
 
 pub(super) fn script(view: &View) -> Response<Body> {
     document(view, "text/javascript; charset=utf-8", SCRIPT)
 }
 
-fn document(view: &View, media_type: &'static str, source: &'static str) -> Response<Body> {
-    let body = Full::new(Bytes::from_static(source.as_bytes()))
+fn document(view: &View, media_type: &'static str, source: impl Into<Bytes>) -> Response<Body> {
+    let body = Full::new(source.into())
         .map_err(|impossible| match impossible {})
         .boxed_unsync();
     let mut response = Response::builder()

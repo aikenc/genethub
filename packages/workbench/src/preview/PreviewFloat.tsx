@@ -29,7 +29,8 @@ import {
 } from "./popout";
 import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
 import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
-import { assetPreviewUrl } from "./url";
+import { assetPreviewUrl, independentPreviewUrl } from "./url";
+import { ServicePreviewClient } from "./serviceClient";
 
 export function PreviewFloat({
   source,
@@ -63,6 +64,43 @@ export function PreviewFloat({
     });
     return () => { controller.abort(); lease?.release(); };
   }, [connections, sameSource, source.deviceHandle]);
+  // An isolated document must be the top-level main-domain page for
+  // threaded WASM. Enable this navigation in the configured Dev pilot.
+  const prefersIndependent = import.meta.env.VITE_GENEHUB_DEV_NAME === "dev-preview"
+    && location.protocol === "https:"
+    && /\.html?$/i.test(source.path)
+    && !new URLSearchParams(location.search).has("previewCompatibility")
+    && !source.docQuery && !source.docFragment
+    && (!source.siteEntryPath || source.siteEntryPath === source.path)
+    && !!client?.identity?.features?.includes("asset.preview.independent.storage.v1");
+  const [stayEmbedded, setStayEmbedded] = useState(false);
+  useEffect(() => {
+    setStayEmbedded(false);
+    if (!prefersIndependent || !client) return;
+    let active = true;
+    const probe = async () => {
+      // Keep the established service/stream discovery UI when this file
+      // has an active registration.
+      const service = await ServicePreviewClient.discover(client, source.workspaceHandle, source.path);
+      if (service) {
+        service.close();
+        if (active) setStayEmbedded(true);
+        return;
+      }
+      if (!active) return;
+      const url = new URL(independentPreviewUrl(source));
+      url.searchParams.set("review", "1");
+      const conversation = new URL(location.href);
+      conversation.searchParams.delete("preview");
+      url.searchParams.set("workbenchReturn", conversation.pathname + conversation.search);
+      // Workbench URL sync may already have pushed the file locator. Remove
+      // it from the back entry so browser Back returns to the conversation.
+      history.replaceState(history.state, "", conversation.href);
+      location.assign(url.href);
+    };
+    void probe().catch(() => { if (active) setStayEmbedded(true); });
+    return () => { active = false; };
+  }, [client, prefersIndependent, source]);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const [popupBlocked, setPopupBlocked] = useState<string>();
@@ -206,6 +244,13 @@ export function PreviewFloat({
               >
                 {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
               </button>;
+
+  if (prefersIndependent && !stayEmbedded) return <div role="status" className="safe-area-page fixed inset-0 z-40 flex items-center justify-center bg-bg p-6 text-fg">
+    <div className="space-y-2 text-center text-sm">
+      <p>正在打开独立预览…</p>
+      <button type="button" className="underline" onClick={onClose}>返回对话</button>
+    </div>
+  </div>;
 
   return <div role="dialog" aria-modal="true" aria-label="文件预览"
     className="safe-area-page fixed inset-0 z-40 flex flex-col bg-bg text-fg"

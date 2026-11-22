@@ -134,6 +134,12 @@ defineSpecialty({
     const dial = await (await redeem()).json();
     shared = new Client({ url: dial.url, fabricRouteTicket: dial.fabricRouteTicket, fabricAuthorizationExpiresAt: dial.fabricAuthorizationExpiresAt, channelCredential: { capabilityId: dial.channelCapability, secret: dial.channelSecret }, rtcEnabled: false, socketFactory: url => new WebSocket(url) as unknown as WebSocketLike });
     shared.connect(); await t.tools.waitUntil(() => shared!.connectionState === "ready", 45_000);
+    let foreignDraftRejected = false;
+    try {
+      await shared.call({ type: "preview.feedback", payload: { workspaceId: opened.workspaceId,
+        visitorKey: crypto.randomUUID(), operation: { kind: "draft", id: secondId } } });
+    } catch { foreignDraftRejected = true; }
+    t.assertions.assert(foreignDraftRejected, "another browser with the same share received the visitor's feedback draft");
     for (const request of [{ type: "workspace.list" as const }, { type: "session.list" as const, payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true } }, {type:"settings.get" as const}, {type:"pty.open" as const,payload:{workspaceId:opened.workspaceId,cols:80,rows:24}}]) {
       let denied = false; try { await shared.call(request); } catch { denied = true; }
       t.assertions.assert(denied, `share admitted machine RPC ${request.type}`);
