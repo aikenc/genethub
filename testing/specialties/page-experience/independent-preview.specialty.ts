@@ -250,6 +250,12 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     }
     const menu = creator.getByText("独立预览", { exact: true });
     await menu.click();
+    if (!withService && !withMedia) {
+      t.assertions.assert(
+        await creator.getByRole("link", { name: /打开并(?:启用本地|连接已登记)服务/ }).count() === 0,
+        "an unregistered entry offered to connect a local service",
+      );
+    }
     const ownPopup = creator.waitForEvent("popup");
     await creator.getByRole("link", { name: "用已有权限打开" }).click();
     const ownPage = await ownPopup;
@@ -274,9 +280,9 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
 
       await menu.click();
       const playerPopup = creator.waitForEvent("popup");
-      await creator.getByRole("link", { name: "打开并启用本地服务" }).click();
+      await creator.getByRole("link", { name: "打开并连接已登记服务" }).click();
       const player = await playerPopup;
-      await player.getByRole("button", { name: "启用服务并打开预览" }).click();
+      await player.getByRole("button", { name: "连接服务并打开预览" }).click();
       await exerciseEngineInput(t, player.locator("video"), streamer, 2);
       await player.close();
       await streamer.locator('body[data-closed="2"]').waitFor({ state: "attached", timeout: 10_000 });
@@ -285,8 +291,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const reviewPopup = creator.waitForEvent("popup");
       await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
       const review = await reviewPopup;
-      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
-      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
+      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const iframe = review.locator('iframe[title="独立 HTML 预览"]');
       await exerciseEngineInput(t, iframe.contentFrame().locator("video"), streamer, 3);
       t.assertions.assert((await iframe.getAttribute("sandbox"))?.includes("allow-pointer-lock"), "engine review blocked mouse capture");
@@ -300,9 +306,9 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
     if (withService) {
       await menu.click();
       const servicePopup = creator.waitForEvent("popup");
-      await creator.getByRole("link", { name: "打开并启用本地服务" }).click();
+      await creator.getByRole("link", { name: "打开并连接已登记服务" }).click();
       const page = await servicePopup;
-      await page.getByRole("button", { name: "启用服务并打开预览" }).click();
+      await page.getByRole("button", { name: "连接服务并打开预览" }).click();
       const ready = page.getByText("Shared resource loaded");
       const failed = page.getByRole("alert");
       await ready.or(failed).waitFor();
@@ -374,9 +380,13 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await creator.getByRole("link", { name: "打开批注和运行日志" }).click();
       const review = await reviewPopup;
       const reviewFrame = review.frameLocator('iframe[title="独立 HTML 预览"]');
-      await reviewFrame.getByText("Shared resource loaded").waitFor();
-      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
-      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      const staticReview = reviewFrame.getByText("Shared resource loaded");
+      await staticReview.waitFor();
+      t.assertions.assert(await staticReview.evaluate(async () =>
+        (await fetch("/api/demo/echo", { method: "POST" })).status) === 405,
+        "discovering a service granted access before confirmation");
+      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
+      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const loadedInReview = reviewFrame.getByText("Shared resource loaded");
       await loadedInReview.waitFor();
       const combined = await loadedInReview.evaluate(async () => {
@@ -398,8 +408,8 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const review = await popup;
       const content = review.frameLocator('iframe[title="独立 HTML 预览"]');
       await content.getByText("Shared resource loaded").waitFor();
-      await review.getByRole("link", { name: "启用本地服务", exact: true }).click();
-      await review.getByRole("button", { name: "启用服务并打开预览" }).click();
+      await review.getByRole("link", { name: "连接已登记服务", exact: true }).click();
+      await review.getByRole("button", { name: "连接服务并打开预览" }).click();
       const loaded = content.getByText("Shared resource loaded");
       await loaded.waitFor();
       const panel = review.getByRole("region", { name: "服务音视频" });
@@ -435,6 +445,10 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       const frame = review.frameLocator('iframe[title="独立 HTML 预览"]');
       const loaded = frame.getByText("Shared resource loaded");
       await loaded.waitFor();
+      t.assertions.assert(
+        await review.getByRole("link", { name: /启用本地服务|连接已登记服务/ }).count() === 0,
+        "a static independent review prompted the viewer to connect a service",
+      );
       t.assertions.assert(await review.evaluate(() => crossOriginIsolated), "trusted host lost isolation");
       t.assertions.assert(await loaded.evaluate(() => {
         try { void parent.document; return false; } catch {
@@ -484,9 +498,15 @@ async function exercise(t: CaseContext, mode?: "service" | "review" | "media" | 
       await review.addInitScript(() => {
         Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { value: undefined });
       });
-      await review.goto(await shareLink.inputValue());
+      const reviewShare = new URL(await shareLink.inputValue());
+      reviewShare.searchParams.set("service", "1");
+      await review.goto(reviewShare.href).catch(() => { throw new Error("could not navigate to the review share"); });
       const subdomain = review.frameLocator('iframe[title="独立 HTML 预览"]');
       await subdomain.getByText("Shared resource loaded").waitFor();
+      t.assertions.assert(
+        await review.getByRole("link", { name: /启用本地服务|连接已登记服务/ }).count() === 0,
+        "a shared review displayed the service action",
+      );
       await subdomain.locator("#saved").getByText("未保存", { exact: true }).waitFor();
       const privateStatus = await subdomain.locator("body").evaluate(async () => (await fetch("/private.txt")).status);
       t.assertions.assert(privateStatus === 403, "review changed the share's allowed files");

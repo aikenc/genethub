@@ -22,7 +22,7 @@ async function loadIce() {
 async function start() {
 let iceServers = null;
 try { ({ iceServers } = await loadIce()); }
-catch { say('串流授权不可用，请从工作台重新打开并启用本地服务'); return; }
+catch { say('串流授权不可用，请从工作台重新打开并连接已登记服务'); return; }
 const signallingUrl = window.genehubServicePreview
   ? 'wss://preview.invalid/api/ue/ws'
   : new URL('/api/ue/ws', location.href.replace(/^https:/, 'wss:')).href;

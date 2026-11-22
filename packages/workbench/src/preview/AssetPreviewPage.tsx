@@ -434,6 +434,7 @@ export function AssetPreviewPage({
             source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path}}
             resources={resources.current}
             canShare={state.kind === "ready"}
+            hasRegisteredService={meta?.service?.canToggle === true && meta.location?.path === (feedbackSource?.path ?? source.path)}
           />
         ) : null}
       </PreviewShell>
@@ -833,8 +834,9 @@ export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocum
   const onRecheck = useCallback(() => { retries.current = 0; setStopped(false); setGeneration(n => n + 1); }, []);
   const { onServiceChange } = props;
   useEffect(() => {
-    onServiceChange?.(mark ? previewServiceInfo(mark, accessEnabled, onToggle, onRecheck) : null);
-  }, [accessEnabled, mark, onRecheck, onServiceChange, onToggle]);
+    const currentMark = mark?.state === "reachable" && !currentCandidate ? null : mark;
+    onServiceChange?.(currentMark ? previewServiceInfo(currentMark, accessEnabled, onToggle, onRecheck) : null);
+  }, [accessEnabled, currentCandidate, mark, onRecheck, onServiceChange, onToggle]);
   useEffect(() => () => onServiceChange?.(null), [onServiceChange]);
   useEffect(() => props.client.onStateChange(state => {
     if (state === "ready") { retries.current = 0; setGeneration(n => n + 1); }

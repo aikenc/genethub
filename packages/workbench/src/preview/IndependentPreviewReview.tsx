@@ -375,7 +375,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             forward={navigation.at >= 0 && navigation.at + 1 < navigation.length ? () => go(navigation.at + 1) : undefined} />
           <PreviewShareAction />
           <PreviewToolbarPortal>
-            {serviceUrl ? <a href={serviceUrl} className="truncate rounded px-1 text-xs">启用本地服务</a> : null}
+            {serviceUrl ? <a href={serviceUrl} className="truncate rounded px-1 text-xs">连接已登记服务</a> : null}
             {stopPlayerUrl ? <a href={stopPlayerUrl} className="truncate rounded px-1 text-xs">停止引擎串流</a> : null}
           </PreviewToolbarPortal>
           {newWindowLink ? <div className="flex gap-2 border-b border-line px-3 py-1 text-xs">
