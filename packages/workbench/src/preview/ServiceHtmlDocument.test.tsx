@@ -35,22 +35,21 @@ function setup() {
 }
 
 describe('registered preview automatic connection', () => {
-  it('opens its bridge immediately with channel relay and no second grant', async () => {
+  it('opens the registered bridge immediately without asking for a route or a second grant', async () => {
     const t = setup();
     await waitFor(() => expect(t.bridge()?.[1]).not.toBeNull());
-    expect(t.bridge()?.[3]?.allowTurn).toBe(true);
     expect(screen.queryByText('允许本次预览访问登记服务')).toBeNull();
-    expect(screen.getByRole('checkbox', { name: '仅直连' })).not.toBeChecked();
+    expect(screen.queryByRole('checkbox', { name: '仅直连' })).toBeNull();
     await waitFor(() => expect(screen.getByTitle<HTMLIFrameElement>('HTML 文件预览').getAttribute('srcdoc')?.includes('genehubServicePreview')).toBe(true));
   });
 
-  it('changes the media path without requiring another grant', async () => {
+  it('does not reconnect when the player reports its selected route', async () => {
     const t = setup();
-    await screen.findByRole('checkbox', { name: '仅直连' });
-    fireEvent.click(screen.getByRole('checkbox', { name: '仅直连' }));
-    await waitFor(() => expect(t.discover).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(t.bridge()?.[1]).not.toBeNull());
-    expect(t.bridge()?.[3]?.allowTurn).toBe(false);
+    const service = t.bridge()?.[1];
+    act(() => t.bridge()?.[3]?.onMediaPath?.('媒体直连 · RTT 10 ms'));
+    expect(t.discover).toHaveBeenCalledTimes(1);
+    expect(t.bridge()?.[1]).toBe(service);
   });
 
   it('rediscovers after reconnect but respects an explicit stop', async () => {

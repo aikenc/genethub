@@ -434,7 +434,6 @@ export function AssetPreviewPage({
             source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path}}
             resources={resources.current}
             canShare={state.kind === "ready"}
-            hasRegisteredService={meta?.service?.canToggle === true && meta.location?.path === (feedbackSource?.path ?? source.path)}
           />
         ) : null}
       </PreviewShell>
@@ -788,7 +787,6 @@ export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocum
   const bindingKey = JSON.stringify([props.workspaceHandle,props.entryPath,props.metadata.version,generation]);
   const currentCandidate = candidateBinding.current?.client === props.client && candidateBinding.current?.key === bindingKey ? candidate : null;
   const accessEnabled = !!currentCandidate && !stopped;
-  const [allowTurn,setAllowTurn]=useState(true);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retries = useRef(0);
   const hadRegistration = useRef(false);
@@ -800,6 +798,7 @@ export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocum
   }, []);
   useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current); retryTimer.current = null; }, [props.client, props.entryPath, stopped]);
   const [allowControl,setAllowControl]=useState(false);
+  const [mediaPath, setMediaPath] = useState("");
   const [controlState,setControlState]=useState("released");
   const htmlMedia = currentCandidate ? htmlServiceMedia(currentCandidate.descriptor) : null;
   const releaseControl = useCallback(() => { setAllowControl(false); setControlState(state => state === "granted" || state === "waiting-for-yield" ? "release-pending" : state); }, []);
@@ -815,6 +814,7 @@ export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocum
     return () => window.clearTimeout(timer);
   }, [controlState]);
   useEffect(() => { if (!accessEnabled) releaseControl(); }, [accessEnabled, releaseControl]);
+  useEffect(() => setMediaPath(""), [currentCandidate, accessEnabled]);
   useEffect(() => {
     if (!allowControl) return;
     const lostFocus = () => { if (document.visibilityState === "hidden" || !document.hasFocus()) releaseControl(); };
@@ -850,14 +850,17 @@ export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocum
     void ServicePreviewClient.discover(props.client,isAbsoluteFilePath(props.entryPath) ? "" : props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { candidateBinding.current={client:props.client,key:bindingKey}; setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); if (value) hadRegistration.current = true; else if (hadRegistration.current) reconnect(); }}).catch(error=>{if(!cancelled) { const failure=classifyServiceFailure(error); setMark(failure); if (failure.state !== "unauthorized") reconnect(); }});
     return()=>{cancelled=true;loaded?.close();};
   },[props.client,props.workspaceHandle,props.entryPath,props.metadata.version,generation,supported,reconnect,bindingKey]);
-  return <>{htmlMedia ? <PreviewToolbarPortal>
+  return <>
+  {mediaPath && accessEnabled ? <PreviewToolbarPortal slot="information">
+    <div className="mt-4 border-t border-line pt-3">媒体连接 · {mediaPath}</div>
+  </PreviewToolbarPortal> : null}
+  {htmlMedia ? <PreviewToolbarPortal>
     <span className="truncate" title={candidate?.descriptor.name}>{htmlMedia.protocol === "pixel-streaming/1" ? "引擎串流" : `桌面共享 · ${controlState === "granted" ? "正在控制" : controlState === "waiting-for-yield" ? "等待交还" : controlState === "release-pending" ? "等待源端释放" : controlState === "release-unconfirmed" ? "释放未确认，请检查源端" : "仅观看"}`}</span>
-    <label className="ml-2 flex items-center gap-1"><input type="checkbox" checked={!allowTurn} onChange={event => { setAllowTurn(!event.target.checked); retries.current = 0; setGeneration(n => n + 1); }}/>仅直连</label>
     {htmlMedia.protocol === "pixel-streaming/1" ? null : <button type="button" disabled={!accessEnabled} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => allowControl ? releaseControl() : setAllowControl(true)}>{allowControl ? "交还控制" : "允许本页接管"}</button>}
     <button type="button" disabled={!accessEnabled} className="rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => setStopped(true)}>停止观看</button>
     <button type="button" className="rounded border border-line px-2 py-1" onClick={onRecheck}>重新连接</button>
   </PreviewToolbarPortal> : accessEnabled&&currentCandidate?<ServiceMediaPanel service={currentCandidate}/>:null}
-  <HtmlDocument {...props} service={accessEnabled?currentCandidate:null} servicePolicy={{allowTurn,allowControl:allowControl&&accessEnabled,onControlState,onUnavailable:reconnect}}/></>;
+  <HtmlDocument {...props} service={accessEnabled?currentCandidate:null} servicePolicy={{allowControl:allowControl&&accessEnabled,onControlState,onMediaPath:setMediaPath,onUnavailable:reconnect}}/></>;
 }
 
 /** Exported for tests. */

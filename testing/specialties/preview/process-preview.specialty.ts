@@ -64,8 +64,6 @@ with av.open(sys.argv[1],'w') as out:
       const closeInfo = page.getByRole("button", { name: "关闭信息", exact: true });
       if (await closeInfo.isVisible()) await closeInfo.click();
     };
-    await page.getByRole('checkbox',{name:'仅直连',exact:true}).check();
-    await page.getByRole('button',{name:'连接音视频',exact:true}).click();
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000}).catch(async error => {
       const media = await page.evaluate(() => ({ secure: window.isSecureContext,
         video: Array.from(document.querySelectorAll('video')).map(v => ({ width: v.videoWidth, height: v.videoHeight, time: v.currentTime, paused: v.paused, ready: v.readyState,
@@ -74,8 +72,11 @@ with av.open(sys.argv[1],'w') as out:
       throw new Error(`${error instanceof Error ? error.message : String(error)}; media evidence=${JSON.stringify({ media, browser: consumer?.errors.slice(-6).map(e => e.slice(0,300)), body: (await page.locator('body').innerText()).slice(-1400), appOutput })}`);
     });
     await openServiceAction('暂停预览连接');
-    // Re-enable and query application's real session inventory via its public route.
+    // Resuming the preview restores passive playback automatically. The
+    // trusted media stop then releases the session while keeping the API open.
     await openServiceAction('继续预览连接');
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000});
+    await page.getByRole('region', {name:'服务音视频'}).getByRole('button',{name:'停止',exact:true}).click();
     const frame=page.frameLocator('iframe').first();
     await frame.getByRole('button',{name:'请求后端',exact:true}).click();
     await t.tools.waitUntil(async()=>{

@@ -280,10 +280,15 @@ async fn media_ice(state: &crate::state::Shared, run: &Run, allow_turn: bool) ->
     // in that configuration and in self-hosted mode.
     let mut value = super::rtc::ice_config(state).await;
     if allow_turn && value["turnAvailable"].as_bool() == Some(true) {
-        let link = state.link.get().context("Channel unavailable")?;
-        value = tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
-            .await??;
-    } else if !run.ice_servers.is_empty() {
+        if let Some(link) = state.link.get() {
+            if let Ok(Ok(config)) =
+                tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id))).await
+            {
+                return Ok(config);
+            }
+        }
+    }
+    if !run.ice_servers.is_empty() {
         value = json!({"version":1,"iceServers":run.ice_servers});
     }
     Ok(value)

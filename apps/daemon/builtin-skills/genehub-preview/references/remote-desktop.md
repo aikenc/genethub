@@ -11,7 +11,7 @@ Capture 是独立原生程序，不在 daemon 中采集。开发构建/启动见
 1. 将四个文件复制到用户工程，例如 `review/desktop/index.html` 及相邻 JS/CSS。
 2. 用实际入口绝对路径和对应渠道 daemon dataDir 启动 Capture。它直接实现既有 v1 登记/HMAC/HTTP/WS，
    不需要再包一层运行器。一次选定一个显示器，切换显示器要重启并重登记。
-3. 用户在源机器打开本机共享；发普通 HTML 文件链接。查看端在外侧 Preview 中启用登记服务，再点击 H5 连接。
+3. 用户在源机器打开本机共享；发普通 HTML 文件链接。已认证的查看端打开 Preview 时自动接入登记服务，再从页面发起桌面查看。
 4. 需要键鼠时，源端允许控制，查看端在外侧工具栏允许本页接管，H5 再发 acquire。默认只观看。
 5. 定制页面的布局、快捷键、统计、输入映射时改 workspace 副本；需要恢复时重新复制内置四个文件。
 
@@ -23,7 +23,7 @@ const {iceServers} = await window.genehubServicePreview.ice();
 // 现有 fetch / WebSocket 桥：只访问 descriptor.routes 登记的 /api/ 路径。
 ```
 
-API 不暴露 daemon Client、私有登记 secret 或任意设备能力。ice 默认按渠道策略提供中继，用户可在外侧选择“仅直连”；页面不能
+API 不暴露 daemon Client、私有登记 secret 或任意设备能力。ICE 按渠道提供候选，浏览器自动选路。页面不能
 覆盖外侧网络策略。源端真实 PeerConnection 也使用此配置。HTML mode 的普通 RTP 媒体直接到 H5，
 麦克风/摄像头采集不开放。外侧停止/交还控制、控制状态与控制 WS 开关属于 Preview，不由可编辑 H5 绘制。
 

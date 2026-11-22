@@ -1,10 +1,11 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { formatPreviewMediaPath } from "./ServiceStatusMenu";
 import { htmlServiceMedia, servicePathname, type ServicePreviewClient } from "./serviceClient";
 
 export type ServiceBridgePolicy = {
-  allowTurn: boolean;
   allowControl: boolean;
   onUnavailable?: () => void;
+  onMediaPath?: (path: string) => void;
   onControlState?: (state: "granted" | "released" | "waiting-for-yield" | "release-pending" | "release-unconfirmed") => void;
 };
 
@@ -25,7 +26,7 @@ export function useServiceBridge(
   useEffect(() => {
     if (!policy?.allowControl) for (const close of controls.current) close();
     frame.current?.contentWindow?.postMessage({ source: SOURCE, kind: "available" }, "*");
-  }, [frame, policy?.allowControl, policy?.allowTurn]);
+  }, [frame, policy?.allowControl]);
   useEffect(() => {
     if (!service) return;
     const media = htmlServiceMedia(service.descriptor);
@@ -36,6 +37,11 @@ export function useServiceBridge(
         event.data?.source !== SOURCE
       )
         return;
+      if (event.data.kind === "media-path") {
+        if (media && serviceRef.current === service)
+          policyRef.current?.onMediaPath?.(formatPreviewMediaPath(event.data.detail));
+        return;
+      }
       const port = event.ports[0];
       if (!port) return;
       if (serviceRef.current !== service) {
@@ -55,7 +61,7 @@ export function useServiceBridge(
         active.add(close);
         const result = data.kind === "describe"
           ? Promise.resolve({ descriptor: service.descriptor, controlAllowed: !!policyRef.current?.allowControl })
-          : service.ice(!!policyRef.current?.allowTurn).then(iceServers => ({ iceServers }));
+          : service.ice(true).then(iceServers => ({ iceServers }));
         void result.then(value => {
           if (!closed && serviceRef.current === service) port.postMessage({ kind: "result", value });
         }).catch(() => {

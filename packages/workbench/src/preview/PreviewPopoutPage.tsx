@@ -175,7 +175,7 @@ export function PreviewPopoutPage({
       source={source}
       host={host}
       client={shareCredential ? portableClient : sharedClient}
-      withService={!shareCredential && new URLSearchParams(window.location.search).get("service") === "1"}
+      staticOnly={new URLSearchParams(window.location.search).get("service") === "0"}
       review={new URLSearchParams(window.location.search).get("review") === "1"}
       feedbackScope={shareCredential ? shareStorageScope(shareCredential.token) : "owner"}
     />;

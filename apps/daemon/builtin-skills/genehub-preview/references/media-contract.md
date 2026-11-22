@@ -52,7 +52,7 @@ answer 的 SDP 字符串最多 256 KiB，同时要遵守 HTTP/桥限制。线上
 
 ## ICE 与中继
 
-默认从所属 Channel 获取可用 STUN/TURN，WebRTC 自动选择直连或中继；无 Channel 时保留现有私有 STUN/host 配置，不改用第三方公共服务。“仅直连”模式继续拒绝 relay 候选。
+默认从所属 Channel 获取可用 STUN/TURN，WebRTC 自动选择直连或中继。渠道中继不可用时，仍可用现有 ICE 配置尝试直连。已连接后的实际候选类型与 RTT 显示在「预览信息」。
 
 中继不再要求每次授权；双方实际媒体端都要消费平台 ICE 配置，临时凭证留在对应连接，不写日志。允许中继不强制走中继，只有选中候选对能证明使用 TURN。配置失败保留真实错误，不硬编码凭证或另找公共中继。
 
@@ -65,6 +65,6 @@ answer 的 SDP 字符串最多 256 KiB，同时要遵守 HTTP/桥限制。线上
 3. 记录实际直连/中继候选类型、RTT、首帧与持续播放，不记录原始 SDP、凭证或用户音视频。
 4. 需要麦克风时由用户操作可信面板，并证明应用实际消费输入；麦克风指示灯不能代替内容处理结果。
 5. 停止、切换入口、重连，确认采集状态消失且后端会话回收。面板会关闭持续断连的连接，后端仍需独立处理失联。
-6. 单独验证所需远程网络。本机/局域网成功不证明蜂窝或企业网可达；仅直连失败应明确报告，不能偷偷启用 TURN。
+6. 在目标网络验证实际媒体路径与播放。没有可用候选时显示连接失败，便于从预览信息排查。
 
 有产品源码的维护者通过工作区测试流程使用 `testctl`：`specialty.preview.registered-service-http-ws`、`specialty.preview.channel-ice-credentials`、`specialty.preview.native-browser-media`。浏览器用例需要 Playwright Chromium 和真实 aiortc 环境；依赖缺失是 blocked。这些用例验证参考行为，不代替实际影视/DCC/引擎或数字人任务验收。

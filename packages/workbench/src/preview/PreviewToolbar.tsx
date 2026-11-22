@@ -7,7 +7,7 @@ export const PreviewFileFeedbackOpenContext = createContext<(() => void) | null>
 export const PreviewProductFeedbackContext = createContext<(() => void) | null>(null);
 export const PreviewShareOpenContext = createContext<(() => void) | null>(null);
 
-type Slot = "navigation" | "controls" | "capture" | "selection" | "share" | "feedback" | "logs";
+type Slot = "information" | "navigation" | "controls" | "capture" | "selection" | "share" | "feedback" | "logs";
 
 export const previewIconButton =
   "inline-flex size-8 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg disabled:opacity-35";
@@ -18,7 +18,7 @@ export function PreviewToolbarPortal({ children, slot = "controls" }: { children
   const toolbar = useContext(PreviewToolbarContext);
   const target = toolbar?.querySelector(`[data-preview-slot="${slot}"]`) ?? toolbar;
   if (target) return createPortal(children, target);
-  if (slot === "logs") return null;
+  if (slot === "logs" || slot === "information") return null;
   return <div className="flex min-h-9 shrink-0 items-center gap-1 border-b border-line bg-surface px-2 text-xs">{children}</div>;
 }
 
@@ -76,6 +76,7 @@ export function PreviewShell({
         <div className="mb-2 flex items-center justify-between"><strong>预览信息</strong>
           <button type="button" className={previewIconButton} aria-label="关闭信息" onClick={() => setSurface(null)}><X size={16} /></button></div>
         {information}
+        <div data-preview-slot="information" />
       </aside>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
       <aside id={id + "-feedback"} hidden={surface !== "feedback"} aria-label="反馈与日志"
