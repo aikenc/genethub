@@ -200,6 +200,7 @@ pub(crate) async fn independent_binding(
     entry: &str,
     expected_run: &str,
     review: bool,
+    player_allow_turn: Option<bool>,
 ) -> Result<Option<Value>> {
     let run = load_entry(state, workspace, entry)
         .await?
@@ -207,11 +208,32 @@ pub(crate) async fn independent_binding(
     if run.run_id != expected_run {
         anyhow::bail!("登记服务已更换，请重新打开预览");
     }
-    let mut routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes)?;
+    let mut routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes.clone())?;
     if !run.media.is_null() {
-        let media: genehub_proto::ServicePreviewMedia = serde_json::from_value(run.media)?;
+        let media: genehub_proto::ServicePreviewMedia = serde_json::from_value(run.media.clone())?;
         if media.client.is_some() {
-            anyhow::bail!("由页面控制的实时媒体请通过原工作台预览打开");
+            let Some(allow_turn) = player_allow_turn.filter(|_| {
+                media.client.as_deref() == Some("html")
+                    && media.protocol.as_deref() == Some("pixel-streaming/1")
+            }) else {
+                anyhow::bail!("此播放器请通过原工作台预览打开");
+            };
+            if !matches!(run.data_policy.as_str(), "" | "auto") {
+                anyhow::bail!("此服务的传输策略不允许独立中转");
+            }
+            let config = media_ice(state, &run, allow_turn).await?;
+            // Direct-only viewers receive only STUN, including when the source
+            // has its own ICE configuration instead of Channel defaults.
+            let servers = if allow_turn {
+                config["iceServers"].clone()
+            } else {
+                json!(super::rtc::stun_urls(&config).into_iter()
+                    .map(|url| json!({"urls":[url]})).collect::<Vec<_>>())
+            };
+            return Ok(Some(json!({
+                "runId": run.run_id, "port": run.port, "secret": run.secret, "routes": routes,
+                "playerIce": {"iceServers": servers, "expiresAt": config["expiresAt"]},
+            })));
         }
         if !review {
             anyhow::bail!("带有媒体权限的服务请使用独立评审打开");
@@ -253,6 +275,20 @@ pub(crate) async fn independent_binding(
     Ok(Some(json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes})))
 }
 
+async fn media_ice(state: &crate::state::Shared, run: &Run, allow_turn: bool) -> Result<Value> {
+    // A Channel may provide STUN without TURN. Automatic routing also works
+    // in that configuration and in self-hosted mode.
+    let mut value = super::rtc::ice_config(state).await;
+    if allow_turn && value["turnAvailable"].as_bool() == Some(true) {
+        let link = state.link.get().context("Channel unavailable")?;
+        value = tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
+            .await??;
+    } else if !run.ice_servers.is_empty() {
+        value = json!({"version":1,"iceServers":run.ice_servers});
+    }
+    Ok(value)
+}
+
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let req: Request = serde_json::from_value(stream.head.metadata.clone())?;
     if req.operation != "describe" && req.operation != "connect" && req.operation != "ice" {
@@ -279,17 +315,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         }
         let mut socket = tokio::time::timeout(Duration::from_secs(5), connect(&run)).await??;
         socket.close(None).await?;
-        // A Channel may provide STUN without TURN. Automatic media routing
-        // must still work in that configuration and in self-hosted mode.
-        let mut value = super::rtc::ice_config(&services.state).await;
-        if req.allow_turn && value["turnAvailable"].as_bool() == Some(true) {
-            let link = services.state.link.get().context("Channel unavailable")?;
-            value =
-                tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
-                    .await??;
-        } else if !run.ice_servers.is_empty() {
-            value = json!({"version":1,"iceServers":run.ice_servers});
-        }
+        let value = media_ice(&services.state, &run, req.allow_turn).await?;
         let body = serde_json::to_vec(&value)?;
         stream
             .respond(&ExchangeResponseHead {

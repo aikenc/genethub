@@ -89,12 +89,13 @@ function expectPixels(value: unknown): PixelSnapshot {
   };
 }
 
-export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceUrl, media }: {
+export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceUrl, stopPlayerUrl, media }: {
   client: Client;
   source: AssetPreviewLocation;
   grant: StaticPreviewGrant;
   feedbackScope: string;
   serviceUrl?: string;
+  stopPlayerUrl?: string;
   media?: ServicePreviewClient;
 }) {
   const form = useRef<HTMLFormElement>(null);
@@ -211,6 +212,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             <span className="truncate text-sm">{filePath.slice(filePath.lastIndexOf("/") + 1)}</span>
             <div className="flex items-center gap-2">
               {serviceUrl ? <a href={serviceUrl} className="rounded border border-line px-2 py-1 text-xs">启用本地服务</a> : null}
+              {stopPlayerUrl ? <a href={stopPlayerUrl} className="rounded border border-line px-2 py-1 text-xs">停止引擎串流</a> : null}
               <div ref={setToolbar} className="flex items-center gap-2" />
             </div>
           </header>
@@ -231,7 +233,8 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             {media ? <ServiceMediaPanel service={media} /> : null}
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <iframe ref={frame} title="独立 HTML 预览" name={frameName} src={origin + "/.well-known/genehub/preview-frame"}
-                sandbox="allow-scripts allow-same-origin" allow="cross-origin-isolated; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"
+                sandbox={`allow-scripts allow-same-origin${stopPlayerUrl ? " allow-pointer-lock" : ""}`}
+                allow={`cross-origin-isolated; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'${stopPlayerUrl ? "; autoplay 'src'" : ""}`}
                 referrerPolicy="no-referrer" className="absolute inset-0 h-full w-full border-0 bg-white"
               />
               <HtmlAnnotationOverlay frameRef={frame} frameReady={ready} origin={origin} />

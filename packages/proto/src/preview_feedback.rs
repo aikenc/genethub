@@ -57,6 +57,9 @@ pub enum PreviewFeedbackOperation {
         service_run_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        player_allow_turn: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         review: Option<bool>,
     },
     Revoke {

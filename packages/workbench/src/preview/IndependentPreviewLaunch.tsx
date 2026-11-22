@@ -7,7 +7,7 @@ import { connectPreview, endpointForDevice } from "./AssetPreviewPage";
 import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { INDEPENDENT_REVIEW_FEATURE, INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
 import { IndependentPreviewReview } from "./IndependentPreviewReview";
-import { ServicePreviewClient } from "./serviceClient";
+import { htmlServiceMedia, ServicePreviewClient } from "./serviceClient";
 
 const feature = "asset.preview.independent.v1";
 
@@ -60,10 +60,11 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
 }) {
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [reviewClient, setReviewClient] = useState<Client>();
-  const [reviewMedia, setReviewMedia] = useState<ServicePreviewClient>();
+  const [reviewService, setReviewService] = useState<ServicePreviewClient>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [allowTurn, setAllowTurn] = useState(false);
   const { deviceHandle, path, workspaceHandle } = source;
   useEffect(() => {
     if (withService && !confirmed) return;
@@ -106,11 +107,17 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         if (!enabledService) throw new Error("这个入口没有已登记的服务");
       }
       const serviceRunId = enabledService?.descriptor.runId;
+      const player = enabledService && htmlServiceMedia(enabledService.descriptor)?.protocol === "pixel-streaming/1";
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
           workspaceId: isAbsoluteFilePath(path) ? "" : workspaceHandle,
-          operation: { kind: "openStatic", path, ...(serviceRunId ? { serviceRunId } : {}), ...(review ? { review } : {}) },
+          operation: {
+            kind: "openStatic", path,
+            ...(serviceRunId ? { serviceRunId } : {}),
+            ...(player ? { playerAllowTurn: allowTurn } : {}),
+            ...(review ? { review } : {}),
+          },
         },
       }, { timeoutMs: 30_000 });
       signal.throwIfAborted();
@@ -122,7 +129,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
         if (review) {
           retainClient = true;
           setReviewClient(connection);
-          setReviewMedia(enabledService?.descriptor.media ? enabledService : undefined);
+          setReviewService(enabledService ?? undefined);
         }
         setGrant(validated);
       }
@@ -142,7 +149,7 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       enabledService?.close();
       owned?.close();
     };
-  }, [client, confirmed, deviceHandle, host, path, review, withService, workspaceHandle]);
+  }, [allowTurn, client, confirmed, deviceHandle, host, path, review, withService, workspaceHandle]);
 
   useEffect(() => { if (grant && !review) form.current?.submit(); }, [grant, review]);
   if (grant && review && reviewClient) {
@@ -150,8 +157,12 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       && reviewClient.identity?.features?.includes(INDEPENDENT_SERVICE_FEATURE);
     const serviceUrl = mayEnableService ? new URL(window.location.href) : undefined;
     serviceUrl?.searchParams.set("service", "1");
+    const player = reviewService && htmlServiceMedia(reviewService.descriptor)?.protocol === "pixel-streaming/1";
+    const stopUrl = player ? new URL(window.location.href) : undefined;
+    stopUrl?.searchParams.delete("service");
     return <IndependentPreviewReview client={reviewClient} source={source} grant={grant}
-      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} media={reviewMedia} />;
+      feedbackScope={feedbackScope} serviceUrl={serviceUrl?.href} stopPlayerUrl={stopUrl?.href}
+      media={reviewService?.descriptor.media && !player ? reviewService : undefined} />;
   }
   return (
     <main className="m-auto max-w-sm p-6 text-center text-sm">
@@ -159,6 +170,10 @@ export function IndependentPreviewLaunch({ source, client, host, withService = f
       {withService && !confirmed ? (
         <>
           <p>允许这个页面访问源机器上为它登记的本地服务？</p>
+          <label className="mt-3 flex items-center justify-center gap-2">
+            <input type="checkbox" checked={allowTurn} onChange={event => setAllowTurn(event.target.checked)} />
+            允许引擎串流使用媒体中继
+          </label>
           <button type="button" className="mt-3 rounded border border-line px-3 py-2" onClick={() => setConfirmed(true)}>
             启用服务并打开预览
           </button>

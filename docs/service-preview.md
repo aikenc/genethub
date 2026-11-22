@@ -2,6 +2,10 @@
 
 这份实现保留静态 Asset Preview，在用户授权后将 `/api/.../` 的有限 HTTP、流式 fetch 和 WebSocket 请求转给登记后端。音视频由可信 Workbench 面板建立原生 RTCPeerConnection，直接连接应用媒体后端；允许媒体中继时使用所属 Channel 的短期 TURN 凭证。官方 Fabric Relay 继续承载原有业务数据，不承担音视频转码。
 
+登记为 `client: "html"` 和 `protocol: "pixel-streaming/1"` 的引擎播放器可从原工作台预览或独立预览打开。独立预览需要已获准连接源机的浏览器确认启用登记服务。普通文件分享不授予信令路由或媒体配置。跨网游玩时，在打开前勾选「允许引擎串流使用媒体中继」。中继凭证来自当前渠道，过期后需要从工作台重新打开播放器，才能获取新凭证。
+
+独立预览上的播放器从同源 `/.well-known/genehub/preview-player-ice` 读取本次视图的 ICE 配置，使用同源 WSS 信令。旧预览仍通过 `window.genehubServicePreview.ice()` 提供配置。画面和键鼠数据走引擎自己的 WebRTC。独立评审允许这一登记模式使用鼠标锁定，停止串流或关闭窗口会关闭播放器连接。
+
 ## Agent 引导
 
 内置 [genehub-preview](../apps/daemon/builtin-skills/genehub-preview/references/live-service.md) 提供随产品分发的任务入口，按需读取创作过程接入、启动与分享、媒体契约、数字人和 UE 参考。静态页面由同一 Skill 的[静态预览参考](../apps/daemon/builtin-skills/genehub-preview/references/static.md)引导。安装包中的 Skill 携带可选示例源码，不包含依赖环境或模型权重；启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-preview/references/getting-started.md)。
