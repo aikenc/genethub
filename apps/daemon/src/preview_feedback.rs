@@ -635,16 +635,25 @@ async fn static_files(
     Ok(files)
 }
 
+struct OpenStaticOptions<'a> {
+    service_run_id: Option<&'a str>,
+    player_allow_turn: Option<bool>,
+    review: bool,
+}
+
 async fn open_static(
     state: &Shared,
     caller: &Principal,
     workspace: &str,
     path: &str,
     peer: Option<crate::dataplane::endpoint::PeerAccess>,
-    service_run_id: Option<&str>,
-    player_allow_turn: Option<bool>,
-    review: bool,
+    options: OpenStaticOptions<'_>,
 ) -> Result<genehub_proto::StaticPreviewGrant> {
+    let OpenStaticOptions {
+        service_run_id,
+        player_allow_turn,
+        review,
+    } = options;
     if !crate::static_preview::enabled() {
         bail!("此设备未启用独立预览");
     }
@@ -676,10 +685,12 @@ async fn open_static(
                 state,
                 enrollment,
                 site,
-                Some((id, share.expires_at_ms, files)),
-                peer,
-                None,
-                review,
+                crate::static_preview::OpenOptions {
+                    share: Some((id, share.expires_at_ms, files)),
+                    peer,
+                    service: None,
+                    review,
+                },
             )
             .await;
     }
@@ -704,7 +715,17 @@ async fn open_static(
     };
     state
         .static_preview
-        .open(state, enrollment, site, None, peer, service, review)
+        .open(
+            state,
+            enrollment,
+            site,
+            crate::static_preview::OpenOptions {
+                share: None,
+                peer,
+                service,
+                review,
+            },
+        )
         .await
 }
 
@@ -788,9 +809,11 @@ pub(crate) async fn handle(
                     &workspace,
                     &path,
                     peer,
-                    service_run_id.as_deref(),
-                    player_allow_turn,
-                    review,
+                    OpenStaticOptions {
+                        service_run_id: service_run_id.as_deref(),
+                        player_allow_turn,
+                        review,
+                    },
                 )
                 .await
             })

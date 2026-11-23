@@ -101,6 +101,13 @@ pub(crate) struct Site {
     entry: String,
 }
 
+pub(crate) struct OpenOptions<'a> {
+    pub(crate) share: Option<(&'a str, i64, Vec<String>)>,
+    pub(crate) peer: Option<PeerAccess>,
+    pub(crate) service: Option<serde_json::Value>,
+    pub(crate) review: bool,
+}
+
 fn wire_path(path: &Path) -> Result<String> {
     let mut components = Vec::new();
     for piece in path.components() {
@@ -711,11 +718,14 @@ impl Manager {
         state: &Shared,
         enrollment: Enrollment,
         site: Site,
-        share: Option<(&str, i64, Vec<String>)>,
-        peer: Option<PeerAccess>,
-        service: Option<serde_json::Value>,
-        review: bool,
+        options: OpenOptions<'_>,
     ) -> Result<StaticPreviewGrant> {
+        let OpenOptions {
+            share,
+            peer,
+            service,
+            review,
+        } = options;
         let storage_scope = peer.as_ref().map(|peer| {
             use sha2::{Digest, Sha256};
             format!("{:x}", Sha256::digest(peer.principal.as_bytes()))
