@@ -97,11 +97,13 @@ pub(super) async fn connect(
     {
         bail!("invalid preview Relay admission");
     }
-    let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(HEADER + CHUNK);
-    config.max_frame_size = Some(HEADER + CHUNK);
-    config.write_buffer_size = CHUNK;
-    config.max_write_buffer_size = 4 * CHUNK;
+    let config = WebSocketConfig {
+        max_message_size: Some(HEADER + CHUNK),
+        max_frame_size: Some(HEADER + CHUNK),
+        write_buffer_size: CHUNK,
+        max_write_buffer_size: 4 * CHUNK,
+        ..Default::default()
+    };
     let mut request = url.into_client_request()?;
     request
         .headers_mut()

@@ -136,6 +136,8 @@ mod tests {
             http: WasiHttpCtx::new(),
             http_hooks: Hooks,
             tls: wasmtime_wasi_tls::WasiTlsCtxBuilder::new().build(),
+            worker: crate::worker::State::Disabled,
+            limits: wasmtime::StoreLimitsBuilder::new().build(),
         }
     }
 

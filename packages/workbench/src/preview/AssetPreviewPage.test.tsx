@@ -101,8 +101,9 @@ describe("active single-file HTML Preview", () => {
     const bridge = scripts.find((node) =>
       (node.textContent ?? "").includes("genehub-preview-diag"),
     );
+    // The diagnostic bridge also uses the storage message channel.
     const shim = scripts.find((node) =>
-      (node.textContent ?? "").includes("genehub-preview-storage"),
+      (node.textContent ?? "").includes("var SNAPSHOT ="),
     );
     const application = parsed.querySelector<HTMLScriptElement>("#application-script");
     expect(shim?.textContent).toContain('"score":"7"');
@@ -118,7 +119,7 @@ describe("active single-file HTML Preview", () => {
     const output = isolatedHtml(
       `<!doctype html><html><head></head><body></body></html>`,
     );
-    expect(output).not.toContain("genehub-preview-storage");
+    expect(output).not.toContain("var SNAPSHOT =");
   });
 
   it("pins the iframe to a fixed box so iOS WebKit cannot stretch it to content height", async () => {

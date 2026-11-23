@@ -147,7 +147,7 @@ enum Control {
         workbench_origin: String,
         bootstrap_digest: String,
         scope: Scope,
-        service: Option<service::Run>,
+        service: Option<Box<service::Run>>,
         https_port: Option<u16>,
         #[serde(default)]
         review: bool,
@@ -157,6 +157,7 @@ enum Control {
     Close {
         host: String,
     },
+    #[cfg(target_family = "wasm")]
     Route {
         host: String,
         target: u64,
@@ -269,6 +270,7 @@ async fn handle_command(
                 Err(anyhow::anyhow!("preview Relay is disconnected"))
             }
         }
+        #[cfg(target_family = "wasm")]
         Ok(Control::Route { .. }) => Err(anyhow::anyhow!("invalid worker routing command")),
         Ok(command) => apply(command, views, suffix).await,
         Err(_) => Err(anyhow::anyhow!("invalid command")),
@@ -572,7 +574,7 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                     location,
                     workbench_origin,
                     origin,
-                    service,
+                    service: service.map(|run| *run),
                     review,
                     frame_policy,
                     bootstrap_digest,
@@ -590,7 +592,9 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
                 view.revoked.send_replace(true);
             }
         }
-        Control::JoinRelay { .. } | Control::RelayStatus | Control::Route { .. } => {
+        #[cfg(target_family = "wasm")]
+        Control::Route { .. } => unreachable!("handled by control loop"),
+        Control::JoinRelay { .. } | Control::RelayStatus => {
             unreachable!("handled by control loop")
         }
     }
@@ -602,7 +606,7 @@ fn decode_digest(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut decoded = [0; 32];
-    for (chunk, byte) in value.as_bytes().chunks_exact(2).zip(&mut decoded) {
+    for (chunk, byte) in value.as_bytes().as_chunks::<2>().0.iter().zip(&mut decoded) {
         *byte = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
     }
     Some(decoded)
