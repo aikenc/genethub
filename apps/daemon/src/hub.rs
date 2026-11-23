@@ -548,9 +548,16 @@ impl Client {
         read_json(response, 4096, "preview share reply").await
     }
 
-    pub(crate) async fn preview_uplink(&self, enrollment: &Enrollment) -> Result<crate::static_preview::Uplink> {
-        let response = self.http
-            .post(self.url(&format!("/api/machines/{}/preview-relay/uplink", enrollment.daemon_id))?)
+    pub(crate) async fn preview_uplink(
+        &self,
+        enrollment: &Enrollment,
+    ) -> Result<crate::static_preview::Uplink> {
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/api/machines/{}/preview-relay/uplink",
+                enrollment.daemon_id
+            ))?)
             .bearer_auth(&enrollment.secret)
             .send()
             .await?;
@@ -560,9 +567,18 @@ impl Client {
         read_json(response, 4096, "preview uplink reply").await
     }
 
-    pub(crate) async fn register_preview_view(&self, enrollment: &Enrollment, host: &str, expires_at_ms: i64) -> Result<()> {
-        let response = self.http
-            .post(self.url(&format!("/api/machines/{}/preview-relay/views", enrollment.daemon_id))?)
+    pub(crate) async fn register_preview_view(
+        &self,
+        enrollment: &Enrollment,
+        host: &str,
+        expires_at_ms: i64,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/api/machines/{}/preview-relay/views",
+                enrollment.daemon_id
+            ))?)
             .bearer_auth(&enrollment.secret)
             .json(&serde_json::json!({"hostname": host, "expiresAtMs": expires_at_ms}))
             .send()
@@ -573,9 +589,17 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn remove_preview_view(&self, enrollment: &Enrollment, host: &str) -> Result<()> {
-        let response = self.http
-            .delete(self.url(&format!("/api/machines/{}/preview-relay/views/{host}", enrollment.daemon_id))?)
+    pub(crate) async fn remove_preview_view(
+        &self,
+        enrollment: &Enrollment,
+        host: &str,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .delete(self.url(&format!(
+                "/api/machines/{}/preview-relay/views/{host}",
+                enrollment.daemon_id
+            ))?)
             .bearer_auth(&enrollment.secret)
             .send()
             .await?;

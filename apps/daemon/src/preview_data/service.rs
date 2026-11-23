@@ -229,21 +229,30 @@ pub(super) fn player_ice(request: &Request<Incoming>, view: &View) -> Response<B
     if !same_origin(request.headers(), &view.origin, false) {
         return empty(StatusCode::FORBIDDEN);
     }
-    let Some(ice) = view.service.as_ref().and_then(|run| run.player_ice.as_ref()) else {
+    let Some(ice) = view
+        .service
+        .as_ref()
+        .and_then(|run| run.player_ice.as_ref())
+    else {
         return empty(StatusCode::FORBIDDEN);
     };
     if request.method() != Method::GET {
         return empty(StatusCode::METHOD_NOT_ALLOWED);
     }
     if let Some(deadline) = ice.expires_at {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_millis();
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
+            .as_millis();
         if deadline <= 0 || now >= deadline as u128 {
             return empty(StatusCode::GONE);
         }
     }
-    let body = http_body_util::Full::new(Bytes::from(json!({"iceServers": ice.ice_servers}).to_string()))
-        .map_err(|impossible| match impossible {})
-        .boxed_unsync();
+    let body = http_body_util::Full::new(Bytes::from(
+        json!({"iceServers": ice.ice_servers}).to_string(),
+    ))
+    .map_err(|impossible| match impossible {})
+    .boxed_unsync();
     Response::builder()
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "private, no-store")
