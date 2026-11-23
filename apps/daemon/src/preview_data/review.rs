@@ -55,8 +55,12 @@ pub(super) fn headers(headers: &mut HeaderMap, view: &View) {
 pub(super) fn frame(view: &View) -> Response<Body> {
     // The random source origin has no application content until the shell
     // submits the one-time grant. Restore only this site's saved state first.
-    let parent = view.workbench_origin.to_str().expect("validated HTTPS origin");
-    let html = format!(r#"<!doctype html><meta charset="utf-8"><title>预览</title>
+    let parent = view
+        .workbench_origin
+        .to_str()
+        .expect("validated HTTPS origin");
+    let html = format!(
+        r#"<!doctype html><meta charset="utf-8"><title>预览</title>
 <script data-origin="{parent}">
 (() => {{
   const origin = document.currentScript.dataset.origin;
@@ -77,7 +81,8 @@ pub(super) fn frame(view: &View) -> Response<Body> {
   }});
   parent.postMessage({{source:"genehub-preview-storage-waiting"}}, origin);
 }})();
-</script>"#);
+</script>"#
+    );
     document(view, "text/html; charset=utf-8", html)
 }
 

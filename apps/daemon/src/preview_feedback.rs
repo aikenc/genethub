@@ -405,8 +405,12 @@ async fn authorize_scope(
 ) -> Result<()> {
     use PreviewFeedbackOperation as Op;
     let path = match operation {
-        Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. }
-        | Op::ShareStatic { path, .. } | Op::OpenStatic { path, .. } | Op::List { path } => {
+        Op::Source { path }
+        | Op::Share { path, .. }
+        | Op::Open { path, .. }
+        | Op::ShareStatic { path, .. }
+        | Op::OpenStatic { path, .. }
+        | Op::List { path } => {
             crate::file_access::display(&resolve_source(state, workspace, path).await?.absolute)
         }
         Op::Revoke { share_id } => {
@@ -612,7 +616,8 @@ async fn static_site(
         state,
         &crate::file_access::display(&resolved.absolute),
         (!workspace.is_empty()).then_some(workspace),
-    ).await?;
+    )
+    .await?;
     crate::static_preview::Site::resolve(resolved)
 }
 
@@ -644,20 +649,39 @@ async fn open_static(
         bail!("此设备未启用独立预览");
     }
     let site = static_site(state, workspace, path).await?;
-    let enrollment = state.link.get().context("Hub is not connected")?.preview_enrollment().await?;
+    let enrollment = state
+        .link
+        .get()
+        .context("Hub is not connected")?
+        .preview_enrollment()
+        .await?;
     if let Some(id) = share_id(caller) {
         if service_run_id.is_some() {
             bail!("文件分享不包含动态服务权限");
         }
         // Serialize checking the durable grant and registering the live lease
         // with share revoke on the same daemon.
-        let _lock = WRITES.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let _lock = WRITES
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         let share = grant(state, workspace, id).await?;
         if !share.independent || share.path != path {
             bail!("分享没有授权这个独立预览入口");
         }
         let files = static_files(state, workspace, &site, &share.allowed).await?;
-        return state.static_preview.open(state, enrollment, site, Some((id, share.expires_at_ms, files)), peer, None, review).await;
+        return state
+            .static_preview
+            .open(
+                state,
+                enrollment,
+                site,
+                Some((id, share.expires_at_ms, files)),
+                peer,
+                None,
+                review,
+            )
+            .await;
     }
     if !caller.is_full() {
         bail!("此浏览器没有打开独立预览的权限");
@@ -666,11 +690,22 @@ async fn open_static(
         if !caller.permits_stream(crate::authz::StreamMethod::ServicePreview) {
             bail!("此连接不能通过独立中转访问服务");
         }
-        crate::dataplane::service_preview::independent_binding(state, workspace, path, run_id, review, player_allow_turn).await?
+        crate::dataplane::service_preview::independent_binding(
+            state,
+            workspace,
+            path,
+            run_id,
+            review,
+            player_allow_turn,
+        )
+        .await?
     } else {
         None
     };
-    state.static_preview.open(state, enrollment, site, None, peer, service, review).await
+    state
+        .static_preview
+        .open(state, enrollment, site, None, peer, service, review)
+        .await
 }
 
 pub(crate) async fn handle(
@@ -683,7 +718,11 @@ pub(crate) async fn handle(
     use PreviewFeedbackResponse as Out;
     let workspace = &request.workspace_id;
     let visitor = if share_id(caller).is_some() {
-        request.visitor_key.as_deref().map(visitor_digest).transpose()?
+        request
+            .visitor_key
+            .as_deref()
+            .map(visitor_digest)
+            .transpose()?
     } else {
         None
     };
@@ -700,7 +739,12 @@ pub(crate) async fn handle(
     }
     let share = if let Some(id) = share_id(caller) {
         let share = grant(state, workspace, id).await?;
-        if share.view_only && !matches!(&request.operation, Op::Source { .. } | Op::OpenStatic { .. }) {
+        if share.view_only
+            && !matches!(
+                &request.operation,
+                Op::Source { .. } | Op::OpenStatic { .. }
+            )
+        {
             bail!("preview share allows viewing only");
         }
         Some(share)
@@ -721,7 +765,12 @@ pub(crate) async fn handle(
             }
             return Ok(Out::Source(info));
         }
-        Op::OpenStatic { path, service_run_id, player_allow_turn, review } => {
+        Op::OpenStatic {
+            path,
+            service_run_id,
+            player_allow_turn,
+            review,
+        } => {
             let state = state.clone();
             let caller = caller.clone();
             let workspace = workspace.clone();
@@ -732,8 +781,21 @@ pub(crate) async fn handle(
             let player_allow_turn = *player_allow_turn;
             // Keep the worker request/reply paired if the launching browser
             // abandons its RPC while a native operation is in flight.
-            return tokio::spawn(async move { open_static(&state, &caller, &workspace, &path, peer, service_run_id.as_deref(), player_allow_turn, review).await })
-                .await?.map(Out::StaticPreview);
+            return tokio::spawn(async move {
+                open_static(
+                    &state,
+                    &caller,
+                    &workspace,
+                    &path,
+                    peer,
+                    service_run_id.as_deref(),
+                    player_allow_turn,
+                    review,
+                )
+                .await
+            })
+            .await?
+            .map(Out::StaticPreview);
         }
         Op::List { path } => {
             if share.is_some() {
@@ -744,7 +806,9 @@ pub(crate) async fn handle(
             let drafts = home(state, workspace).await?.join("drafts");
             let entries = match fs::read_dir(drafts) {
                 Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Out::List(vec![])),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Out::List(vec![]))
+                }
                 Err(error) => return Err(error.into()),
             };
             let mut results: Vec<genehub_proto::PreviewFeedbackSummary> = Vec::new();
@@ -753,11 +817,16 @@ pub(crate) async fn handle(
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
-                let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue };
+                let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
                 if valid_id(&id, "pf_").is_err() {
                     continue;
                 }
-                let Ok(record) = read::<PreviewFeedbackRecord>(&entry.path().join("feedback.json")) else { continue };
+                let Ok(record) = read::<PreviewFeedbackRecord>(&entry.path().join("feedback.json"))
+                else {
+                    continue;
+                };
                 if record.id != id || record.source.absolute_path != absolute {
                     continue;
                 }
@@ -767,7 +836,11 @@ pub(crate) async fn handle(
                     version: record.source.version,
                     submitted_at_ms: record.submitted_at_ms,
                 });
-                results.sort_unstable_by(|a, b| b.submitted_at_ms.cmp(&a.submitted_at_ms).then_with(|| a.id.cmp(&b.id)));
+                results.sort_unstable_by(|a, b| {
+                    b.submitted_at_ms
+                        .cmp(&a.submitted_at_ms)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
                 results.truncate(25);
             }
             return Ok(Out::List(results));
@@ -781,7 +854,10 @@ pub(crate) async fn handle(
         }
         Op::Draft { id } => {
             return Ok(Out::Draft(Box::new(
-                load_draft(state, caller, workspace, id, visitor).await?.1.data,
+                load_draft(state, caller, workspace, id, visitor)
+                    .await?
+                    .1
+                    .data,
             )));
         }
         Op::Open {
@@ -835,7 +911,8 @@ pub(crate) async fn handle(
             ttl_seconds,
             resources,
             view_only,
-        } | Op::ShareStatic {
+        }
+        | Op::ShareStatic {
             path,
             ttl_seconds,
             resources,
@@ -917,7 +994,9 @@ pub(crate) async fn handle(
             tokio::spawn(async move { static_preview.revoke_share(&id).await }).await?;
             Ok(Out::Ack)
         }
-        Op::OpenStatic { .. } => unreachable!("independent preview is handled before feedback writes"),
+        Op::OpenStatic { .. } => {
+            unreachable!("independent preview is handled before feedback writes")
+        }
         Op::Open {
             path,
             version,

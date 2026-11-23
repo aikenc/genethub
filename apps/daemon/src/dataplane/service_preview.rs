@@ -208,7 +208,8 @@ pub(crate) async fn independent_binding(
     if run.run_id != expected_run {
         anyhow::bail!("登记服务已更换，请重新打开预览");
     }
-    let mut routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes.clone())?;
+    let mut routes: Vec<genehub_proto::ServicePreviewRoute> =
+        serde_json::from_value(run.routes.clone())?;
     if !run.media.is_null() {
         let media: genehub_proto::ServicePreviewMedia = serde_json::from_value(run.media.clone())?;
         if media.client.is_some() {
@@ -227,8 +228,10 @@ pub(crate) async fn independent_binding(
             let servers = if allow_turn {
                 config["iceServers"].clone()
             } else {
-                json!(super::rtc::stun_urls(&config).into_iter()
-                    .map(|url| json!({"urls":[url]})).collect::<Vec<_>>())
+                json!(super::rtc::stun_urls(&config)
+                    .into_iter()
+                    .map(|url| json!({"urls":[url]}))
+                    .collect::<Vec<_>>())
             };
             return Ok(Some(json!({
                 "runId": run.run_id, "port": run.port, "secret": run.secret, "routes": routes,
@@ -254,7 +257,10 @@ pub(crate) async fn independent_binding(
             !path.starts_with("/api/")
                 || path.contains(['%', '\\', '?', '#', ';'])
                 || path.chars().any(char::is_control)
-                || path.split('/').skip(1).any(|part| ["", ".", ".."].contains(&part))
+                || path
+                    .split('/')
+                    .skip(1)
+                    .any(|part| ["", ".", ".."].contains(&part))
         }) {
             return Ok(None);
         }
@@ -262,7 +268,9 @@ pub(crate) async fn independent_binding(
             let prefix = route.prefix.to_ascii_lowercase();
             let route_root = prefix.trim_end_matches('/');
             !exclusive.iter().any(|path| {
-                path == route_root || path.starts_with(&prefix) || route_root.starts_with(&format!("{path}/"))
+                path == route_root
+                    || path.starts_with(&prefix)
+                    || route_root.starts_with(&format!("{path}/"))
             })
         });
     }
@@ -272,7 +280,9 @@ pub(crate) async fn independent_binding(
     if routes.is_empty() {
         return Ok(None);
     }
-    Ok(Some(json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes})))
+    Ok(Some(
+        json!({"runId":run.run_id,"port":run.port,"secret":run.secret,"routes":routes}),
+    ))
 }
 
 async fn media_ice(state: &crate::state::Shared, run: &Run, allow_turn: bool) -> Result<Value> {
@@ -282,7 +292,8 @@ async fn media_ice(state: &crate::state::Shared, run: &Run, allow_turn: bool) ->
     if allow_turn && value["turnAvailable"].as_bool() == Some(true) {
         if let Some(link) = state.link.get() {
             if let Ok(Ok(config)) =
-                tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id))).await
+                tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
+                    .await
             {
                 return Ok(config);
             }
