@@ -63,10 +63,11 @@ fn powershell(paths: &Paths, operation: &str) -> Result<Value> {
     );
     let status: Value =
         serde_json::from_slice(&output.stdout).context("Windows WSL task status was unreadable")?;
-    if operation == "start" && status["configured"] == true {
-        if std::fs::read_to_string(&identity).as_deref().ok() != Some(distro.as_str()) {
-            super::write_atomic(&identity, distro.as_bytes())?;
-        }
+    if operation == "start"
+        && status["configured"] == true
+        && std::fs::read_to_string(&identity).as_deref().ok() != Some(distro.as_str())
+    {
+        super::write_atomic(&identity, distro.as_bytes())?;
     }
     Ok(status)
 }

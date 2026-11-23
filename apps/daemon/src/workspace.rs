@@ -1431,12 +1431,10 @@ impl Workspaces {
             );
         }
         if terminated {
-            if self
-                .config_path
-                .parent()
-                .map(|data| data.join("spaces").join("admin"))
-                == Some(root.clone())
-            {
+            if self.config_path.parent().is_some_and(|data| {
+                let admin = data.join("spaces").join("admin");
+                admin == *root || admin.canonicalize().is_ok_and(|path| path == *root)
+            }) {
                 anyhow::bail!("内置管理员 Space 不能终止。");
             }
             if !root.is_dir() {
@@ -3575,6 +3573,14 @@ mod tests {
         let admin = dir.path().join("spaces").join("admin");
         write_verified_pipe_space(&admin, &admin);
         let admin_id = spaces.open(&admin, None).await.unwrap().id;
+        #[cfg(unix)]
+        let spaces = {
+            let alias = dir.path().join("alias");
+            std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+            let mut spaces = spaces;
+            spaces.config_path = alias.join("config.json");
+            spaces
+        };
         assert!(spaces.set_terminated(&admin_id, true).await.is_err());
         assert_eq!(read_termination(&admin), None);
 
