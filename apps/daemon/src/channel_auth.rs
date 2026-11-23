@@ -5,7 +5,9 @@
 //! A fresh two-nonce transcript derives a different key for every connection;
 //! strict per-direction sequence numbers then make recorded frames unusable.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
+use std::sync::Arc;
+
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
@@ -16,10 +18,11 @@ const KEY_DOMAIN: &[u8] = b"genehub-channel-key-v1";
 const DATA_RECORD_DOMAIN: &[u8] = b"genehub-data-record-v1";
 const DATA_RECORD_MAGIC: [u8; 2] = *b"GH";
 const DATA_RECORD_HEADER_BYTES: usize = 12;
+const DATA_RECORD_TAG_BYTES: usize = 16;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionKey {
-    encryption_key: [u8; 32],
+    cipher: Arc<Aes256Gcm>,
     context: String,
 }
 
@@ -79,19 +82,31 @@ pub fn derive_key(
     client_nonce: &str,
     server_nonce: &str,
 ) -> SessionKey {
+    let encryption_key = derive_encryption_key(secret, context, client_nonce, server_nonce);
     SessionKey {
-        encryption_key: authenticate_bytes(
-            secret.as_bytes(),
-            KEY_DOMAIN,
-            &[
-                b"encryption",
-                context.as_bytes(),
-                client_nonce.as_bytes(),
-                server_nonce.as_bytes(),
-            ],
-        ),
+        // The reader and writer use the same prepared cipher. Nonces remain
+        // distinct by direction and sequence on the authenticated channel.
+        cipher: Arc::new(Aes256Gcm::new((&encryption_key).into())),
         context: context.to_string(),
     }
+}
+
+fn derive_encryption_key(
+    secret: &str,
+    context: &str,
+    client_nonce: &str,
+    server_nonce: &str,
+) -> [u8; 32] {
+    authenticate_bytes(
+        secret.as_bytes(),
+        KEY_DOMAIN,
+        &[
+            b"encryption",
+            context.as_bytes(),
+            client_nonce.as_bytes(),
+            server_nonce.as_bytes(),
+        ],
+    )
 }
 
 /// One bounded binary AEAD record used by every protocol-v3 carrier.
@@ -102,28 +117,28 @@ pub fn seal_data_record(
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     if sequence == 0
-        || plaintext.len() + DATA_RECORD_HEADER_BYTES + 16 > genehub_proto::MAX_DATA_FRAME_BYTES
+        || plaintext.len()
+            > genehub_proto::MAX_DATA_FRAME_BYTES - DATA_RECORD_HEADER_BYTES - DATA_RECORD_TAG_BYTES
     {
         return Err(anyhow!("invalid secure data record size or sequence"));
     }
-    let cipher = Aes256Gcm::new_from_slice(&key.encryption_key)
-        .map_err(|_| anyhow!("invalid channel encryption key"))?;
-    let aad = data_record_associated_data(key, direction, sequence);
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&data_record_nonce(direction, sequence)),
-            Payload {
-                msg: plaintext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| anyhow!("data record encryption failed"))?;
-    let mut wire = Vec::with_capacity(DATA_RECORD_HEADER_BYTES + ciphertext.len());
+    let mut wire =
+        Vec::with_capacity(DATA_RECORD_HEADER_BYTES + plaintext.len() + DATA_RECORD_TAG_BYTES);
     wire.extend_from_slice(&DATA_RECORD_MAGIC);
     wire.push(genehub_proto::DATA_PLANE_VERSION as u8);
     wire.push(0);
     wire.extend_from_slice(&sequence.to_be_bytes());
-    wire.extend_from_slice(&ciphertext);
+    wire.extend_from_slice(plaintext);
+    let aad = data_record_associated_data(key, direction, sequence);
+    let tag = key
+        .cipher
+        .encrypt_in_place_detached(
+            Nonce::from_slice(&data_record_nonce(direction, sequence)),
+            &aad,
+            &mut wire[DATA_RECORD_HEADER_BYTES..],
+        )
+        .map_err(|_| anyhow!("data record encryption failed"))?;
+    wire.extend_from_slice(&tag);
     Ok(wire)
 }
 
@@ -134,7 +149,7 @@ pub fn open_data_record(
     wire: &[u8],
 ) -> Result<Vec<u8>> {
     if expected_sequence == 0
-        || wire.len() < DATA_RECORD_HEADER_BYTES + 16
+        || wire.len() < DATA_RECORD_HEADER_BYTES + DATA_RECORD_TAG_BYTES
         || wire.len() > genehub_proto::MAX_DATA_FRAME_BYTES
         || wire[..2] != DATA_RECORD_MAGIC
         || wire[2] != genehub_proto::DATA_PLANE_VERSION as u8
@@ -143,10 +158,8 @@ pub fn open_data_record(
     {
         return Err(anyhow!("invalid secure data record header"));
     }
-    let cipher = Aes256Gcm::new_from_slice(&key.encryption_key)
-        .map_err(|_| anyhow!("invalid channel encryption key"))?;
     let aad = data_record_associated_data(key, direction, expected_sequence);
-    cipher
+    key.cipher
         .decrypt(
             Nonce::from_slice(&data_record_nonce(direction, expected_sequence)),
             Payload {
@@ -270,7 +283,12 @@ mod tests {
             VECTOR_SERVER_NONCE,
         );
         assert_eq!(
-            hex(&key.encryption_key),
+            hex(&derive_encryption_key(
+                VECTOR_SECRET,
+                VECTOR_CONTEXT,
+                VECTOR_CLIENT_NONCE,
+                VECTOR_SERVER_NONCE,
+            )),
             "ff8270f2ec546267347aaccd0178af62830df51be490248c916969f6ac43a550"
         );
         assert_eq!(
