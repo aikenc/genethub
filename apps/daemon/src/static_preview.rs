@@ -105,6 +105,7 @@ pub(crate) struct OpenOptions<'a> {
     pub(crate) share: Option<(&'a str, i64, Vec<String>)>,
     pub(crate) peer: Option<PeerAccess>,
     pub(crate) service: Option<serde_json::Value>,
+    pub(crate) document_suffix: Option<&'a str>,
     pub(crate) review: bool,
 }
 
@@ -724,6 +725,7 @@ impl Manager {
             share,
             peer,
             service,
+            document_suffix,
             review,
         } = options;
         let storage_scope = peer.as_ref().map(|peer| {
@@ -790,7 +792,7 @@ impl Manager {
             "op":"open","host":host,"workspace":workspace,
             "root":site.root,"entry":site.entry,"workbench_origin":worker.workbench_origin,
             "ttl_seconds":ttl,"expires_at_ms":expires_at,"scope":scope,"bootstrap_digest":digest,
-            "https_port":worker.port,"service":service,"review":review,
+            "https_port":worker.port,"service":service,"review":review,"document_suffix":document_suffix,
         });
         #[cfg(target_family = "wasm")]
         let executor = if let Some(executor) = executor {

@@ -1,6 +1,7 @@
 import { assetPreviewUrl } from "./url";
 import { clearPreviewStore, loadPreviewStore, mergePreviewStoreSnapshot, previewStorageNamespace, readPreviewStoreSnapshot } from "./storage";
 import { preservePreviewReturn, PreviewReturn } from "./independentPreviewTab";
+import { PreviewTimeline, previewStageLabel, type PreviewStage, type PreviewTimelineEvent } from "./PreviewTimeline";
 import { PreviewReceivedFeedback } from "./PreviewReceivedFeedback";
 import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -95,10 +96,13 @@ function expectPixels(value: unknown): PixelSnapshot {
   };
 }
 
-export function IndependentPreviewReview({ client, source, grant, feedbackScope, serviceName, stopPlayerUrl, media }: {
+export function IndependentPreviewReview({ client, source, grant, previewId, timeline, markStage, feedbackScope, serviceName, stopPlayerUrl, media }: {
   client: Client;
   source: AssetPreviewLocation;
   grant: StaticPreviewGrant;
+  previewId: string;
+  timeline: PreviewTimelineEvent[];
+  markStage(stage: PreviewStage): void;
   feedbackScope: string;
   serviceName?: string;
   stopPlayerUrl?: string;
@@ -129,6 +133,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
   const [info, setInfo] = useState<PreviewSourceInfo>();
   const [eventCount, setEventCount] = useState(0);
   const [ready, setReady] = useState(false);
+  const [openingDocument, setOpeningDocument] = useState(false);
   const [problem, setProblem] = useState("");
   const [openShare, setOpenShare] = useState<(() => void) | null>(null);
   const bindShare = useCallback((open: (() => void) | null) => setOpenShare(() => open), []);
@@ -151,6 +156,8 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
     const submit = () => {
       if (submitted.current === grant.code || !form.current) return;
       submitted.current = grant.code;
+      markStage("loading-document");
+      setOpeningDocument(true);
       form.current.submit();
     };
     const receive = (event: MessageEvent) => {
@@ -193,6 +200,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
           if (!path) return;
           eventsRef.current = [];
           setFilePath(path);
+          markStage("tools-ready");
           setReady(true);
         }
         const events = eventsRef.current;
@@ -271,8 +279,10 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       setStorageProblem("独立域存档连接超时，本次打开保留之前的存档。");
       submit();
     }, 2500) : undefined;
-    if (storageNamespace) sendStorage();
-    else submit();
+    if (storageNamespace) {
+      markStage("restoring-storage");
+      sendStorage();
+    } else submit();
     return () => {
       window.clearTimeout(storageTimeout);
       window.removeEventListener("message", receive);
@@ -282,13 +292,16 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
       }
       pending.clear();
     };
-  }, [feedbackScope, grant.code, origin, sendStorage, source, stopPlayerUrl, storageNamespace]);
+  }, [feedbackScope, grant.code, markStage, origin, sendStorage, source, stopPlayerUrl, storageNamespace]);
 
   useEffect(() => {
-    if (ready) return;
-    const timer = window.setTimeout(() => setProblem("独立预览未返回工具就绪信号。请重新打开。"), 15_000);
+    if (!openingDocument || ready) return;
+    const timer = window.setTimeout(() => {
+      markStage("tools-delayed");
+      setProblem("仍在等待作品或预览工具。可以继续等待，或切换到兼容预览。");
+    }, 15_000);
     return () => clearTimeout(timer);
-  }, [ready]);
+  }, [markStage, openingDocument, ready]);
 
   useEffect(() => {
     if (!ready) return;
@@ -358,7 +371,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
         <main className="flex h-dvh flex-col overflow-hidden bg-bg text-fg">
           <PreviewShareOpenContext.Provider value={openShare}>
           <PreviewShell bindTools={setToolbar}
-            navigation={<PreviewReturn owner={feedbackScope === "owner"} />} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
+            navigation={<PreviewReturn owner={feedbackScope === "owner"} />} readOnly={info?.feedbackWritable === false} information={<><dl className="space-y-2">
             <div><dt className="text-muted">页面</dt><dd className="break-words">{documentTitle}</dd></div>
             <div><dt className="text-muted">页面地址</dt><dd className="break-all font-mono">{route}</dd></div>
             {feedbackScope === "owner" && info ? <div><dt className="text-muted">源文件</dt><dd className="break-all">{info.displayPath}</dd></div> : null}
@@ -375,7 +388,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             {serviceName ? <div><dt className="text-muted">登记服务</dt><dd>{serviceName} · 已接入</dd></div> : null}
             {stopPlayerUrl ? <div><dt className="text-muted">媒体连接</dt><dd>{mediaPath || "等待媒体连接"}</dd></div> : null}
             <div><dt className="text-muted">访问权限</dt><dd>{feedbackScope === "owner" ? "已有权限" : info?.feedbackWritable === false ? "仅观看" : "限时分享"}</dd></div>
-          </dl>}>
+          </dl><PreviewTimeline previewId={previewId} events={timeline} /></>}>
           <PreviewNavigation back={navigation.at > 0 ? () => go(navigation.at - 1) : undefined}
             forward={navigation.at >= 0 && navigation.at + 1 < navigation.length ? () => go(navigation.at + 1) : undefined} />
           <PreviewShareAction />
@@ -386,6 +399,7 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
             <a href={newWindowLink.url} target="_blank" rel="noopener noreferrer" className="text-accent underline">{newWindowLink.label}</a>
             <button type="button" className="rounded px-2 py-1 hover:bg-raised" onClick={() => setNewWindowLink(undefined)}>取消</button>
           </div> : null}
+          {!ready && !problem ? <p role="status" className="px-3 py-1 text-xs text-muted">{previewStageLabel(timeline.at(-1))}</p> : null}
           {problem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}
             <a className="ml-2 underline" href={legacyUrl.href}>使用兼容预览打开</a></p> : null}
           <form ref={form} hidden method="post" target={frameName} action={grant.action}>

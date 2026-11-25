@@ -40,7 +40,7 @@ export function cancelIndependentPreviewTab(tab?: Window | null): void {
   if (tab && reservedTabs.delete(tab)) tab.close();
 }
 
-export function openIndependentPreviewTab(tab: Window, source: AssetPreviewLocation): boolean {
+export function openIndependentPreviewTab(tab: Window, source: AssetPreviewLocation, staticOnly = false): boolean {
   if (tab.closed) return false;
   try {
     const url = new URL(independentPreviewUrl(source));
@@ -49,6 +49,7 @@ export function openIndependentPreviewTab(tab: Window, source: AssetPreviewLocat
     const id = crypto.randomUUID();
     tab.sessionStorage.setItem(tabKey, id);
     url.searchParams.set("review", "1");
+    if (staticOnly) url.searchParams.set("service", "0");
     url.searchParams.set(returnParam, workbench.pathname + workbench.search);
     url.searchParams.set(tabParam, id);
     tab.opener = null;

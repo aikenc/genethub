@@ -52,6 +52,29 @@ describe("remapHtmlSite", () => {
     expect(result.blobUrls).toHaveLength(0);
   });
 
+  it("keeps deferred catalog scripts external and in document order", async () => {
+    const result = await remapHtmlSite({
+      entryPath: "r_demo/catalog.html",
+      html: `<head><script defer src="./data.js"></script>
+        <script defer src="./catalog.js"></script></head><body><main id="cards"></main></body>`,
+      fetchAsset: async path => ({
+        bytes: new TextEncoder().encode(path.endsWith("data.js")
+          ? "globalThis.games = ['Harbor'];"
+          : "document.querySelector('#cards').textContent = games[0];"),
+        mediaType: "text/javascript",
+      }),
+    });
+
+    const scripts = Array.from(new DOMParser().parseFromString(result.html, "text/html")
+      .querySelectorAll<HTMLScriptElement>("script[defer]"));
+    expect(scripts).toHaveLength(2);
+    expect(scripts.every(script => !script.textContent && script.src.startsWith("data:text/javascript;"))).toBe(true);
+    expect(scripts.map(script => atob(script.src.slice(script.src.indexOf(",") + 1)))).toEqual([
+      "globalThis.games = ['Harbor'];",
+      "document.querySelector('#cards').textContent = games[0];",
+    ]);
+  });
+
   it("resolves placeholders back onto the entry root and confines traversal", () => {
     expect(
       resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/@root/mark.svg"),

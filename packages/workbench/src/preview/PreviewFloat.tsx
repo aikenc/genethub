@@ -29,7 +29,7 @@ import {
 } from "./popout";
 import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
 import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
-import { assetPreviewUrl } from "./url";
+import { assetPreviewUrl, isAbsoluteFilePath } from "./url";
 import { ServicePreviewClient } from "./serviceClient";
 import { canOpenIndependentPreview, cancelIndependentPreviewTab, openIndependentPreviewTab, reserveIndependentPreviewTab, supportsIndependentPreview } from "./independentPreviewTab";
 
@@ -85,7 +85,8 @@ export function PreviewFloat({
     const probe = async () => {
       // Keep the established service/stream discovery UI when this file
       // has an active registration.
-      const service = await ServicePreviewClient.discover(client, source.workspaceHandle, source.path);
+      const workspace = isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle;
+      const service = await ServicePreviewClient.discover(client, workspace, source.path);
       if (service) {
         service.close();
         if (active) {
@@ -95,7 +96,7 @@ export function PreviewFloat({
         return;
       }
       if (!active) return;
-      if (tab && openIndependentPreviewTab(tab, source)) {
+      if (tab && openIndependentPreviewTab(tab, source, true)) {
         onClose();
         return;
       }
@@ -272,7 +273,7 @@ export function PreviewFloat({
     </p> : null}
     {offerIndependent ? <button type="button" className="px-2 py-1 text-xs text-accent underline" onClick={() => {
       const tab = reserveIndependentPreviewTab();
-      if (tab && openIndependentPreviewTab(tab, source)) onClose();
+      if (tab && openIndependentPreviewTab(tab, source, true)) onClose();
     }}>在新标签页打开独立预览</button> : null}
     <AssetPreviewPage
       source={source}
