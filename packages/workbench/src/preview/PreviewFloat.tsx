@@ -64,15 +64,17 @@ export function PreviewFloat({
     });
     return () => { controller.abort(); lease?.release(); };
   }, [connections, sameSource, source.deviceHandle]);
-  // An isolated document must be the top-level main-domain page for
-  // threaded WASM. Enable this navigation in the configured Dev pilot.
-  const prefersIndependent = import.meta.env.VITE_GENEHUB_DEV_NAME === "dev-preview"
-    && location.protocol === "https:"
+  // Threaded WASM needs a top-level isolated preview on every web channel.
+  const canOpenIndependent = location.protocol === "https:"
     && /\.html?$/i.test(source.path)
     && !new URLSearchParams(location.search).has("previewCompatibility")
     && !source.docQuery && !source.docFragment
-    && (!source.siteEntryPath || source.siteEntryPath === source.path)
-    && !!client?.identity?.features?.includes("asset.preview.independent.storage.v1");
+    && (!source.siteEntryPath || source.siteEntryPath === source.path);
+  const features = client?.identity?.features;
+  const independentCapable = features?.includes("asset.preview.independent.storage.v1")
+    && features.includes("asset.preview.independent.review.v1");
+  const prefersIndependent = canOpenIndependent && independentCapable;
+  const showCompatibilityNotice = canOpenIndependent && Array.isArray(features) && !independentCapable;
   const [stayEmbedded, setStayEmbedded] = useState(false);
   useEffect(() => {
     setStayEmbedded(false);
@@ -259,6 +261,9 @@ export function PreviewFloat({
       浏览器阻止了新窗口。 <a className="underline" href={popupBlocked} target="_blank" rel="noopener">打开预览链接</a>
     </p> : null}
     {connectionError ? <p role="alert" className="px-2 py-1 text-xs text-danger">{connectionError}</p> : null}
+    {showCompatibilityNotice ? <p role="status" className="px-2 py-1 text-xs text-muted">
+      此设备未启用独立预览，已使用兼容预览；Worker / 共享内存 / WASM 多线程不可用。
+    </p> : null}
     <AssetPreviewPage
       source={source}
       host={host}
