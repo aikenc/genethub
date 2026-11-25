@@ -235,12 +235,6 @@ export function AssetPreviewPage({
           const reply = await active.call({type: "workspace.list"}).catch(() => null);
           if (!cancelled && reply?.type === "workspaces") setFolders(reply.data.find(w => w.id === source.workspaceHandle)?.folders ?? []);
         }
-        if (active.identity?.features?.includes("preview.feedback.v1")) {
-          // Feedback metadata is optional. A workspace-scoped peer can read
-          // the file without access to the machine-wide feedback namespace.
-          const info = await previewFeedback(active, isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle, { kind: "source", path: source.path }).catch(() => null);
-          if (!cancelled && info?.kind === "source") setSourceInfo(info.data);
-        }
         if (cancelled) {
           owned?.close(); borrowed?.release();
           return;
@@ -338,14 +332,16 @@ export function AssetPreviewPage({
   const annotatable = currentKind === "markdown" || currentKind === "html" || currentKind === "image"
     || (currentKind === "video" && !!feedbackClient?.identity?.features?.includes("preview.feedback.media-time.v1"));
   const feedback = useFileFeedback(feedbackClient, isAbsoluteFilePath(feedbackSource?.path ?? source.path) ? "" : source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
+  const feedbackPath = feedbackSource?.path ?? source.path;
   useEffect(() => {
-    if (!feedbackClient || !fileFeedbackEnabled || !feedbackSource || feedbackSource.path === source.path) return;
+    if (!feedbackClient || !fileFeedbackAvailable) return;
+    // Metadata is optional and can arrive after the document begins to render.
     let cancelled = false;
-    void previewFeedback(feedbackClient, isAbsoluteFilePath(feedbackSource.path) ? "" : source.workspaceHandle, {kind: "source", path: feedbackSource.path}).then(reply => {
+    void previewFeedback(feedbackClient, isAbsoluteFilePath(feedbackPath) ? "" : source.workspaceHandle, {kind: "source", path: feedbackPath}).then(reply => {
       if (!cancelled && reply.kind === "source") setSourceInfo(reply.data);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [feedbackClient, fileFeedbackEnabled, feedbackSource?.path, source.workspaceHandle, source.path]);
+  }, [feedbackClient, fileFeedbackAvailable, feedbackPath, source.workspaceHandle]);
   const submitFileArtifact = useCallback<RuntimeArtifactSubmit>(async (artifact, onProgress) => {
     const bundle = await feedback.upload(artifact, ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes));
     return { relativePath: bundle.relativePath, addedToDraft: false, feedbackSaved: true };

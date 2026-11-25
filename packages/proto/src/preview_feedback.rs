@@ -66,6 +66,9 @@ pub enum PreviewFeedbackOperation {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        document_suffix: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         service_run_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]

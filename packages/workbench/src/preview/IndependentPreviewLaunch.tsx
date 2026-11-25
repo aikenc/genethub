@@ -8,6 +8,8 @@ import { assetPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "
 import { INDEPENDENT_REVIEW_FEATURE, INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
 import { IndependentPreviewReview } from "./IndependentPreviewReview";
 import { preservePreviewReturn, PreviewReturn } from "./independentPreviewTab";
+import { PreviewShell } from "./PreviewToolbar";
+import { PreviewTimeline, previewStageLabel, usePreviewTimeline } from "./PreviewTimeline";
 import { htmlServiceMedia, ServicePreviewClient } from "./serviceClient";
 
 const feature = "asset.preview.independent.v1";
@@ -60,12 +62,17 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
   review?: boolean;
   feedbackScope?: string;
 }) {
+  const { previewId, events, mark } = usePreviewTimeline();
   const [grant, setGrant] = useState<StaticPreviewGrant>();
   const [reviewClient, setReviewClient] = useState<Client>();
   const [reviewService, setReviewService] = useState<ServicePreviewClient>();
   const [problem, setProblem] = useState("");
   const form = useRef<HTMLFormElement>(null);
-  const { deviceHandle, path, workspaceHandle } = source;
+  const { deviceHandle, path, workspaceHandle, docQuery, docFragment } = source;
+  const documentUrl = new URL("/", location.origin);
+  documentUrl.search = docQuery ?? "";
+  documentUrl.hash = docFragment ?? "";
+  const documentSuffix = documentUrl.search + documentUrl.hash;
   const serviceWorkspace = isAbsoluteFilePath(path) ? "" : workspaceHandle;
   const compatibility = assetPreviewUrl(deviceHandle, workspaceHandle, path, undefined, undefined, source);
   useEffect(() => {
@@ -80,6 +87,7 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
       if (review && !globalThis.crossOriginIsolated) {
         throw new Error("当前浏览器或入口未启用独立评审所需的跨源隔离");
       }
+      mark("connecting");
       const currentHost = host ?? browserHost();
       if (!client) {
         const endpoint = await endpointForDevice(currentHost, deviceHandle);
@@ -89,6 +97,7 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
       }
       const connection = client ?? owned!;
       await waitForIdentity(connection, signal);
+      mark("connected");
       if (connection.identity?.machineId !== deviceHandle) {
         throw new Error("链接指向的设备与当前连接不一致");
       }
@@ -102,6 +111,7 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
       if (feedbackScope === "owner" && !staticOnly && connection.identity.features?.includes(INDEPENDENT_SERVICE_FEATURE)) {
         // The device independently authorizes discovery and the scoped run
         // binding. Static pages also open when the registered process is offline.
+        mark("discovering-service");
         enabledService = await ServicePreviewClient.discover(connection, serviceWorkspace, path).catch(() => null);
         signal.throwIfAborted();
       }
@@ -125,12 +135,14 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
         return;
       }
       const serviceRunId = descriptor?.runId;
+      mark("requesting-grant");
       const reply = await connection.call({
         type: "preview.feedback",
         payload: {
           workspaceId: serviceWorkspace,
           operation: {
             kind: "openStatic", path,
+            ...(documentSuffix ? { documentSuffix } : {}),
             ...(serviceRunId ? { serviceRunId } : {}),
             ...(player ? { playerAllowTurn: true } : {}),
             ...(review ? { review } : {}),
@@ -148,10 +160,14 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
           setReviewClient(connection);
           setReviewService(enabledService ?? undefined);
         }
+        mark("grant-received");
         setGrant(validated);
       }
     })().catch(error => {
-      if (active) setProblem(error instanceof Error ? error.message : "无法打开独立预览");
+      if (active) {
+        mark("failed");
+        setProblem(error instanceof Error ? error.message : "无法打开独立预览");
+      }
     }).finally(() => {
       clearTimeout(deadline);
       if (!retainClient) {
@@ -166,7 +182,7 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
       enabledService?.close();
       owned?.close();
     };
-  }, [client, compatibility, deviceHandle, feedbackScope, host, path, review, serviceWorkspace, staticOnly]);
+  }, [client, compatibility, deviceHandle, documentSuffix, feedbackScope, host, mark, path, review, serviceWorkspace, staticOnly]);
 
   useEffect(() => { if (grant && !review) form.current?.submit(); }, [grant, review]);
   if (grant && review && reviewClient) {
@@ -174,6 +190,7 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
     const stopUrl = player ? new URL(window.location.href) : undefined;
     stopUrl?.searchParams.set("service", "0");
     return <IndependentPreviewReview key={grant.action} client={reviewClient} source={source} grant={grant}
+      previewId={previewId} timeline={events} markStage={mark}
       feedbackScope={feedbackScope} serviceName={reviewService?.descriptor.name} stopPlayerUrl={stopUrl?.href}
       media={reviewService?.descriptor.media && !player ? reviewService : undefined} />;
   }
@@ -183,15 +200,17 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
   return (
     <main className="flex h-dvh flex-col bg-bg text-fg">
       <meta name="referrer" content="strict-origin" />
-      <div className="px-1 pt-1"><PreviewReturn owner={feedbackScope === "owner"} /></div>
-      <div className="m-auto max-w-sm p-6 text-center text-sm">
-        <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>
-        {problem ? <a className="mt-3 inline-block text-accent underline"
-          href={fallbackUrl.href}>使用兼容预览打开</a> : null}
-        {grant ? <form ref={form} method="post" action={grant.action}>
-          <input type="hidden" name="code" value={grant.code} />
-        </form> : null}
-      </div>
+      <PreviewShell showFeedback={false} navigation={<PreviewReturn owner={feedbackScope === "owner"} />}
+        information={<PreviewTimeline previewId={previewId} events={events} />}>
+        <div className="m-auto max-w-sm p-6 text-center text-sm">
+          <p role={problem ? "alert" : "status"}>{problem || previewStageLabel(events.at(-1))}</p>
+          {problem ? <a className="mt-3 inline-block text-accent underline"
+            href={fallbackUrl.href}>使用兼容预览打开</a> : null}
+          {grant ? <form ref={form} method="post" action={grant.action}>
+            <input type="hidden" name="code" value={grant.code} />
+          </form> : null}
+        </div>
+      </PreviewShell>
     </main>
   );
 }

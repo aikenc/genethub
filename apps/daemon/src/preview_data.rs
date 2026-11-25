@@ -145,6 +145,7 @@ enum Control {
         workspace: PathBuf,
         root: String,
         entry: String,
+        document_suffix: Option<String>,
         workbench_origin: String,
         bootstrap_digest: String,
         scope: Scope,
@@ -452,6 +453,7 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             workspace,
             root,
             entry,
+            document_suffix,
             workbench_origin,
             bootstrap_digest,
             scope,
@@ -526,7 +528,7 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             };
             let bootstrap_digest =
                 decode_digest(&bootstrap_digest).context("invalid bootstrap digest")?;
-            let location = entry_location(&entry)?;
+            let location = entry_location(&entry, document_suffix.as_deref())?;
             let root = local_path(&root, true).context("invalid preview root")?;
             let entry = local_path(&entry, false).context("invalid preview entry")?;
             let scope = FileScope::from_command(scope, &entry)?;
@@ -613,7 +615,7 @@ fn decode_digest(value: &str) -> Option<[u8; 32]> {
     Some(decoded)
 }
 
-fn entry_location(entry: &str) -> Result<HeaderValue> {
+fn entry_location(entry: &str, document_suffix: Option<&str>) -> Result<HeaderValue> {
     let mut location = String::new();
     for segment in entry.split('/') {
         location.push('/');
@@ -621,6 +623,15 @@ fn entry_location(entry: &str) -> Result<HeaderValue> {
             segment,
             percent_encoding::NON_ALPHANUMERIC,
         ));
+    }
+    if let Some(suffix) = document_suffix {
+        if !suffix.starts_with(['?', '#'])
+            || suffix.len() > 4096
+            || !suffix.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            bail!("invalid preview document query or fragment");
+        }
+        location.push_str(suffix);
     }
     Ok(HeaderValue::from_str(&location)?)
 }
@@ -1171,11 +1182,21 @@ mod tests {
 
     #[test]
     fn encoded_redirect_keeps_the_entry_directory() {
-        let location = entry_location("站点/A B.html").unwrap();
+        let location = entry_location("站点/A B.html", None).unwrap();
         assert_eq!(location, "/%E7%AB%99%E7%82%B9/A%20B%2Ehtml");
         assert_eq!(
             request_path(location.to_str().unwrap(), Path::new("unused")).unwrap(),
             Path::new("站点/A B.html"),
         );
+    }
+
+    #[test]
+    fn bootstrap_redirect_preserves_the_document_query_and_anchor() {
+        let location =
+            entry_location("site/play.html", Some("?game=harbor&players=2#lobby")).unwrap();
+        assert_eq!(location, "/site/play%2Ehtml?game=harbor&players=2#lobby");
+        assert!(entry_location("site/play.html", Some("#lobby")).is_ok());
+        assert!(entry_location("site/play.html", Some("//other.example/")).is_err());
+        assert!(entry_location("site/play.html", Some("?map=one\r\nInjected: true")).is_err());
     }
 }

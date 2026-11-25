@@ -35,13 +35,14 @@ export function PreviewShareAction() {
 }
 
 export function PreviewShell({
-  bindTools, navigation, information, children, readOnly = false,
+  bindTools, navigation, information, children, readOnly = false, showFeedback = true,
 }: {
-  bindTools: (element: HTMLDivElement | null) => void;
+  bindTools?: (element: HTMLDivElement | null) => void;
   navigation?: ReactNode;
   information: ReactNode;
   children: ReactNode;
   readOnly?: boolean;
+  showFeedback?: boolean;
 }) {
   const [surface, setSurface] = useState<"info" | "feedback" | null>(null);
   const [tab, setTab] = useState<"feedback" | "logs">("feedback");
@@ -65,8 +66,8 @@ export function PreviewShell({
         aria-controls={id + "-info"} onClick={() => toggle("info")}><Info size={16} /></button>
       <div data-preview-slot="controls" className="flex min-w-0 flex-1 items-center gap-1" />
       <div data-preview-slot="selection" className="peer empty:hidden" />
-      <button type="button" className={`${previewTextButton} peer-[:not(:empty)]:hidden`} aria-expanded={surface === "feedback"} aria-controls={id + "-feedback"}
-        onClick={() => toggle("feedback")}>{readOnly ? "日志" : "反馈"}</button>
+      {showFeedback ? <button type="button" className={`${previewTextButton} peer-[:not(:empty)]:hidden`} aria-expanded={surface === "feedback"} aria-controls={id + "-feedback"}
+        onClick={() => toggle("feedback")}>{readOnly ? "日志" : "反馈"}</button> : null}
       <div data-preview-slot="capture" className="flex shrink-0 items-center" />
       <div data-preview-slot="share" className="flex shrink-0 items-center" />
     </header>

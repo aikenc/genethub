@@ -648,6 +648,7 @@ async fn static_files(
 
 struct OpenStaticOptions<'a> {
     service_run_id: Option<&'a str>,
+    document_suffix: Option<&'a str>,
     player_allow_turn: Option<bool>,
     review: bool,
 }
@@ -662,6 +663,7 @@ async fn open_static(
 ) -> Result<genehub_proto::StaticPreviewGrant> {
     let OpenStaticOptions {
         service_run_id,
+        document_suffix,
         player_allow_turn,
         review,
     } = options;
@@ -700,6 +702,7 @@ async fn open_static(
                     share: Some((id, share.expires_at_ms, files)),
                     peer,
                     service: None,
+                    document_suffix,
                     review,
                 },
             )
@@ -734,6 +737,7 @@ async fn open_static(
                 share: None,
                 peer,
                 service,
+                document_suffix,
                 review,
             },
         )
@@ -799,6 +803,7 @@ pub(crate) async fn handle(
         }
         Op::OpenStatic {
             path,
+            document_suffix,
             service_run_id,
             player_allow_turn,
             review,
@@ -809,6 +814,7 @@ pub(crate) async fn handle(
             let path = path.clone();
             let peer = peer.cloned();
             let service_run_id = service_run_id.clone();
+            let document_suffix = document_suffix.clone();
             let review = review.unwrap_or(false);
             let player_allow_turn = *player_allow_turn;
             // Keep the worker request/reply paired if the launching browser
@@ -822,6 +828,7 @@ pub(crate) async fn handle(
                     peer,
                     OpenStaticOptions {
                         service_run_id: service_run_id.as_deref(),
+                        document_suffix: document_suffix.as_deref(),
                         player_allow_turn,
                         review,
                     },

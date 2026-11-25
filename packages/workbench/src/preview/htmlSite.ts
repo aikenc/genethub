@@ -200,7 +200,15 @@ export async function remapHtmlSite(options: {
         if (name.name === "src") continue;
         script.setAttribute(name.name, name.value);
       }
-      script.textContent = await rewriteJs(target, asset.text);
+      const text = await rewriteJs(target, asset.text);
+      const type = node.getAttribute("type")?.trim().toLowerCase();
+      if ((!type || type === "text/javascript" || type === "application/javascript")
+        && node.hasAttribute("defer") && !node.hasAttribute("async")) {
+        // Inline classic scripts execute during parsing even with a defer attribute.
+        script.src = toDataUrl(new TextEncoder().encode(text), "text/javascript;charset=utf-8");
+      } else {
+        script.textContent = text;
+      }
       node.replaceWith(script);
     }),
   );
