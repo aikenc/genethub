@@ -67,7 +67,8 @@ const BOOTSTRAP_PATH: &str = "/.well-known/genehub/preview-bootstrap";
 const COOKIE_NAME: &str = "__Host-genehub-preview";
 const FORM_PREFIX: &[u8] = b"code=";
 const SECRET_BYTES: usize = 64;
-const FRAME_POLICY: HeaderValue = HeaderValue::from_static("frame-ancestors 'none'");
+const FRAME_POLICY: HeaderValue =
+    HeaderValue::from_static("frame-ancestors 'self'; frame-src 'self'");
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
 type Views = Arc<RwLock<HashMap<String, Arc<View>>>>;
@@ -517,7 +518,7 @@ async fn apply(command: Control, views: &Views, suffix: &str) -> Result<()> {
             let workbench_origin = HeaderValue::from_str(workbench_origin.trim_end_matches('/'))?;
             let frame_policy = if review {
                 HeaderValue::from_str(&format!(
-                    "frame-ancestors {}; frame-src 'none'",
+                    "frame-ancestors 'self' {}; frame-src 'self'",
                     workbench_origin.to_str()?
                 ))?
             } else {
