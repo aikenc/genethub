@@ -7,6 +7,7 @@ import { connectPreview, endpointForDevice } from "./AssetPreviewPage";
 import { assetPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { INDEPENDENT_REVIEW_FEATURE, INDEPENDENT_SERVICE_FEATURE } from "./IndependentPreviewMenu";
 import { IndependentPreviewReview } from "./IndependentPreviewReview";
+import { preservePreviewReturn, PreviewReturn } from "./independentPreviewTab";
 import { htmlServiceMedia, ServicePreviewClient } from "./serviceClient";
 
 const feature = "asset.preview.independent.v1";
@@ -111,7 +112,9 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
       // sandbox bridge. Trusted audio/video needs the shell around the iframe.
       if (descriptor && (htmlMedia?.protocol === "remote-desktop/1"
         || (descriptor.dataPolicy === "direct-only" && (player || !descriptor.media)))) {
-        window.location.replace(compatibility);
+        const url = new URL(compatibility);
+        if (feedbackScope === "owner") preservePreviewReturn(url);
+        window.location.replace(url.href);
         return;
       }
       if (!review && descriptor?.media && !player
@@ -176,17 +179,19 @@ export function IndependentPreviewLaunch({ source, client, host, staticOnly = fa
   }
   const fallbackUrl = new URL(compatibility);
   if (feedbackScope !== "owner") fallbackUrl.hash = location.hash;
+  else preservePreviewReturn(fallbackUrl);
   return (
-    <main className="m-auto max-w-sm p-6 text-center text-sm">
+    <main className="flex h-dvh flex-col bg-bg text-fg">
       <meta name="referrer" content="strict-origin" />
-      <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>
-      {problem ? <a className="mt-3 inline-block text-accent underline"
-        href={fallbackUrl.href}>使用兼容预览打开</a> : null}
-      {grant ? (
-        <form ref={form} method="post" action={grant.action}>
+      <div className="px-1 pt-1"><PreviewReturn owner={feedbackScope === "owner"} /></div>
+      <div className="m-auto max-w-sm p-6 text-center text-sm">
+        <p role={problem ? "alert" : "status"}>{problem || "正在打开独立预览…"}</p>
+        {problem ? <a className="mt-3 inline-block text-accent underline"
+          href={fallbackUrl.href}>使用兼容预览打开</a> : null}
+        {grant ? <form ref={form} method="post" action={grant.action}>
           <input type="hidden" name="code" value={grant.code} />
-        </form>
-      ) : null}
+        </form> : null}
+      </div>
     </main>
   );
 }

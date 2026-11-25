@@ -54,10 +54,11 @@ import type { Client, ConnectionState } from "../protocol/client";
 import { readActivitySessions } from "../protocol/session-pages";
 import { acceptSessionSummary, acceptWorkspaceRemoval, observeCatalogSource, readCatalogSource } from "../protocol/summary-directory";
 import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
+import { canOpenIndependentPreview, cancelIndependentPreviewTab, reserveIndependentPreviewTab, supportsIndependentPreview } from "../preview/independentPreviewTab";
 import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
 import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
-import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
+import { AssetPreviewError_, ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { hasCurrentWork } from "./attention";
 import { resolveFileMime, stagedFileName } from "./attachments";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -123,11 +124,15 @@ export type PreviewFloatTarget = {
   sessionId: string | null;
   /** Whole-page expanded (default) or the free-position float. */
   initialMode?: "expanded" | "float";
+  independentTab?: Window;
 };
 
-export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
+export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId" | "independentTab"> & {
   sessionId?: string | null;
+  fallbackPath?: string;
 };
+
+let pendingPreviewPath: AbortController | undefined;
 
 /**
  * A conversation that has been opened but not started.
@@ -1887,8 +1892,10 @@ return create<WorkbenchState>((set, get) => ({
     set({ rightPanel: panel });
   },
 
-  openPreviewFloat(target) {
+  openPreviewFloat({fallbackPath, ...target}) {
+    pendingPreviewPath?.abort();
     const state = get();
+    cancelIndependentPreviewTab(state.previewFloat?.independentTab);
     const folders = state.workspaces.find(workspace => workspace.id === target.workspaceHandle)?.folders ?? [];
     const machineFiles = state.client?.identity?.machineId === target.deviceHandle
       && state.client.identity.features?.includes("asset.preview.machine-file.v1");
@@ -1896,18 +1903,39 @@ return create<WorkbenchState>((set, get) => ({
     const resolve = (path: string) => machineFiles
       && (isAbsoluteFilePath(path) || folders.some(folder => path.startsWith(`${folder.rootHandle}/`)))
       ? resolveWorkspacePath(path, {...target, folders, machineFiles: true}) ?? path : path;
-    set({
-      previewFloat: {
-        ...target,
-        path: resolve(target.path),
-        ...(target.siteEntryPath ? {siteEntryPath: resolve(target.siteEntryPath)} : {}),
-        sessionId:
-          target.sessionId === undefined ? get().activeSessionId : target.sessionId,
-      },
+    const preview = {
+      ...target,
+      path: resolve(target.path),
+      ...(target.siteEntryPath ? {siteEntryPath: resolve(target.siteEntryPath)} : {}),
+      sessionId: target.sessionId === undefined ? state.activeSessionId : target.sessionId,
+    };
+    const client = state.client;
+    const tab = client?.identity?.machineId === target.deviceHandle
+      && supportsIndependentPreview(client.identity.features) && canOpenIndependentPreview(preview)
+      ? reserveIndependentPreviewTab() : null;
+    const opening = tab ? {...preview, independentTab: tab} : preview;
+    if (!fallbackPath || !client || !machineFiles) {
+      set({previewFloat: opening});
+      return;
+    }
+    const pending = new AbortController();
+    pendingPreviewPath = pending;
+    pending.signal.addEventListener("abort", () => cancelIndependentPreviewTab(tab), {once: true});
+    void client.preview(target.workspaceHandle, preview.path, "original", pending.signal).then(
+      () => preview.path,
+      error => error instanceof AssetPreviewError_ && error.detail === "notFound"
+        ? fallbackPath : preview.path,
+    ).then(path => {
+      if (!pending.signal.aborted && get().client === client) set({previewFloat: {...opening, path}});
+      else cancelIndependentPreviewTab(tab);
+    }).finally(() => {
+      if (pendingPreviewPath === pending) pendingPreviewPath = undefined;
     });
   },
 
   closePreviewFloat() {
+    pendingPreviewPath?.abort();
+    cancelIndependentPreviewTab(get().previewFloat?.independentTab);
     set({ previewFloat: null });
   },
 

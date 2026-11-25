@@ -478,6 +478,7 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
         deviceHandle: resolved.deviceHandle ?? artifact.deviceHandle,
         workspaceHandle: resolved.workspaceHandle ?? artifact.workspaceHandle,
         path: resolved.path,
+        ...(resolved.fallbackPath ? {fallbackPath: resolved.fallbackPath} : {}),
         docQuery: resolved.docQuery,
         docFragment: resolved.docFragment,
         sessionId: foreign ? null : artifact.sessionId ?? null,

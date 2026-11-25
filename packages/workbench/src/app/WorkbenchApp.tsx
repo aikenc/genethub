@@ -1349,7 +1349,7 @@ export function App({
         <PreviewFloat
           source={workbench.previewFloat}
           host={host}
-          onClose={() => workbench.closePreviewFloat()}
+          onClose={workbench.closePreviewFloat}
         />
       ) : null}
     </div>

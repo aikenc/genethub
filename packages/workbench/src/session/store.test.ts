@@ -2,7 +2,7 @@ import type { AgentInfo, AgentSelectionPreferences, Request, SequencedEvent, Ses
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
-import { ConnectionOutcomeUnknownError } from "../protocol/client";
+import { AssetPreviewError_, ConnectionOutcomeUnknownError } from "../protocol/client";
 import { setLandingIntent } from "../location/landing";
 import { resolveComposerPhase } from "./Composer";
 import { defaultAgent, useWorkbench } from "./store";
@@ -74,6 +74,29 @@ beforeEach(() => {
     sessionTimelines: {},
     subscribedSessionIds: [],
     tabLimit: 16,
+  });
+});
+
+describe("opening a relative chat preview", () => {
+  it.each([
+    ["notFound", 404, "/p/front/demos/index.html"],
+    ["forbidden", 403, "/p/demos/index.html"],
+  ] as const)("handles %s from the workspace-relative path", async (detail, status, path) => {
+    const preview = vi.fn().mockRejectedValue(new AssetPreviewError_(detail, status));
+    const client = {
+      identity: {machineId: "m_device", features: ["asset.preview.machine-file.v1"]},
+      preview,
+    } as unknown as Client;
+    useWorkbench.setState({client, previewFloat: null});
+    useWorkbench.getState().openPreviewFloat({
+      deviceHandle: "m_device",
+      workspaceHandle: "w1",
+      path: "/p/demos/index.html",
+      fallbackPath: "/p/front/demos/index.html",
+      docFragment: "#animation",
+    });
+    await vi.waitFor(() => expect(useWorkbench.getState().previewFloat).toMatchObject({path, docFragment: "#animation"}));
+    expect(preview).toHaveBeenCalledOnce();
   });
 });
 

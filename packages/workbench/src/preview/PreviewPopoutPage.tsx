@@ -9,6 +9,7 @@ import { readRtcEnabled } from "../settings/rtc";
 import { redeemPreviewShare, type PreviewShareCredential } from "./PreviewShareButton";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import { IndependentPreviewLaunch } from "./IndependentPreviewLaunch";
+import { PreviewReturn } from "./independentPreviewTab";
 import { PreviewProductFeedbackContext } from "./PreviewToolbar";
 import {
   createPreviewPopoutChannel,
@@ -192,6 +193,7 @@ export function PreviewPopoutPage({
         annotationWrite={sharedClient != null || !!shareCredential}
         shareAccess={!!shareCredential}
         feedbackAccessScope={shareCredential ? shareStorageScope(shareCredential.token) : "owner"}
+        navigation={<PreviewReturn owner={!shareCredential} />}
         onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}
         onRuntimeReady={effectiveContext ? reportReady : undefined}
       />

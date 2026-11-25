@@ -20,6 +20,13 @@ describe("resolveArtifactRef", () => {
     };
     expect(resolveArtifactRef("datas/releases/v1.0/index.html", team, "https://app.example"))
       .toMatchObject({kind: "preview", path: "/srv/product/datas/releases/v1.0/index.html"});
+    expect(resolveArtifactRef("demos/animation-f8a3229c/index.html", team, "https://app.example"))
+      .toMatchObject({
+        kind: "preview",
+        path: "/srv/product/demos/animation-f8a3229c/index.html",
+        fallbackPath: "/srv/product/front/demos/animation-f8a3229c/index.html",
+      });
+    expect(resolveArtifactRef("r_docs/guide.md", team)).not.toHaveProperty("fallbackPath");
     expect(resolveWorkspacePath("r_docs/guide.md", team)).toBe("/srv/docs/guide.md");
     expect(resolveWorkspacePath("../assets/logo.png", {
       ...team, documentPath: "/srv/product/datas/reports/qa/index.html",
