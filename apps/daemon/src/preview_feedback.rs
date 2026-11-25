@@ -1,7 +1,7 @@
 //! Project-owned file feedback and locally enforced preview share grants.
 use crate::{
     authz::Principal,
-    file_access::resolve_source,
+    file_access::{resolve_preview_source, resolve_source},
     session::{artifacts::ArtifactStorage, preview_review},
     state::Shared,
 };
@@ -211,8 +211,13 @@ fn save<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     )?;
     crate::config::save_private(path, &serde_json::to_vec_pretty(data)?)
 }
-pub async fn source(state: &Shared, workspace: &str, path: &str) -> Result<PreviewSourceInfo> {
-    let resolved = resolve_source(state, workspace, path).await?;
+async fn source(
+    state: &Shared,
+    workspace: &str,
+    path: &str,
+    caller: &Principal,
+) -> Result<PreviewSourceInfo> {
+    let resolved = resolve_preview_source(state, workspace, path, caller).await?;
     let relative = resolved.relative.to_string_lossy().replace('\\', "/");
     let file = crate::files::preview(&resolved.root, &relative).await?;
     let absolute = crate::file_access::display(&resolved.absolute);
@@ -610,7 +615,13 @@ async fn static_site(
     state: &Shared,
     workspace: &str,
     path: &str,
+    owner: Option<&Principal>,
 ) -> Result<crate::static_preview::Site> {
+    if let Some(caller) = owner.filter(|caller| caller.is_full() && workspace.is_empty()) {
+        return crate::static_preview::Site::resolve(
+            resolve_preview_source(state, workspace, path, caller).await?,
+        );
+    }
     let resolved = resolve_source(state, workspace, path).await?;
     crate::file_access::resolve(
         state,
@@ -657,7 +668,7 @@ async fn open_static(
     if !crate::static_preview::enabled() {
         bail!("此设备未启用独立预览");
     }
-    let site = static_site(state, workspace, path).await?;
+    let site = static_site(state, workspace, path, Some(caller)).await?;
     let enrollment = state
         .link
         .get()
@@ -776,7 +787,7 @@ pub(crate) async fn handle(
     match &request.operation {
         Op::Source { path } => {
             authorize_asset(state, caller, workspace, path).await?;
-            let mut info = source(state, workspace, path).await?;
+            let mut info = source(state, workspace, path, caller).await?;
             if let Some(share) = &share {
                 info.feedback_writable = Some(!share.view_only);
                 info.machine_name.clear();
@@ -824,7 +835,7 @@ pub(crate) async fn handle(
             if share.is_some() {
                 bail!("share permission does not include project feedback retrieval");
             }
-            let file = resolve_source(state, workspace, path).await?;
+            let file = resolve_preview_source(state, workspace, path, caller).await?;
             let absolute = crate::file_access::display(&file.absolute);
             let drafts = home(state, workspace).await?.join("drafts");
             let entries = match fs::read_dir(drafts) {
@@ -927,7 +938,7 @@ pub(crate) async fn handle(
     match request.operation {
         Op::Source { path } => {
             authorize_asset(state, caller, workspace, &path).await?;
-            Ok(Out::Source(source(state, workspace, &path).await?))
+            Ok(Out::Source(source(state, workspace, &path, caller).await?))
         }
         Op::Share {
             path,
@@ -948,7 +959,9 @@ pub(crate) async fn handle(
                 bail!("preview sharing supports 1h, 1d or 7d");
             }
             if !independent {
-                source(state, workspace, &path).await?;
+                let resolved = resolve_source(state, workspace, &path).await?;
+                let relative = resolved.relative.to_string_lossy().replace('\\', "/");
+                crate::files::preview(&resolved.root, &relative).await?;
             }
             let shares = home(state, workspace).await?.join("shares");
             prepare(&shares)?;
@@ -967,7 +980,7 @@ pub(crate) async fn handle(
                 if !crate::static_preview::enabled() || resources.len() > 512 {
                     bail!("独立预览未启用或资源超过 512 个");
                 }
-                let site = static_site(state, workspace, &path).await?;
+                let site = static_site(state, workspace, &path, None).await?;
                 let paths: BTreeSet<_> = resources.into_iter().chain([path.clone()]).collect();
                 // For large HTML, preserve the observed resource manifest
                 // without rescanning the entry on the single-thread guest.
@@ -1036,7 +1049,7 @@ pub(crate) async fn handle(
             if share.is_some() && visitor.is_none() {
                 bail!("refresh this preview to open a browser-bound draft");
             }
-            let src = source(state, workspace, &path).await?;
+            let src = source(state, workspace, &path, caller).await?;
             if src.version != version {
                 bail!("source changed; reopen the preview");
             }
@@ -1052,7 +1065,7 @@ pub(crate) async fn handle(
             let id = format!("pf_{}", uuid::Uuid::new_v4().simple());
             let dir = drafts.join(&id);
             prepare(&dir)?;
-            let resolved = resolve_source(state, workspace, &path).await?;
+            let resolved = resolve_preview_source(state, workspace, &path, caller).await?;
             let file =
                 crate::files::preview(&resolved.root, &resolved.relative.to_string_lossy()).await?;
             if usage(&root)?.saturating_add(file.metadata.source_bytes) > MAX_PROJECT_BYTES {

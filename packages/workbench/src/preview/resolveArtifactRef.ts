@@ -22,7 +22,7 @@ export type ArtifactResolveContext = {
 };
 
 export type ResolvedArtifactRef =
-  | { kind: "preview"; path: string; href: string; docQuery?: string; docFragment?: string; deviceHandle?: string; workspaceHandle?: string }
+  | { kind: "preview"; path: string; href: string; docQuery?: string; docFragment?: string; deviceHandle?: string; workspaceHandle?: string; fallbackPath?: string }
   | { kind: "external"; href: string }
   | { kind: "blocked" };
 
@@ -77,16 +77,26 @@ export function resolveArtifactRef(
   catch { return {kind: "blocked"}; }
   const filePath = resolveWorkspacePath(decodedPath, context);
   if (!filePath) return { kind: "blocked" };
+  const fallbackPath = chatPathFallback(decodedPath, context, filePath);
   try {
     return {
       kind: "preview",
       path: filePath,
       href: documentLocatorUrl(assetPreviewUrl(context.deviceHandle, context.workspaceHandle, filePath, origin), docQuery, docFragment),
+      ...(fallbackPath ? {fallbackPath} : {}),
       ...(docQuery ? {docQuery} : {}), ...(docFragment ? {docFragment} : {}),
     };
   } catch {
     return { kind: "blocked" };
   }
+}
+
+/** Keep established workspace-relative links and retry a missing chat link from the Agent cwd. */
+function chatPathFallback(value: string, context: ArtifactResolveContext, primary: string): string | undefined {
+  if (!context.machineFiles || !context.cwd || context.documentPath) return;
+  const cwd = resolveWorkspacePath(value, {...context, folders: []});
+  const explicitRoot = context.folders.some(folder => value.startsWith(folder.rootHandle + "/"));
+  if (cwd && cwd !== primary && !explicitRoot) return cwd;
 }
 
 function rebindPreviewUrl(

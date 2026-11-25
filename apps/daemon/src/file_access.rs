@@ -1,4 +1,4 @@
-//! Machine-local file locators and the effective directory allowlist.
+//! Machine-local file locators and directory scopes for restricted access.
 //!
 //! The catalogue is a source of roots, never an identity embedded in a v3
 //! locator. A scoped peer and a share still intersect this machine policy.
@@ -250,12 +250,44 @@ pub(crate) async fn resolve_source(
     }
 }
 
+/// A full connection already has the daemon OS user's authority. Keep the
+/// registered root when one exists so existing locators retain their metadata.
+pub(crate) async fn resolve_preview_source(
+    state: &Shared,
+    workspace: &str,
+    path: &str,
+    caller: &crate::authz::Principal,
+) -> Result<ResolvedWorkspacePath> {
+    match resolve_source(state, workspace, path).await {
+        Ok(file) => Ok(file),
+        Err(_) if workspace.is_empty() && caller.is_full() => {
+            let absolute = absolute(path)?;
+            let root = absolute
+                .parent()
+                .ok_or_else(|| anyhow!("preview file has no parent"))?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| anyhow!("preview file has no name"))?;
+            Ok(ResolvedWorkspacePath {
+                root: root.to_owned(),
+                relative: PathBuf::from(name),
+                absolute,
+                root_handle: String::new(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn authorize(
     state: &Shared,
     access: &crate::dataplane::endpoint::PeerAccess,
     source: &WorkspaceFileSource,
 ) -> Result<AuthorizedFile> {
     let caller = crate::authz::Principal::of(state, access);
+    if !caller.permits_stream(crate::authz::StreamMethod::AssetPreview) {
+        bail!("file capability revoked");
+    }
     let scope = if matches!(caller, crate::authz::Principal::PreviewShare { .. }) {
         access.workspace_id.as_deref()
     } else {
@@ -284,7 +316,12 @@ pub async fn authorize(
             resolved
         }
         WorkspaceFileSource::MachineFile { absolute_path } => {
-            match resolve(state, absolute_path, scope).await {
+            let file = if caller.is_full() {
+                resolve_preview_source(state, "", absolute_path, &caller).await
+            } else {
+                resolve(state, absolute_path, scope).await
+            };
+            match file {
                 Ok(resolved) => {
                     let grant_path = scope
                         .map(|_| {
@@ -335,5 +372,49 @@ impl AuthorizedFile {
         }
         authorize(state, access, &self.source).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authz::Principal;
+
+    #[tokio::test]
+    async fn full_preview_can_read_an_unregistered_file_but_a_share_cannot_resolve_it() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let state = crate::AppState::build(crate::config::Paths::new(data.path()))
+            .await
+            .unwrap()
+            .0;
+        state.workspaces.open(workspace.path(), None).await.unwrap();
+        let entry = outside.path().join("index.html");
+        std::fs::write(&entry, "<!doctype html><title>Preview</title>").unwrap();
+        let path = display(&entry);
+        let full = Principal::Device {
+            id: "paired".into(),
+        };
+        let resolved = resolve_preview_source(&state, "", &path, &full)
+            .await
+            .unwrap();
+        assert_eq!(resolved.root, outside.path());
+        assert_eq!(resolved.relative, Path::new("index.html"));
+        crate::files::preview(&resolved.root, "index.html")
+            .await
+            .unwrap();
+        assert!(crate::static_preview::Site::resolve(resolved).is_ok());
+
+        let share = Principal::PreviewShare { id: "share".into() };
+        assert!(resolve_preview_source(&state, "", &path, &share)
+            .await
+            .is_err());
+        let revoked = Principal::RevokedDevice {
+            id: "paired".into(),
+        };
+        assert!(resolve_preview_source(&state, "", &path, &revoked)
+            .await
+            .is_err());
     }
 }

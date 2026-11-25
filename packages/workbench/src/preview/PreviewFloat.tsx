@@ -29,8 +29,9 @@ import {
 } from "./popout";
 import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
 import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
-import { assetPreviewUrl, independentPreviewUrl } from "./url";
+import { assetPreviewUrl } from "./url";
 import { ServicePreviewClient } from "./serviceClient";
+import { canOpenIndependentPreview, cancelIndependentPreviewTab, openIndependentPreviewTab, reserveIndependentPreviewTab, supportsIndependentPreview } from "./independentPreviewTab";
 
 export function PreviewFloat({
   source,
@@ -65,20 +66,21 @@ export function PreviewFloat({
     return () => { controller.abort(); lease?.release(); };
   }, [connections, sameSource, source.deviceHandle]);
   // Threaded WASM needs a top-level isolated preview on every web channel.
-  const canOpenIndependent = location.protocol === "https:"
-    && /\.html?$/i.test(source.path)
-    && !new URLSearchParams(location.search).has("previewCompatibility")
-    && !source.docQuery && !source.docFragment
-    && (!source.siteEntryPath || source.siteEntryPath === source.path);
+  const canOpenIndependent = canOpenIndependentPreview(source);
   const features = client?.identity?.features;
-  const independentCapable = features?.includes("asset.preview.independent.storage.v1")
-    && features.includes("asset.preview.independent.review.v1");
+  const independentCapable = supportsIndependentPreview(features);
   const prefersIndependent = canOpenIndependent && independentCapable;
   const showCompatibilityNotice = canOpenIndependent && Array.isArray(features) && !independentCapable;
   const [stayEmbedded, setStayEmbedded] = useState(false);
+  const [offerIndependent, setOfferIndependent] = useState(false);
   useEffect(() => {
     setStayEmbedded(false);
-    if (!prefersIndependent || !client) return;
+    setOfferIndependent(false);
+    const tab = source.independentTab;
+    if (!prefersIndependent || !client) {
+      cancelIndependentPreviewTab(tab);
+      return;
+    }
     let active = true;
     const probe = async () => {
       // Keep the established service/stream discovery UI when this file
@@ -86,23 +88,27 @@ export function PreviewFloat({
       const service = await ServicePreviewClient.discover(client, source.workspaceHandle, source.path);
       if (service) {
         service.close();
-        if (active) setStayEmbedded(true);
+        if (active) {
+          cancelIndependentPreviewTab(tab);
+          setStayEmbedded(true);
+        }
         return;
       }
       if (!active) return;
-      const url = new URL(independentPreviewUrl(source));
-      url.searchParams.set("review", "1");
-      const conversation = new URL(location.href);
-      conversation.searchParams.delete("preview");
-      url.searchParams.set("workbenchReturn", conversation.pathname + conversation.search);
-      // Workbench URL sync may already have pushed the file locator. Remove
-      // it from the back entry so browser Back returns to the conversation.
-      history.replaceState(history.state, "", conversation.href);
-      location.assign(url.href);
+      if (tab && openIndependentPreviewTab(tab, source)) {
+        onClose();
+        return;
+      }
+      setOfferIndependent(true);
+      setStayEmbedded(true);
     };
-    void probe().catch(() => { if (active) setStayEmbedded(true); });
+    void probe().catch(() => {
+      if (!active) return;
+      cancelIndependentPreviewTab(tab);
+      setStayEmbedded(true);
+    });
     return () => { active = false; };
-  }, [client, prefersIndependent, source]);
+  }, [client, onClose, prefersIndependent, source]);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const [popupBlocked, setPopupBlocked] = useState<string>();
@@ -247,7 +253,7 @@ export function PreviewFloat({
                 {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
               </button>;
 
-  if (prefersIndependent && !stayEmbedded) return <div role="status" className="safe-area-page fixed inset-0 z-40 flex items-center justify-center bg-bg p-6 text-fg">
+  if (prefersIndependent && source.independentTab && !stayEmbedded) return <div role="status" className="safe-area-page fixed inset-0 z-40 flex items-center justify-center bg-bg p-6 text-fg">
     <div className="space-y-2 text-center text-sm">
       <p>正在打开独立预览…</p>
       <button type="button" className="underline" onClick={onClose}>返回对话</button>
@@ -264,6 +270,10 @@ export function PreviewFloat({
     {showCompatibilityNotice ? <p role="status" className="px-2 py-1 text-xs text-muted">
       此设备未启用独立预览，已使用兼容预览；Worker / 共享内存 / WASM 多线程不可用。
     </p> : null}
+    {offerIndependent ? <button type="button" className="px-2 py-1 text-xs text-accent underline" onClick={() => {
+      const tab = reserveIndependentPreviewTab();
+      if (tab && openIndependentPreviewTab(tab, source)) onClose();
+    }}>在新标签页打开独立预览</button> : null}
     <AssetPreviewPage
       source={source}
       host={host}

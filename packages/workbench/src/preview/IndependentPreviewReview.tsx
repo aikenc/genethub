@@ -1,6 +1,6 @@
-import { assetPreviewUrl, previewBasePath } from "./url";
+import { assetPreviewUrl } from "./url";
 import { clearPreviewStore, loadPreviewStore, mergePreviewStoreSnapshot, previewStorageNamespace, readPreviewStoreSnapshot } from "./storage";
-import { CornerUpLeft } from "lucide-react";
+import { preservePreviewReturn, PreviewReturn } from "./independentPreviewTab";
 import { PreviewReceivedFeedback } from "./PreviewReceivedFeedback";
 import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,7 +15,7 @@ import {
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
-import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, previewIconButton, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext, PreviewShareAction, PreviewShell, PreviewToolbarContext, PreviewToolbarPortal, PreviewNavigation } from "./PreviewToolbar";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import { formatPreviewMediaPath } from "./ServiceStatusMenu";
 import type { ServicePreviewClient } from "./serviceClient";
@@ -349,19 +349,16 @@ export function IndependentPreviewReview({ client, source, grant, feedbackScope,
     return { relativePath: bundle.relativePath, addedToDraft: false, feedbackSaved: true };
   }, [feedback.upload]);
 
-  const returnUrl = new URLSearchParams(window.location.search).get("workbenchReturn");
-  const base = previewBasePath().replace(/\/$/, "");
-  const mayReturn = feedbackScope === "owner" && returnUrl?.startsWith(base + "/")
-    && !returnUrl.startsWith("//") && !returnUrl.includes("\\");
   const legacyUrl = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, undefined, undefined, source));
   if (feedbackScope !== "owner") legacyUrl.hash = window.location.hash;
+  else preservePreviewReturn(legacyUrl);
   return (
     <PreviewToolbarContext.Provider value={toolbar}>
       <PreviewFileFeedbackOpenContext.Provider value={openFeedback}>
         <main className="flex h-dvh flex-col overflow-hidden bg-bg text-fg">
           <PreviewShareOpenContext.Provider value={openShare}>
           <PreviewShell bindTools={setToolbar}
-            navigation={mayReturn ? <a className={previewIconButton} href={returnUrl ?? undefined} aria-label="返回对话" title="返回对话"><CornerUpLeft size={16} /></a> : null} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
+            navigation={<PreviewReturn owner={feedbackScope === "owner"} />} readOnly={info?.feedbackWritable === false} information={<dl className="space-y-2">
             <div><dt className="text-muted">页面</dt><dd className="break-words">{documentTitle}</dd></div>
             <div><dt className="text-muted">页面地址</dt><dd className="break-all font-mono">{route}</dd></div>
             {feedbackScope === "owner" && info ? <div><dt className="text-muted">源文件</dt><dd className="break-all">{info.displayPath}</dd></div> : null}
